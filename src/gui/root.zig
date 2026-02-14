@@ -199,6 +199,7 @@ const App = struct {
             }
 
             zapp.sdl_app.collectWindowInput(self.allocator, self.window, queue);
+            ui_input_router.setExternalQueue(queue); // Restore queue after collectWindowInput clears it
             try self.processInputEvents(queue);
             try self.pollWebSocket();
 
