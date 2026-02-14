@@ -77,6 +77,7 @@ const App = struct {
     status_text: []u8,
 
     theme: *const zui.Theme,
+    ui_scale: f32 = 1.0,
 
     running: bool = true,
 
@@ -192,6 +193,7 @@ const App = struct {
             // Get DPI scale and apply to theme
             const dpi_scale_raw: f32 = c.SDL_GetWindowDisplayScale(self.window);
             const dpi_scale: f32 = if (dpi_scale_raw > 0.0) dpi_scale_raw else 1.0;
+            self.ui_scale = dpi_scale;
             zui.ui.theme.applyTypography(dpi_scale);
 
             const queue = ui_input_router.beginFrame(self.allocator);
@@ -362,7 +364,7 @@ const App = struct {
     
     fn drawTabsPanel(self: *App, tabs: *const dock_graph.TabsNode, rect: UiRect) void {
         const pad = self.theme.spacing.sm;
-        const tab_height: f32 = 28.0 * self.theme.typography.scale;
+        const tab_height: f32 = 28.0 * self.ui_scale;
         
         // Draw panel background
         self.ui_commands.pushRect(
@@ -484,10 +486,10 @@ const App = struct {
             "Server URL",
             self.theme.colors.text_primary,
         );
-        y += 20.0 * self.theme.typography.scale;
+        y += 20.0 * self.ui_scale;
         
         // URL Input
-        const input_height: f32 = 32.0 * self.theme.typography.scale;
+        const input_height: f32 = 32.0 * self.ui_scale;
         const rect_width = rect.max[0] - rect.min[0];
         const input_rect = Rect.fromXYWH(
             rect.min[0] + pad,
@@ -512,8 +514,8 @@ const App = struct {
         y += input_height + pad;
         
         // Connect button
-        const button_width: f32 = 120.0 * self.theme.typography.scale;
-        const button_height: f32 = 32.0 * self.theme.typography.scale;
+        const button_width: f32 = 120.0 * self.ui_scale;
+        const button_height: f32 = 32.0 * self.ui_scale;
         const button_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
@@ -533,7 +535,7 @@ const App = struct {
         y += button_height + pad * 2.0;
         
         // Status row
-        const status_height: f32 = 32.0 * self.theme.typography.scale;
+        const status_height: f32 = 32.0 * self.ui_scale;
         const status_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
@@ -583,7 +585,7 @@ const App = struct {
     }
     
     fn drawStatusOverlay(self: *App, fb_width: u32, fb_height: u32) void {
-        const status_height: f32 = 24.0 * self.theme.typography.scale;
+        const status_height: f32 = 24.0 * self.ui_scale;
         const fb_w: f32 = @floatFromInt(fb_width);
         const fb_h: f32 = @floatFromInt(fb_height);
         const status_rect = UiRect.fromMinSize(
@@ -599,7 +601,7 @@ const App = struct {
         );
         
         // Status indicator
-        const indicator_size: f32 = 8.0 * self.theme.typography.scale;
+        const indicator_size: f32 = 8.0 * self.ui_scale;
         const indicator_color = switch (self.connection_state) {
             .disconnected => zcolors.rgba(200, 80, 80, 255),
             .connecting => zcolors.rgba(220, 200, 60, 255),
