@@ -16,16 +16,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Main CLI executable
-    const exe = b.addExecutable(.{
-        .name = "ziggystarspider",
+    // Create the root module
+    const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    root_module.addImport("websocket", websocket.module("websocket"));
+    root_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
 
-    exe.root_module.addImport("websocket", websocket.module("websocket"));
-    exe.root_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    // Main CLI executable
+    const exe = b.addExecutable(.{
+        .name = "ziggystarspider",
+        .root_module = root_module,
+    });
 
     b.installArtifact(exe);
 
@@ -41,14 +45,17 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Tests
-    const unit_tests = b.addTest(.{
+    const test_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    test_module.addImport("websocket", websocket.module("websocket"));
+    test_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
 
-    unit_tests.root_module.addImport("websocket", websocket.module("websocket"));
-    unit_tests.root_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    const unit_tests = b.addTest(.{
+        .root_module = test_module,
+    });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");

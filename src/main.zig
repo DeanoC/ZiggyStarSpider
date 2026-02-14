@@ -1,8 +1,7 @@
 const std = @import("std");
-const cli = @import("src/cli/main.zig");
+const cli = @import("cli/main.zig");
 const ziggy_core = @import("ziggy-core");
 const logger = ziggy_core.utils.logger;
-const profiler = ziggy_core.utils.profiler;
 
 // ZiggyStarSpider - Native client for ZiggySpiderweb
 
@@ -17,16 +16,6 @@ pub fn main() !void {
     };
     defer logger.deinit();
 
-    // Initialize profiler
-    profiler.init(allocator);
-    defer profiler.deinit();
-
-    logger.info("ZiggyStarSpider v0.1.0 starting...", .{});
-
-    // TODO: Parse command line args
-    // TODO: Initialize config
-    // TODO: Connect to Spiderweb
-    // TODO: Run CLI or TUI
-
-    try cli.run(allocator, .{});
+    // Run CLI
+    try cli.run(allocator);
 }
