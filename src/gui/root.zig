@@ -1,6 +1,7 @@
 const std = @import("std");
 const zui = @import("ziggy-ui");
 const ws_client_mod = @import("websocket_client.zig");
+const config_mod = @import("client-config");
 
 const zapp = zui.ui.app;
 const c = zapp.sdl_app.c;
@@ -78,6 +79,7 @@ const App = struct {
 
     theme: *const zui.Theme,
     ui_scale: f32 = 1.0,
+    config: config_mod.Config,
 
     running: bool = true,
 
@@ -131,14 +133,28 @@ const App = struct {
             }
         }
 
+        // Load config
+        var config = config_mod.Config.load(allocator) catch |err| blk: {
+            std.log.warn("Failed to load config: {s}, using defaults", .{@errorName(err)});
+            break :blk config_mod.Config.init(allocator);
+        };
+        errdefer config.deinit();
+
+        // Initialize settings panel with config URL
+        var settings_panel = SettingsPanel.init(allocator);
+        settings_panel.server_url.clearRetainingCapacity();
+        settings_panel.server_url.appendSlice(allocator, config.server_url) catch {};
+
         var app = App{
             .allocator = allocator,
             .window = window,
             .gpu = gpu,
             .swapchain = swapchain,
-            .settings_panel = SettingsPanel.init(allocator),
+            .settings_panel = settings_panel,
             .status_text = try allocator.dupe(u8, "Not connected"),
             .theme = zui.theme.current(),
+            .ui_scale = 1.0,
+            .config = config,
             .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
             .frame_clock = zapp.frame_clock.FrameClock.init(60),
             .manager = undefined, // Will be initialized below
@@ -542,6 +558,26 @@ const App = struct {
             self.tryConnect() catch {};
         }
         
+        // Save Config button
+        const save_button_x = button_rect.max[0] + pad;
+        const save_button_rect = Rect.fromXYWH(
+            save_button_x,
+            y,
+            button_width,
+            button_height,
+        );
+        const save_clicked = self.drawButtonWidget(
+            save_button_rect,
+            "Save Config",
+            .{ .variant = .secondary },
+        );
+        if (save_clicked) {
+            self.saveConfig() catch |err| {
+                self.setConnectionState(.error_state, "Failed to save config");
+                std.log.err("Save config failed: {s}", .{@errorName(err)});
+            };
+        }
+        
         y += button_height + pad * 2.0;
         
         // Status row
@@ -786,6 +822,13 @@ const App = struct {
         self.setConnectionState(.connected, "Connected");
         self.settings_panel.focused = false;
 
+        // Save URL to config on successful connect
+        self.allocator.free(self.config.server_url);
+        self.config.server_url = try self.allocator.dupe(u8, self.settings_panel.server_url.items);
+        self.config.save() catch |err| {
+            std.log.warn("Failed to save config on connect: {s}", .{@errorName(err)});
+        };
+
         self.clearSessions();
         try self.addSession("main", "Main");
 
@@ -807,6 +850,13 @@ const App = struct {
         }
         self.current_session_key = null;
         self.clearSessions();
+    }
+
+    fn saveConfig(self: *App) !void {
+        // Update config with current settings
+        self.allocator.free(self.config.server_url);
+        self.config.server_url = try self.allocator.dupe(u8, self.settings_panel.server_url.items);
+        try self.config.save();
     }
 
     fn sendChatMessageText(self: *App, text: []const u8) !void {
@@ -1004,8 +1054,8 @@ const App = struct {
     }
     
     fn measureText(self: *App, text: []const u8) f32 {
-        // Use same measurement as drawText (font size 14)
-        return @as(f32, @floatFromInt(text.len)) * 7.0 * self.ui_scale;
+        // Tuned to match actual text rendering (was 7.0, caused offset)
+        return @as(f32, @floatFromInt(text.len)) * 6.5 * self.ui_scale;
     }
 
     fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {

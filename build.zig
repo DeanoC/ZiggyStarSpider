@@ -74,6 +74,13 @@ pub fn build(b: *std.Build) void {
     const desktop_target = os_tag == .linux or os_tag == .windows or os_tag == .macos;
 
     if (desktop_target) {
+        // Create client config module
+        const client_config_module = b.createModule(.{
+            .root_source_file = b.path("src/client/config.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+
         const gui_module = b.createModule(.{
             .root_source_file = b.path("src/gui/root.zig"),
             .target = target,
@@ -81,6 +88,7 @@ pub fn build(b: *std.Build) void {
         });
         gui_module.addImport("websocket", websocket.module("websocket"));
         gui_module.addImport("ziggy-ui", ziggy_ui_module);
+        gui_module.addImport("client-config", client_config_module);
         gui_module.addIncludePath(sdl3.path("include"));
         gui_module.addIncludePath(ziggy_ui_src);
 
