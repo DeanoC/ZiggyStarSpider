@@ -9,9 +9,18 @@ const c = @cImport({
 const widgets = zui.widgets;
 const zlayout = zui.core.layout;
 const zcolors = zui.theme.colors;
+const ui_draw_context = zui.ui.draw_context;
+const ui_input_router = zui.ui.input.input_router;
+const ui_input_state = zui.ui.input.input_state;
 
 const Rect = zui.core.Rect;
+const UiRect = ui_draw_context.Rect;
 const Paint = zui.theme_engine.Paint;
+
+const UiInputEvent = std.meta.Child(@TypeOf((@as(ui_input_state.InputQueue, undefined)).events.items));
+const UiKeyEvent = @FieldType(UiInputEvent, "key_down");
+const UiInputKey = @FieldType(UiKeyEvent, "key");
+const UiModifiers = @FieldType(UiKeyEvent, "mods");
 
 const Screen = enum {
     settings,
@@ -31,10 +40,11 @@ const ConnectionState = enum {
     error_state,
 };
 
-const ChatMessage = struct {
-    role: []u8,
-    content: []u8,
-};
+const ChatAttachment = zui.protocol.types.ChatAttachment;
+const ChatMessage = zui.protocol.types.ChatMessage;
+const ChatSession = zui.protocol.types.Session;
+
+const ChatPanel = zui.ChatPanel(ChatMessage, ChatSession);
 
 const SettingsLayoutIds = struct {
     root: u64,
@@ -87,6 +97,11 @@ const App = struct {
     server_url: std.ArrayList(u8) = .empty,
     chat_input: std.ArrayList(u8) = .empty,
     messages: std.ArrayList(ChatMessage) = .empty,
+    chat_sessions: std.ArrayList(ChatSession) = .empty,
+    current_session_key: ?[]const u8 = null,
+
+    chat_panel_state: zui.ui.workspace.ChatPanel = .{},
+    ui_commands: zui.ui.render.command_list.CommandList,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
 
@@ -109,6 +124,7 @@ const App = struct {
 
     scroll_lines: i32 = 0,
     last_chat_history_rect: Rect = Rect.fromXYWH(0, 0, 0, 0),
+    message_counter: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) !App {
         if (!c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_EVENTS)) {
@@ -137,6 +153,7 @@ const App = struct {
             .layout_engine = zlayout.LayoutEngine.init(allocator),
             .settings_ids = undefined,
             .chat_ids = undefined,
+            .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
         };
         errdefer app.layout_engine.deinit();
         errdefer allocator.free(app.status_text);
@@ -149,13 +166,18 @@ const App = struct {
     pub fn deinit(self: *App) void {
         self.disconnect();
 
-        for (self.messages.items) |msg| {
-            self.allocator.free(msg.role);
-            self.allocator.free(msg.content);
-        }
+        self.clearMessages();
         self.messages.deinit(self.allocator);
+        self.clearSessions();
+        self.chat_sessions.deinit(self.allocator);
+
+        zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
+
         self.server_url.deinit(self.allocator);
         self.chat_input.deinit(self.allocator);
+
+        self.ui_commands.deinit();
+        ui_input_router.deinit(self.allocator);
 
         self.layout_engine.deinit();
         self.allocator.free(self.status_text);
@@ -209,38 +231,100 @@ const App = struct {
             self.mouse_clicked = false;
             self.mouse_released = false;
 
+            _ = ui_input_router.beginFrame(self.allocator);
+
             try self.pollEvents();
             try self.pollWebSocket();
 
             self.drawFrame();
+            ui_input_state.endFrame(ui_input_router.getQueue());
             _ = c.SDL_Delay(16);
         }
     }
 
     fn pollEvents(self: *App) !void {
+        const queue = ui_input_router.getQueue();
+
         var event: c.SDL_Event = undefined;
         while (c.SDL_PollEvent(&event)) {
             switch (event.type) {
-                c.SDL_EVENT_QUIT => self.running = false,
+                c.SDL_EVENT_QUIT => {
+                    self.running = false;
+                },
                 c.SDL_EVENT_MOUSE_MOTION => {
                     self.mouse_x = event.motion.x;
                     self.mouse_y = event.motion.y;
+                    queue.state.mouse_pos = .{ self.mouse_x, self.mouse_y };
+                    queue.push(self.allocator, .{ .mouse_move = .{ .pos = .{ self.mouse_x, self.mouse_y } } });
                 },
                 c.SDL_EVENT_MOUSE_BUTTON_DOWN => {
-                    if (event.button.button == c.SDL_BUTTON_LEFT) {
-                        self.mouse_down = true;
-                        self.mouse_clicked = true;
+                    const pos: [2]f32 = .{ event.button.x, event.button.y };
+                    queue.state.mouse_pos = pos;
+                    switch (event.button.button) {
+                        c.SDL_BUTTON_LEFT => {
+                            self.mouse_down = true;
+                            self.mouse_clicked = true;
+                            queue.state.mouse_down_left = true;
+                            queue.push(self.allocator, .{ .mouse_down = .{ .button = .left, .pos = pos } });
+                        },
+                        c.SDL_BUTTON_RIGHT => {
+                            queue.state.mouse_down_right = true;
+                            queue.push(self.allocator, .{ .mouse_down = .{ .button = .right, .pos = pos } });
+                        },
+                        c.SDL_BUTTON_MIDDLE => {
+                            queue.state.mouse_down_middle = true;
+                            queue.push(self.allocator, .{ .mouse_down = .{ .button = .middle, .pos = pos } });
+                        },
+                        else => {},
                     }
                 },
                 c.SDL_EVENT_MOUSE_BUTTON_UP => {
-                    if (event.button.button == c.SDL_BUTTON_LEFT) {
-                        self.mouse_down = false;
-                        self.mouse_released = true;
+                    const pos: [2]f32 = .{ event.button.x, event.button.y };
+                    queue.state.mouse_pos = pos;
+                    switch (event.button.button) {
+                        c.SDL_BUTTON_LEFT => {
+                            self.mouse_down = false;
+                            self.mouse_released = true;
+                            queue.state.mouse_down_left = false;
+                            queue.push(self.allocator, .{ .mouse_up = .{ .button = .left, .pos = pos } });
+                        },
+                        c.SDL_BUTTON_RIGHT => {
+                            queue.state.mouse_down_right = false;
+                            queue.push(self.allocator, .{ .mouse_up = .{ .button = .right, .pos = pos } });
+                        },
+                        c.SDL_BUTTON_MIDDLE => {
+                            queue.state.mouse_down_middle = false;
+                            queue.push(self.allocator, .{ .mouse_up = .{ .button = .middle, .pos = pos } });
+                        },
+                        else => {},
                     }
                 },
-                c.SDL_EVENT_MOUSE_WHEEL => self.handleMouseWheel(event.wheel.y),
-                c.SDL_EVENT_KEY_DOWN => try self.handleKeyDown(event.key.key),
-                c.SDL_EVENT_TEXT_INPUT => try self.handleTextInput(std.mem.span(event.text.text)),
+                c.SDL_EVENT_MOUSE_WHEEL => {
+                    self.handleMouseWheel(event.wheel.y);
+                    queue.push(self.allocator, .{ .mouse_wheel = .{ .delta = .{ event.wheel.x, event.wheel.y } } });
+                },
+                c.SDL_EVENT_KEY_DOWN => {
+                    try self.handleKeyDown(event.key.key);
+                    if (mapKeycode(event.key.key)) |mapped| {
+                        const mods = currentModifiers();
+                        queue.state.modifiers = mods;
+                        queue.push(self.allocator, .{ .key_down = .{ .key = mapped, .mods = mods, .repeat = false } });
+                    }
+                },
+                c.SDL_EVENT_KEY_UP => {
+                    if (mapKeycode(event.key.key)) |mapped| {
+                        const mods = currentModifiers();
+                        queue.state.modifiers = mods;
+                        queue.push(self.allocator, .{ .key_up = .{ .key = mapped, .mods = mods, .repeat = false } });
+                    }
+                },
+                c.SDL_EVENT_TEXT_INPUT => {
+                    const text = std.mem.span(event.text.text);
+                    try self.handleTextInput(text);
+                    if (text.len > 0) {
+                        queue.push(self.allocator, .{ .text_input = .{ .text = try self.allocator.dupe(u8, text) } });
+                    }
+                },
                 else => {},
             }
         }
@@ -293,50 +377,35 @@ const App = struct {
         }
 
         if (key == c.SDLK_TAB) {
-            switch (self.screen) {
-                .settings => self.focus = .server_url,
-                .chat => self.focus = if (self.focus == .chat_input) .none else .chat_input,
+            if (self.screen == .settings) {
+                self.focus = .server_url;
             }
             return;
         }
 
-        if (key == c.SDLK_BACKSPACE) {
-            switch (self.focus) {
-                .server_url => backspaceUtf8(&self.server_url),
-                .chat_input => backspaceUtf8(&self.chat_input),
-                .none => {},
+        if (self.screen == .settings and key == c.SDLK_BACKSPACE) {
+            if (self.focus == .server_url) {
+                backspaceUtf8(&self.server_url);
             }
             return;
         }
 
-        if (key == c.SDLK_RETURN or key == c.SDLK_KP_ENTER) {
-            switch (self.screen) {
-                .settings => try self.tryConnect(),
-                .chat => try self.sendChatMessage(),
-            }
+        if (self.screen == .settings and (key == c.SDLK_RETURN or key == c.SDLK_KP_ENTER)) {
+            try self.tryConnect();
             return;
         }
     }
 
     fn handleTextInput(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
+        if (self.screen != .settings) return;
 
-        switch (self.focus) {
-            .server_url => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.server_url.append(self.allocator, ch);
-                    }
+        if (self.focus == .server_url) {
+            for (text) |ch| {
+                if (ch >= 32 and ch < 127) {
+                    try self.server_url.append(self.allocator, ch);
                 }
-            },
-            .chat_input => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.chat_input.append(self.allocator, ch);
-                    }
-                }
-            },
-            .none => {},
+            }
         }
     }
 
@@ -391,35 +460,37 @@ const App = struct {
 
     fn drawChatScreen(self: *App) void {
         const dims = self.windowSize();
-        const rects = self.computeChatRects(dims) catch return;
-
-        self.last_chat_history_rect = rects.history;
-        self.clampScroll();
-
-        var header_buf: [1024]u8 = undefined;
-        const header = std.fmt.bufPrint(&header_buf, "Connected: {s}", .{self.server_url.items}) catch "Connected";
-        self.drawLabel(rects.header, header, self.theme.colors.text_primary);
-
-        self.drawSurfacePanel(rects.history);
-        self.drawMessageList(rects.history);
-
-        const chat_focused = self.drawTextInputWidget(
-            rects.chat_input,
-            self.chat_input.items,
-            self.focus == .chat_input,
-            .{ .placeholder = "Type your message..." },
+        const pad = self.theme.spacing.md + 4.0;
+        const panel_rect = UiRect.fromMinSize(
+            .{ pad, pad },
+            .{
+                @max(120.0, @as(f32, @floatFromInt(dims.w)) - pad * 2.0),
+                @max(120.0, @as(f32, @floatFromInt(dims.h)) - pad * 2.0),
+            },
         );
 
-        if (chat_focused) {
-            self.focus = .chat_input;
-        } else if (self.mouse_clicked and rects.history.contains(.{ self.mouse_x, self.mouse_y })) {
-            self.focus = .none;
-        }
+        self.ui_commands.clear();
+        ui_draw_context.setGlobalCommandList(&self.ui_commands);
+        defer ui_draw_context.clearGlobalCommandList();
 
-        const send_clicked = self.drawButtonWidget(rects.send_button, "Send", .{ .variant = .primary });
-        if (send_clicked) {
-            self.sendChatMessage() catch {};
-        }
+        const action = ChatPanel.draw(
+            self.allocator,
+            &self.chat_panel_state,
+            "zss-gui",
+            self.current_session_key,
+            self.messages.items,
+            null,
+            null,
+            "🕷",
+            "ZSS",
+            self.chat_sessions.items,
+            0,
+            panel_rect,
+            null,
+        );
+
+        self.drawUiCommands();
+        self.handleChatPanelAction(action);
     }
 
     fn computeSettingsRects(self: *App, dims: WindowSize) !SettingsRects {
@@ -714,8 +785,11 @@ const App = struct {
         self.ws_client = client;
         self.setConnectionState(.connected, "Connected");
         self.screen = .chat;
-        self.focus = .chat_input;
+        self.focus = .none;
         self.scroll_lines = 0;
+
+        self.clearSessions();
+        try self.addSession("main", "Main");
 
         try self.appendMessage("system", "Connected to Spiderweb");
     }
@@ -725,22 +799,28 @@ const App = struct {
             client.deinit();
             self.ws_client = null;
         }
+        self.current_session_key = null;
+        self.clearSessions();
     }
 
     fn sendChatMessage(self: *App) !void {
         if (self.chat_input.items.len == 0) return;
+        try self.sendChatMessageText(self.chat_input.items);
+        self.chat_input.clearRetainingCapacity();
+        self.scroll_lines = 0;
+    }
 
-        const msg_copy = try self.allocator.dupe(u8, self.chat_input.items);
-        defer self.allocator.free(msg_copy);
+    fn sendChatMessageText(self: *App, text: []const u8) !void {
+        if (text.len == 0) return;
 
-        try self.appendMessage("user", msg_copy);
+        try self.appendMessage("user", text);
 
         if (self.ws_client) |*client| {
             var payload = std.ArrayList(u8).empty;
             defer payload.deinit(self.allocator);
 
             try payload.appendSlice(self.allocator, "{\"type\":\"chat\",\"content\":\"");
-            for (msg_copy) |ch| {
+            for (text) |ch| {
                 switch (ch) {
                     '"' => try payload.appendSlice(self.allocator, "\\\""),
                     '\\' => try payload.appendSlice(self.allocator, "\\\\"),
@@ -758,20 +838,166 @@ const App = struct {
             };
         }
 
-        self.chat_input.clearRetainingCapacity();
         self.scroll_lines = 0;
     }
 
     fn appendMessage(self: *App, role: []const u8, content: []const u8) !void {
+        self.message_counter += 1;
+        const id = try std.fmt.allocPrint(self.allocator, "msg-{d}", .{self.message_counter});
+        errdefer self.allocator.free(id);
+
         try self.messages.append(self.allocator, .{
+            .id = id,
             .role = try self.allocator.dupe(u8, role),
             .content = try self.allocator.dupe(u8, content),
+            .timestamp = std.time.milliTimestamp(),
+            .attachments = null,
+            .local_state = null,
         });
 
         if (self.messages.items.len > 500) {
-            const oldest = self.messages.orderedRemove(0);
-            self.allocator.free(oldest.role);
-            self.allocator.free(oldest.content);
+            var oldest = self.messages.orderedRemove(0);
+            self.freeMessage(&oldest);
+        }
+    }
+
+    fn freeMessage(self: *App, msg: *ChatMessage) void {
+        self.allocator.free(msg.id);
+        self.allocator.free(msg.role);
+        self.allocator.free(msg.content);
+
+        if (msg.attachments) |attachments| {
+            for (attachments) |attachment| {
+                self.allocator.free(attachment.kind);
+                self.allocator.free(attachment.url);
+                if (attachment.name) |name| self.allocator.free(name);
+            }
+            self.allocator.free(attachments);
+        }
+    }
+
+    fn clearMessages(self: *App) void {
+        for (self.messages.items) |*msg| {
+            self.freeMessage(msg);
+        }
+        self.messages.clearRetainingCapacity();
+    }
+
+    fn clearSessions(self: *App) void {
+        for (self.chat_sessions.items) |session| {
+            self.allocator.free(session.key);
+            if (session.display_name) |name| self.allocator.free(name);
+        }
+        self.chat_sessions.clearRetainingCapacity();
+    }
+
+    fn addSession(self: *App, key: []const u8, display_name: []const u8) !void {
+        const key_copy = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(key_copy);
+        const name_copy = try self.allocator.dupe(u8, display_name);
+        errdefer self.allocator.free(name_copy);
+
+        try self.chat_sessions.append(self.allocator, .{
+            .key = key_copy,
+            .display_name = name_copy,
+        });
+        self.current_session_key = key_copy;
+    }
+
+    fn handleChatPanelAction(self: *App, action: zui.ChatPanelAction) void {
+        if (action.send_message) |message| {
+            defer self.allocator.free(message);
+            self.sendChatMessageText(message) catch {};
+        }
+
+        if (action.select_session) |session_key| {
+            defer self.allocator.free(session_key);
+            for (self.chat_sessions.items) |session| {
+                if (std.mem.eql(u8, session.key, session_key)) {
+                    self.current_session_key = session.key;
+                    break;
+                }
+            }
+        }
+
+        if (action.select_session_id) |sid| {
+            self.allocator.free(sid);
+        }
+
+        if (action.new_chat_session_key) |new_key| {
+            defer self.allocator.free(new_key);
+
+            var found = false;
+            for (self.chat_sessions.items) |session| {
+                if (std.mem.eql(u8, session.key, new_key)) {
+                    self.current_session_key = session.key;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                self.addSession(new_key, new_key) catch {};
+            }
+        }
+    }
+
+    fn drawUiCommands(self: *App) void {
+        for (self.ui_commands.commands.items) |cmd| {
+            switch (cmd) {
+                .rect => |r| {
+                    const rect = cmdRectToCoreRect(r.rect);
+                    if (r.style.fill) |fill| self.drawFilledRect(rect, fill);
+                    if (r.style.stroke) |stroke| self.drawRect(rect, stroke);
+                },
+                .rect_gradient => |r| {
+                    const rect = cmdRectToCoreRect(r.rect);
+                    const avg: [4]f32 = .{
+                        (r.colors.tl[0] + r.colors.tr[0] + r.colors.bl[0] + r.colors.br[0]) * 0.25,
+                        (r.colors.tl[1] + r.colors.tr[1] + r.colors.bl[1] + r.colors.br[1]) * 0.25,
+                        (r.colors.tl[2] + r.colors.tr[2] + r.colors.bl[2] + r.colors.br[2]) * 0.25,
+                        (r.colors.tl[3] + r.colors.tr[3] + r.colors.bl[3] + r.colors.br[3]) * 0.25,
+                    };
+                    self.drawFilledRect(rect, avg);
+                },
+                .rounded_rect => |r| {
+                    const rect = cmdRectToCoreRect(r.rect);
+                    if (r.style.fill) |fill| self.drawFilledRect(rect, fill);
+                    if (r.style.stroke) |stroke| self.drawRect(rect, stroke);
+                },
+                .rounded_rect_gradient => |r| {
+                    const rect = cmdRectToCoreRect(r.rect);
+                    const avg: [4]f32 = .{
+                        (r.colors.tl[0] + r.colors.tr[0] + r.colors.bl[0] + r.colors.br[0]) * 0.25,
+                        (r.colors.tl[1] + r.colors.tr[1] + r.colors.bl[1] + r.colors.br[1]) * 0.25,
+                        (r.colors.tl[2] + r.colors.tr[2] + r.colors.bl[2] + r.colors.br[2]) * 0.25,
+                        (r.colors.tl[3] + r.colors.tr[3] + r.colors.bl[3] + r.colors.br[3]) * 0.25,
+                    };
+                    self.drawFilledRect(rect, avg);
+                },
+                .soft_rounded_rect => |r| {
+                    self.drawFilledRect(cmdRectToCoreRect(r.draw_rect), r.color);
+                },
+                .text => |t| {
+                    const start = t.text_offset;
+                    const end = start + t.text_len;
+                    if (end <= self.ui_commands.text_storage.items.len) {
+                        const text = self.ui_commands.text_storage.items[start..end];
+                        self.drawText(t.pos[0], t.pos[1], text, t.color);
+                    }
+                },
+                .line => |line| {
+                    _ = c.SDL_SetRenderDrawColor(
+                        self.renderer,
+                        colorToU8(line.color[0]),
+                        colorToU8(line.color[1]),
+                        colorToU8(line.color[2]),
+                        colorToU8(line.color[3]),
+                    );
+                    _ = c.SDL_RenderLine(self.renderer, line.from[0], line.from[1], line.to[0], line.to[1]);
+                },
+                .image, .nine_slice, .clip_push, .clip_pop => {},
+            }
         }
     }
 
@@ -901,6 +1127,77 @@ fn backspaceUtf8(list: *std.ArrayList(u8)) void {
         idx -= 1;
     }
     list.items.len = idx;
+}
+
+fn currentModifiers() UiModifiers {
+    const mods = c.SDL_GetModState();
+    return .{
+        .ctrl = (mods & c.SDL_KMOD_CTRL) != 0,
+        .shift = (mods & c.SDL_KMOD_SHIFT) != 0,
+        .alt = (mods & c.SDL_KMOD_ALT) != 0,
+        .super = (mods & c.SDL_KMOD_GUI) != 0,
+    };
+}
+
+fn mapKeycode(sdl_key: c.SDL_Keycode) ?UiInputKey {
+    return switch (sdl_key) {
+        c.SDLK_RETURN => .enter,
+        c.SDLK_KP_ENTER => .keypad_enter,
+        c.SDLK_BACKSPACE => .back_space,
+        c.SDLK_DELETE => .delete,
+        c.SDLK_TAB => .tab,
+        c.SDLK_LEFT => .left_arrow,
+        c.SDLK_RIGHT => .right_arrow,
+        c.SDLK_UP => .up_arrow,
+        c.SDLK_DOWN => .down_arrow,
+        c.SDLK_HOME => .home,
+        c.SDLK_END => .end,
+        c.SDLK_PAGEUP => .page_up,
+        c.SDLK_PAGEDOWN => .page_down,
+        c.SDLK_A => .a,
+        c.SDLK_C => .c,
+        c.SDLK_V => .v,
+        c.SDLK_X => .x,
+        c.SDLK_Z => .z,
+        c.SDLK_Y => .y,
+        c.SDLK_LCTRL => .left_ctrl,
+        c.SDLK_RCTRL => .right_ctrl,
+        c.SDLK_LSHIFT => .left_shift,
+        c.SDLK_RSHIFT => .right_shift,
+        c.SDLK_LALT => .left_alt,
+        c.SDLK_RALT => .right_alt,
+        c.SDLK_LGUI => .left_super,
+        c.SDLK_RGUI => .right_super,
+        else => null,
+    };
+}
+
+fn cmdRectToCoreRect(rect: anytype) Rect {
+    return .{ .min = rect.min, .max = rect.max };
+}
+
+pub export fn zsc_load_icon_rgba_from_memory(data: [*c]const u8, len: c_int, width: [*c]c_int, height: [*c]c_int) [*c]u8 {
+    _ = data;
+    _ = len;
+    if (width != null) width[0] = 0;
+    if (height != null) height[0] = 0;
+    return null;
+}
+
+pub export fn zsc_free_icon(pixels: ?*anyopaque) void {
+    _ = pixels;
+}
+
+pub export fn zsc_load_image_rgba_from_memory(data: [*c]const u8, len: c_int, width: [*c]c_int, height: [*c]c_int) [*c]u8 {
+    _ = data;
+    _ = len;
+    if (width != null) width[0] = 0;
+    if (height != null) height[0] = 0;
+    return null;
+}
+
+pub export fn zsc_free_image(pixels: ?*anyopaque) void {
+    _ = pixels;
 }
 
 pub fn main() !void {

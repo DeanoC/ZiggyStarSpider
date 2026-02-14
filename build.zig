@@ -24,6 +24,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const ziggy_ui_module = ziggy_ui.module("ziggy-ui");
+    const ziggy_ui_src = ziggy_ui.path("src");
+    ziggy_ui_module.addIncludePath(ziggy_ui_src);
+
+    const zsc_bridge_module = b.createModule(.{
+        .root_source_file = b.path("src/gui/zsc_bridge.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zsc_bridge_module.addIncludePath(sdl3.path("include"));
+    ziggy_ui_module.addImport("zsc", zsc_bridge_module);
+
     // ---------------------------------------------------------------------
     // CLI executable (default build)
     // ---------------------------------------------------------------------
@@ -62,8 +74,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         gui_module.addImport("websocket", websocket.module("websocket"));
-        gui_module.addImport("ziggy-ui", ziggy_ui.module("ziggy-ui"));
+        gui_module.addImport("ziggy-ui", ziggy_ui_module);
         gui_module.addIncludePath(sdl3.path("include"));
+        gui_module.addIncludePath(ziggy_ui_src);
 
         const gui_exe = b.addExecutable(.{
             .name = "zss-gui",
