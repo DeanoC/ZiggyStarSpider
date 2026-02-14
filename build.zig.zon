@@ -1,0 +1,20 @@
+.{
+    .name = "ziggystarspider",
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.0",
+    .dependencies = .{
+        .websocket = .{
+            .path = "../ZiggyStarClaw/deps/websocket",
+        },
+        // TODO: Extract to shared library
+        // .ziggy-core = .{
+        //     .path = "../ziggy-core",
+        // },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}
