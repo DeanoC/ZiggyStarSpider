@@ -286,6 +286,16 @@ const App = struct {
                     }
                 }
             },
+            .backspace => {
+                if (self.settings_panel.focused and self.settings_panel.server_url.items.len > 0) {
+                    _ = self.settings_panel.server_url.pop();
+                }
+            },
+            .delete => {
+                if (self.settings_panel.focused and self.settings_panel.server_url.items.len > 0) {
+                    _ = self.settings_panel.server_url.pop();
+                }
+            },
             else => {},
         }
     }
@@ -726,10 +736,21 @@ const App = struct {
         }
 
         if (state.focused and !opts.disabled and !opts.read_only) {
+            // Draw caret as a vertical line instead of underscore for better visibility
+            const caret_width: f32 = 2.0 * self.ui_scale;
+            const caret_height: f32 = self.theme.typography.body_size * self.ui_scale;
             const max_chars = @as(usize, @intFromFloat(@max(0, @floor(max_w / 8.0))));
             const caret_chars = @min(text.len, max_chars);
-            const caret_x = text_x + @as(f32, @floatFromInt(caret_chars)) * 8.0;
-            self.drawText(caret_x, text_y, "_", widgets.text_input.getCaretColor(self.theme));
+            const caret_x = text_x + @as(f32, @floatFromInt(caret_chars)) * 8.0 * self.ui_scale;
+            
+            const caret_rect = UiRect.fromMinSize(
+                .{ caret_x, text_y },
+                .{ caret_width, caret_height },
+            );
+            self.ui_commands.pushRect(
+                .{ .min = caret_rect.min, .max = caret_rect.max },
+                .{ .fill = self.theme.colors.primary },
+            );
         }
 
         return state.focused;
