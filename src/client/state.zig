@@ -15,12 +15,12 @@ pub const ClientState = enum {
 };
 
 pub const ChatState = struct {
-    messages: std.ArrayList(protocol.ChatMessage),
+    messages: std.ArrayList(protocol.ChatReceiveResponse),
     awaiting_reply: bool = false,
     
     pub fn init() ChatState {
         return .{
-            .messages = std.ArrayList(protocol.ChatMessage).empty,
+            .messages = std.ArrayList(protocol.ChatReceiveResponse).empty,
         };
     }
 };
