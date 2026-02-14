@@ -48,6 +48,7 @@ pub const WebSocketClient = struct {
             .port = parsed.port,
             .tls = parsed.tls,
         });
+        errdefer client.deinit();
 
         // Connect with handshake
         var headers_buf: [256]u8 = undefined;
@@ -70,6 +71,7 @@ pub const WebSocketClient = struct {
     pub fn disconnect(self: *WebSocketClient) void {
         if (self.client) |*client| {
             client.close(.{}) catch {};
+            client.deinit();
             self.client = null;
         }
         self.is_connected = false;

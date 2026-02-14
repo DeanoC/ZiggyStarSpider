@@ -16,6 +16,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // ziggy-ui for UI components
+    const ziggy_ui = b.dependency("ziggy_ui", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create the root module
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -24,6 +30,7 @@ pub fn build(b: *std.Build) void {
     });
     root_module.addImport("websocket", websocket.module("websocket"));
     root_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    root_module.addImport("ziggy-ui", ziggy_ui.module("ziggy-ui"));
 
     // Main CLI executable
     const exe = b.addExecutable(.{
@@ -52,6 +59,7 @@ pub fn build(b: *std.Build) void {
     });
     test_module.addImport("websocket", websocket.module("websocket"));
     test_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    test_module.addImport("ziggy-ui", ziggy_ui.module("ziggy-ui"));
 
     const unit_tests = b.addTest(.{
         .root_module = test_module,
