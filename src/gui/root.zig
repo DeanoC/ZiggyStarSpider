@@ -6,7 +6,6 @@ const zapp = zui.ui.app;
 const c = zapp.sdl_app.c;
 
 const widgets = zui.widgets;
-const zlayout = zui.core.layout;
 const zcolors = zui.theme.colors;
 const ui_draw_context = zui.ui.draw_context;
 const ui_input_router = zui.ui.input.input_router;
@@ -14,20 +13,13 @@ const ui_input_state = zui.ui.input.input_state;
 const ui_input_backend = zui.ui.input.input_backend;
 const ui_sdl_input_backend = zui.ui.input.sdl_input_backend;
 
+const workspace = zui.ui.workspace;
+const panel_manager = zui.ui.panel_manager;
+const dock_graph = zui.ui.layout.dock_graph;
+
 const Rect = zui.core.Rect;
 const UiRect = ui_draw_context.Rect;
 const Paint = zui.theme_engine.Paint;
-
-const Screen = enum {
-    settings,
-    chat,
-};
-
-const FocusField = enum {
-    none,
-    server_url,
-    chat_input,
-};
 
 const ConnectionState = enum {
     disconnected,
@@ -42,45 +34,20 @@ const ChatSession = zui.protocol.types.Session;
 
 const ChatPanel = zui.ChatPanel(ChatMessage, ChatSession);
 
-const SettingsLayoutIds = struct {
-    root: u64,
-    title: u64,
-    subtitle: u64,
-    url_label: u64,
-    url_input: u64,
-    connect_button: u64,
-    status: u64,
-    tip: u64,
+const SettingsPanel = struct {
+    server_url: std.ArrayList(u8) = .empty,
+    focused: bool = true,
+    
+    pub fn init(allocator: std.mem.Allocator) SettingsPanel {
+        var panel = SettingsPanel{};
+        panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790") catch {};
+        return panel;
+    }
+    
+    pub fn deinit(self: *SettingsPanel, allocator: std.mem.Allocator) void {
+        self.server_url.deinit(allocator);
+    }
 };
-
-const ChatLayoutIds = struct {
-    root: u64,
-    header: u64,
-    history: u64,
-    composer: u64,
-    chat_input: u64,
-    send_button: u64,
-};
-
-const SettingsRects = struct {
-    title: Rect,
-    subtitle: Rect,
-    url_label: Rect,
-    url_input: Rect,
-    connect_button: Rect,
-    status: Rect,
-    tip: Rect,
-};
-
-const ChatRects = struct {
-    header: Rect,
-    history: Rect,
-    composer: Rect,
-    chat_input: Rect,
-    send_button: Rect,
-};
-
-const WindowSize = struct { w: i32, h: i32 };
 
 const App = struct {
     allocator: std.mem.Allocator,
@@ -88,16 +55,20 @@ const App = struct {
     gpu: zapp.multi_window_renderer.Shared,
     swapchain: zapp.multi_window_renderer.WindowSwapchain,
 
-    screen: Screen = .settings,
-    focus: FocusField = .server_url,
-
-    server_url: std.ArrayList(u8) = .empty,
+    // Panel state
+    settings_panel: SettingsPanel,
+    chat_panel_state: zui.ui.workspace.ChatPanel = .{},
+    
+    // Workspace and panel management
+    next_panel_id: workspace.PanelId = 1,
+    manager: panel_manager.PanelManager,
+    
+    // Chat state
     chat_input: std.ArrayList(u8) = .empty,
     messages: std.ArrayList(ChatMessage) = .empty,
     chat_sessions: std.ArrayList(ChatSession) = .empty,
     current_session_key: ?[]const u8 = null,
 
-    chat_panel_state: zui.ui.workspace.ChatPanel = .{},
     ui_commands: zui.ui.render.command_list.CommandList,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
@@ -107,22 +78,20 @@ const App = struct {
 
     theme: *const zui.Theme,
 
-    layout_engine: zlayout.LayoutEngine,
-    settings_ids: SettingsLayoutIds,
-    chat_ids: ChatLayoutIds,
-
     running: bool = true,
 
+    // Input state
     mouse_x: f32 = 0,
     mouse_y: f32 = 0,
     mouse_down: bool = false,
     mouse_clicked: bool = false,
     mouse_released: bool = false,
 
-    scroll_lines: i32 = 0,
-    last_chat_history_rect: Rect = Rect.fromXYWH(0, 0, 0, 0),
     message_counter: u64 = 0,
     frame_clock: zapp.frame_clock.FrameClock,
+    
+    // UI State for dock
+    ui_state: zui.ui.main_window.WindowUiState = .{},
 
     pub fn init(allocator: std.mem.Allocator) !App {
         try zapp.sdl_app.init(.{ .video = true, .events = true, .gamepad = false });
@@ -140,26 +109,45 @@ const App = struct {
 
         zapp.sdl_app.startTextInput(window);
 
-        zui.theme.setMode(.dark);
+        // Initialize theme - use clean theme (light mode as default for clean look)
+        zui.theme.setMode(.light);
+        
+        // Initialize workspace with default panels
+        var ws = try workspace.Workspace.initDefault(allocator);
+        errdefer ws.deinit(allocator);
+        
+        // Replace the default chat panel session key with null for now
+        for (ws.panels.items) |*panel| {
+            if (panel.kind == .Chat) {
+                if (panel.data.Chat.session_key) |key| {
+                    allocator.free(key);
+                    panel.data.Chat.session_key = null;
+                }
+                if (panel.data.Chat.agent_id) |id| {
+                    allocator.free(id);
+                    panel.data.Chat.agent_id = try allocator.dupe(u8, "zss");
+                }
+            }
+        }
 
         var app = App{
             .allocator = allocator,
             .window = window,
             .gpu = gpu,
             .swapchain = swapchain,
+            .settings_panel = SettingsPanel.init(allocator),
             .status_text = try allocator.dupe(u8, "Not connected"),
             .theme = zui.theme.current(),
-            .layout_engine = zlayout.LayoutEngine.init(allocator),
-            .settings_ids = undefined,
-            .chat_ids = undefined,
             .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
             .frame_clock = zapp.frame_clock.FrameClock.init(60),
+            .manager = undefined, // Will be initialized below
         };
-        errdefer app.layout_engine.deinit();
+        
+        app.manager = panel_manager.PanelManager.init(allocator, ws, &app.next_panel_id);
+        errdefer app.manager.deinit();
+        
+        errdefer app.settings_panel.deinit(allocator);
         errdefer allocator.free(app.status_text);
-
-        try app.initLayoutTrees();
-        try app.server_url.appendSlice(allocator, "ws://127.0.0.1:18790");
 
         ui_sdl_input_backend.init(allocator);
         ui_input_router.setBackend(ui_input_backend.sdl3);
@@ -177,14 +165,14 @@ const App = struct {
 
         zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
 
-        self.server_url.deinit(self.allocator);
+        self.settings_panel.deinit(self.allocator);
         self.chat_input.deinit(self.allocator);
 
         self.ui_commands.deinit();
+        self.manager.deinit();
         ui_input_router.deinit(self.allocator);
         ui_sdl_input_backend.deinit();
 
-        self.layout_engine.deinit();
         self.allocator.free(self.status_text);
 
         self.swapchain.deinit();
@@ -193,44 +181,6 @@ const App = struct {
         zapp.sdl_app.stopTextInput(self.window);
         c.SDL_DestroyWindow(self.window);
         zapp.sdl_app.deinit();
-    }
-
-    fn initLayoutTrees(self: *App) !void {
-        const s_root = try self.layout_engine.createNode(null);
-        const s_title = try self.layout_engine.createNode(s_root);
-        const s_subtitle = try self.layout_engine.createNode(s_root);
-        const s_url_label = try self.layout_engine.createNode(s_root);
-        const s_url_input = try self.layout_engine.createNode(s_root);
-        const s_connect = try self.layout_engine.createNode(s_root);
-        const s_status = try self.layout_engine.createNode(s_root);
-        const s_tip = try self.layout_engine.createNode(s_root);
-
-        self.settings_ids = .{
-            .root = s_root,
-            .title = s_title,
-            .subtitle = s_subtitle,
-            .url_label = s_url_label,
-            .url_input = s_url_input,
-            .connect_button = s_connect,
-            .status = s_status,
-            .tip = s_tip,
-        };
-
-        const c_root = try self.layout_engine.createNode(null);
-        const c_header = try self.layout_engine.createNode(c_root);
-        const c_history = try self.layout_engine.createNode(c_root);
-        const c_composer = try self.layout_engine.createNode(c_root);
-        const c_input = try self.layout_engine.createNode(c_composer);
-        const c_send = try self.layout_engine.createNode(c_composer);
-
-        self.chat_ids = .{
-            .root = c_root,
-            .header = c_header,
-            .history = c_history,
-            .composer = c_composer,
-            .chat_input = c_input,
-            .send_button = c_send,
-        };
     }
 
     pub fn run(self: *App) !void {
@@ -271,17 +221,11 @@ const App = struct {
                 .mouse_up => |mu| {
                     if (mu.button == .left) self.mouse_released = true;
                 },
-                .mouse_wheel => |mw| {
-                    self.handleMouseWheel(mw.delta[1]);
-                },
                 .key_down => |ke| {
                     try self.handleKeyDownEvent(ke);
                 },
                 .text_input => |txt| {
                     try self.handleTextInput(txt.text);
-                },
-                .focus_lost => {
-                    self.mouse_down = false;
                 },
                 else => {},
             }
@@ -315,44 +259,22 @@ const App = struct {
         }
     }
 
-    fn handleMouseWheel(self: *App, wheel_y: f32) void {
-        if (self.screen != .chat) return;
-        if (!self.last_chat_history_rect.contains(.{ self.mouse_x, self.mouse_y })) return;
-
-        if (wheel_y > 0) {
-            self.scroll_lines += 1;
-        } else if (wheel_y < 0 and self.scroll_lines > 0) {
-            self.scroll_lines -= 1;
-        }
-
-        self.clampScroll();
-    }
-
     fn handleKeyDownEvent(self: *App, key_evt: anytype) !void {
         switch (key_evt.key) {
             .escape => {
                 self.running = false;
             },
-            .tab => {
-                if (self.screen == .settings) {
-                    self.focus = .server_url;
-                }
-            },
-            .back_space => {
-                if (self.screen == .settings and self.focus == .server_url) {
-                    backspaceUtf8(&self.server_url);
-                }
-            },
             .enter, .keypad_enter => {
-                if (self.screen == .settings) {
+                // Check if we're focused on settings URL input
+                if (self.settings_panel.focused) {
                     try self.tryConnect();
                 }
             },
             .v => {
-                if (self.screen == .settings and self.focus == .server_url and key_evt.mods.ctrl and !key_evt.repeat) {
+                if (self.settings_panel.focused and key_evt.mods.ctrl and !key_evt.repeat) {
                     const clip = zapp.clipboard.getTextZ();
                     if (clip.len > 0) {
-                        try self.server_url.appendSlice(self.allocator, clip);
+                        try self.settings_panel.server_url.appendSlice(self.allocator, clip);
                     }
                 }
             },
@@ -362,12 +284,11 @@ const App = struct {
 
     fn handleTextInput(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
-        if (self.screen != .settings) return;
-
-        if (self.focus == .server_url) {
+        
+        if (self.settings_panel.focused) {
             for (text) |ch| {
                 if (ch >= 32 and ch < 127) {
-                    try self.server_url.append(self.allocator, ch);
+                    try self.settings_panel.server_url.append(self.allocator, ch);
                 }
             }
         }
@@ -384,74 +305,257 @@ const App = struct {
 
         self.swapchain.beginFrame(&self.gpu, fb_width, fb_height);
 
-        switch (self.screen) {
-            .settings => self.drawSettingsScreen(),
-            .chat => self.drawChatScreen(),
-        }
+        // Draw the dock-based UI
+        self.drawDockUi(fb_width, fb_height);
 
         // Render the UI commands through WebGPU
         self.gpu.ui_renderer.beginFrame(fb_width, fb_height);
         self.swapchain.render(&self.gpu, &self.ui_commands);
     }
-
-    fn drawSettingsScreen(self: *App) void {
+    
+    fn drawDockUi(self: *App, fb_width: u32, fb_height: u32) void {
         self.ui_commands.clear();
         ui_draw_context.setGlobalCommandList(&self.ui_commands);
         defer ui_draw_context.clearGlobalCommandList();
-
-        const dims = self.windowSize();
-        const rects = self.computeSettingsRects(dims) catch return;
-
+        
+        const viewport = UiRect.fromMinSize(
+            .{ 0, 0 },
+            .{ @floatFromInt(fb_width), @floatFromInt(fb_height) },
+        );
+        
         // Draw background
         self.ui_commands.pushRect(
-            .{ .min = .{ 0, 0 }, .max = .{ @floatFromInt(dims.w), @floatFromInt(dims.h) } },
+            .{ .min = .{ 0, 0 }, .max = .{ @floatFromInt(fb_width), @floatFromInt(fb_height) } },
             .{ .fill = self.theme.colors.background },
         );
-
-        self.drawLabel(rects.title, "ZiggyStarSpider - GUI Client", self.theme.colors.text_primary);
-        self.drawLabel(rects.subtitle, "Settings / Auth", self.theme.colors.text_secondary);
-        self.drawLabel(rects.url_label, "Server URL", self.theme.colors.text_primary);
-
+        
+        // Compute dock layout
+        const layout = self.manager.workspace.dock_layout.computeLayout(viewport);
+        
+        // Draw each dock group
+        for (layout.slice()) |group| {
+            self.drawDockGroup(group.node_id, group.rect);
+        }
+        
+        // Draw connection status overlay
+        self.drawStatusOverlay(fb_width, fb_height);
+    }
+    
+    fn drawDockGroup(self: *App, node_id: dock_graph.NodeId, rect: UiRect) void {
+        const node = self.manager.workspace.dock_layout.getNode(node_id) orelse return;
+        
+        switch (node.*) {
+            .tabs => |tabs| {
+                self.drawTabsPanel(&tabs, rect);
+            },
+            .split => |_| {
+                // Split nodes are handled by layout computation, children drawn separately
+            },
+        }
+    }
+    
+    fn drawTabsPanel(self: *App, tabs: *const dock_graph.TabsNode, rect: UiRect) void {
+        const pad = self.theme.spacing.sm;
+        const tab_height: f32 = 28.0;
+        
+        // Draw panel background
+        self.ui_commands.pushRect(
+            .{ .min = rect.min, .max = rect.max },
+            .{ .fill = self.theme.colors.surface },
+        );
+        
+        // Draw tab bar
+        const tab_bar_rect = UiRect.fromMinSize(
+            rect.min,
+            .{ rect.max[0] - rect.min[0], tab_height },
+        );
+        self.ui_commands.pushRect(
+            .{ .min = tab_bar_rect.min, .max = tab_bar_rect.max },
+            .{ .fill = self.theme.colors.background },
+        );
+        
+        var tab_x = rect.min[0] + pad;
+        const active_tab_id = if (tabs.active < tabs.tabs.items.len) 
+            tabs.tabs.items[tabs.active] 
+        else 
+            null;
+        
+        // Draw each tab
+        for (tabs.tabs.items) |panel_id| {
+            const panel = self.findPanelById(panel_id) orelse continue;
+            const is_active = panel_id == active_tab_id;
+            
+            const tab_width = self.measureText(panel.title) + pad * 2.0;
+            const tab_rect = UiRect.fromMinSize(
+                .{ tab_x, rect.min[1] },
+                .{ tab_width, tab_height },
+            );
+            
+            // Tab background
+            const tab_color = if (is_active) 
+                self.theme.colors.surface 
+            else 
+                self.theme.colors.background;
+            self.ui_commands.pushRect(
+                .{ .min = tab_rect.min, .max = tab_rect.max },
+                .{ .fill = tab_color },
+            );
+            
+            // Tab border
+            self.ui_commands.pushRect(
+                .{ .min = tab_rect.min, .max = tab_rect.max },
+                .{ .stroke = self.theme.colors.border },
+            );
+            
+            // Tab text
+            self.drawText(
+                tab_x + pad,
+                rect.min[1] + 6.0,
+                panel.title,
+                self.theme.colors.text_primary,
+            );
+            
+            tab_x += tab_width + pad;
+        }
+        
+        // Draw content area for active tab
+        const content_rect = UiRect.fromMinSize(
+            .{ rect.min[0], rect.min[1] + tab_height },
+            .{ rect.max[0] - rect.min[0], rect.max[1] - rect.min[1] - tab_height },
+        );
+        
+        if (active_tab_id) |panel_id| {
+            self.drawPanelContent(panel_id, content_rect);
+        }
+    }
+    
+    fn findPanelById(self: *App, panel_id: workspace.PanelId) ?*workspace.Panel {
+        for (self.manager.workspace.panels.items) |*panel| {
+            if (panel.id == panel_id) return panel;
+        }
+        return null;
+    }
+    
+    fn drawPanelContent(self: *App, panel_id: workspace.PanelId, rect: UiRect) void {
+        const panel = self.findPanelById(panel_id) orelse return;
+        
+        switch (panel.kind) {
+            .Chat => {
+                self.drawChatPanel(rect);
+            },
+            .Settings, .Control => {
+                self.drawSettingsPanel(rect);
+            },
+            else => {
+                // Draw placeholder for other panel types
+                self.drawText(
+                    rect.min[0] + 20,
+                    rect.min[1] + 20,
+                    panel.title,
+                    self.theme.colors.text_primary,
+                );
+            },
+        }
+    }
+    
+    fn drawSettingsPanel(self: *App, rect: UiRect) void {
+        const pad = self.theme.spacing.md;
+        var y = rect.min[1] + pad;
+        
+        // Title
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "ZiggyStarSpider - Settings",
+            self.theme.colors.text_primary,
+        );
+        y += 30;
+        
+        // Server URL label
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Server URL",
+            self.theme.colors.text_primary,
+        );
+        y += 20;
+        
+        // URL Input
+        const input_height: f32 = 32.0;
+        const rect_width = rect.max[0] - rect.min[0];
+        const input_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200, rect_width - pad * 2.0),
+            input_height,
+        );
+        
         const url_focused = self.drawTextInputWidget(
-            rects.url_input,
-            self.server_url.items,
-            self.focus == .server_url,
+            input_rect,
+            self.settings_panel.server_url.items,
+            self.settings_panel.focused,
             .{ .placeholder = "ws://127.0.0.1:18790" },
         );
-
-        if (url_focused) {
-            self.focus = .server_url;
-        } else if (self.mouse_clicked and !rects.url_input.contains(.{ self.mouse_x, self.mouse_y })) {
-            self.focus = .none;
+        self.settings_panel.focused = url_focused;
+        
+        // Handle click outside to unfocus
+        if (self.mouse_clicked and !input_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.settings_panel.focused = false;
         }
-
+        
+        y += input_height + pad;
+        
+        // Connect button
+        const button_width: f32 = 120.0;
+        const button_height: f32 = 32.0;
+        const button_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            button_width,
+            button_height,
+        );
+        
         const connect_clicked = self.drawButtonWidget(
-            rects.connect_button,
+            button_rect,
             "Connect",
             .{ .variant = .primary, .disabled = self.connection_state == .connecting },
         );
         if (connect_clicked) {
             self.tryConnect() catch {};
         }
-
-        self.drawStatusRow(rects.status);
-        self.drawLabel(rects.tip, "Tip: Enter URL, press Connect, then chat.", self.theme.colors.text_secondary);
+        
+        y += button_height + pad * 2.0;
+        
+        // Status row
+        const status_height: f32 = 32.0;
+        const status_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200, rect_width - pad * 2.0),
+            status_height,
+        );
+        self.drawStatusRow(status_rect);
+        
+        y += status_height + pad;
+        
+        // Tip
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Tip: Enter URL, press Connect, then chat.",
+            self.theme.colors.text_secondary,
+        );
     }
-
-    fn drawChatScreen(self: *App) void {
-        const dims = self.windowSize();
-        const pad = self.theme.spacing.md + 4.0;
+    
+    fn drawChatPanel(self: *App, rect: UiRect) void {
+        const pad = self.theme.spacing.sm;
         const panel_rect = UiRect.fromMinSize(
-            .{ pad, pad },
+            .{ rect.min[0] + pad, rect.min[1] + pad },
             .{
-                @max(120.0, @as(f32, @floatFromInt(dims.w)) - pad * 2.0),
-                @max(120.0, @as(f32, @floatFromInt(dims.h)) - pad * 2.0),
+                @max(120.0, rect.max[0] - rect.min[0] - pad * 2.0),
+                @max(120.0, rect.max[1] - rect.min[1] - pad * 2.0),
             },
         );
-
-        self.ui_commands.clear();
-        ui_draw_context.setGlobalCommandList(&self.ui_commands);
-        defer ui_draw_context.clearGlobalCommandList();
 
         const action = ChatPanel.draw(
             self.allocator,
@@ -471,134 +575,47 @@ const App = struct {
 
         self.handleChatPanelAction(action);
     }
-
-    fn computeSettingsRects(self: *App, dims: WindowSize) !SettingsRects {
-        const pad = self.theme.spacing.lg;
-        const root = Rect.fromXYWH(
-            pad,
-            pad,
-            @max(120, @as(f32, @floatFromInt(dims.w)) - pad * 2.0),
-            @max(120, @as(f32, @floatFromInt(dims.h)) - pad * 2.0),
+    
+    fn drawStatusOverlay(self: *App, fb_width: u32, fb_height: u32) void {
+        const status_height: f32 = 24.0;
+        const fb_w: f32 = @floatFromInt(fb_width);
+        const fb_h: f32 = @floatFromInt(fb_height);
+        const status_rect = UiRect.fromMinSize(
+            .{ 0, fb_h - status_height },
+            .{ fb_w, status_height },
         );
-
-        const line_h: f32 = 14.0;
-        const input_h = widgets.text_input.defaultHeight(self.theme, line_h);
-        const button_h = widgets.button.defaultHeight(self.theme, line_h);
-
-        self.layout_engine.setNodeRect(self.settings_ids.root, root);
-
-        if (self.layout_engine.getNode(self.settings_ids.root)) |node| {
-            node.padding = .{ 0, 0, 0, 0 };
-        }
-
-        self.setNodePreferred(self.settings_ids.title, .{ root.width(), line_h + 4.0 }, 0.0, null);
-        self.setNodePreferred(self.settings_ids.subtitle, .{ root.width(), line_h + 2.0 }, 0.0, null);
-        self.setNodePreferred(self.settings_ids.url_label, .{ root.width(), line_h + 2.0 }, 0.0, null);
-        self.setNodePreferred(self.settings_ids.url_input, .{ root.width(), input_h }, 0.0, null);
-        self.setNodePreferred(self.settings_ids.connect_button, .{ 150.0, button_h }, 0.0, .start);
-        self.setNodePreferred(self.settings_ids.status, .{ root.width(), line_h + 18.0 }, 0.0, null);
-        self.setNodePreferred(self.settings_ids.tip, .{ root.width(), line_h + 2.0 }, 0.0, null);
-
-        try self.layout_engine.computeFlexLayout(self.settings_ids.root, root.size(), .{
-            .direction = .vertical,
-            .main_align = .start,
-            .cross_align = .stretch,
-            .spacing = .{ .main = self.theme.spacing.sm },
-        });
-
-        return .{
-            .title = self.nodeRect(self.settings_ids.title),
-            .subtitle = self.nodeRect(self.settings_ids.subtitle),
-            .url_label = self.nodeRect(self.settings_ids.url_label),
-            .url_input = self.nodeRect(self.settings_ids.url_input),
-            .connect_button = self.nodeRect(self.settings_ids.connect_button),
-            .status = self.nodeRect(self.settings_ids.status),
-            .tip = self.nodeRect(self.settings_ids.tip),
-        };
-    }
-
-    fn computeChatRects(self: *App, dims: WindowSize) !ChatRects {
-        const pad = self.theme.spacing.md + 4.0;
-        const root = Rect.fromXYWH(
-            pad,
-            pad,
-            @max(120, @as(f32, @floatFromInt(dims.w)) - pad * 2.0),
-            @max(120, @as(f32, @floatFromInt(dims.h)) - pad * 2.0),
+        
+        // Semi-transparent background
+        const bg_color = zcolors.withAlpha(self.theme.colors.background, 0.9);
+        self.ui_commands.pushRect(
+            .{ .min = status_rect.min, .max = status_rect.max },
+            .{ .fill = bg_color },
         );
-
-        const line_h: f32 = 14.0;
-        const input_h = widgets.text_input.defaultHeight(self.theme, line_h);
-        const button_h = widgets.button.defaultHeight(self.theme, line_h);
-
-        self.layout_engine.setNodeRect(self.chat_ids.root, root);
-
-        if (self.layout_engine.getNode(self.chat_ids.root)) |node| {
-            node.padding = .{ 0, 0, 0, 0 };
-        }
-
-        self.setNodePreferred(self.chat_ids.header, .{ root.width(), line_h + 4.0 }, 0.0, null);
-        self.setNodePreferred(self.chat_ids.history, .{ root.width(), 200.0 }, 1.0, null);
-        self.setNodePreferred(self.chat_ids.composer, .{ root.width(), @max(input_h, button_h) }, 0.0, null);
-
-        try self.layout_engine.computeFlexLayout(self.chat_ids.root, root.size(), .{
-            .direction = .vertical,
-            .main_align = .start,
-            .cross_align = .stretch,
-            .spacing = .{ .main = self.theme.spacing.sm },
-        });
-
-        const composer_rect = self.nodeRect(self.chat_ids.composer);
-        self.layout_engine.setNodeRect(self.chat_ids.composer, composer_rect);
-
-        if (self.layout_engine.getNode(self.chat_ids.composer)) |node| {
-            node.padding = .{ 0, 0, 0, 0 };
-        }
-
-        self.setNodePreferred(self.chat_ids.chat_input, .{ composer_rect.width(), input_h }, 1.0, null);
-        self.setNodePreferred(self.chat_ids.send_button, .{ 100.0, button_h }, 0.0, .stretch);
-
-        try self.layout_engine.computeFlexLayout(self.chat_ids.composer, composer_rect.size(), .{
-            .direction = .horizontal,
-            .main_align = .start,
-            .cross_align = .stretch,
-            .spacing = .{ .main = self.theme.spacing.sm },
-        });
-
-        return .{
-            .header = self.nodeRect(self.chat_ids.header),
-            .history = self.nodeRect(self.chat_ids.history),
-            .composer = composer_rect,
-            .chat_input = self.nodeRect(self.chat_ids.chat_input),
-            .send_button = self.nodeRect(self.chat_ids.send_button),
+        
+        // Status indicator
+        const indicator_size: f32 = 8.0;
+        const indicator_color = switch (self.connection_state) {
+            .disconnected => zcolors.rgba(200, 80, 80, 255),
+            .connecting => zcolors.rgba(220, 200, 60, 255),
+            .connected => zcolors.rgba(90, 210, 90, 255),
+            .error_state => zcolors.rgba(230, 120, 70, 255),
         };
-    }
-
-    fn nodeRect(self: *App, node_id: u64) Rect {
-        if (self.layout_engine.getNode(node_id)) |node| {
-            return node.rect;
-        }
-        return Rect.fromXYWH(0, 0, 0, 0);
-    }
-
-    fn setNodePreferred(
-        self: *App,
-        node_id: u64,
-        preferred: [2]f32,
-        flex: f32,
-        align_self: ?zlayout.Alignment,
-    ) void {
-        if (self.layout_engine.getNode(node_id)) |node| {
-            node.preferred_size = preferred;
-            node.flex = flex;
-            node.align_self = align_self;
-            node.margin = .{ 0, 0, 0, 0 };
-        }
-    }
-
-    fn drawSurfacePanel(self: *App, rect: Rect) void {
-        const fill = Paint{ .solid = self.theme.colors.surface };
-        self.drawPaintRect(rect, fill);
-        self.drawRect(rect, self.theme.colors.border);
+        
+        self.ui_commands.pushRect(
+            .{
+                .min = .{ status_rect.min[0] + 8, status_rect.min[1] + 8 },
+                .max = .{ status_rect.min[0] + 8 + indicator_size, status_rect.min[1] + 8 + indicator_size },
+            },
+            .{ .fill = indicator_color },
+        );
+        
+        // Status text
+        self.drawText(
+            status_rect.min[0] + 24,
+            status_rect.min[1] + 4,
+            self.status_text,
+            self.theme.colors.text_secondary,
+        );
     }
 
     fn drawStatusRow(self: *App, rect: Rect) void {
@@ -710,35 +727,8 @@ const App = struct {
         return state.focused;
     }
 
-    fn drawMessageList(self: *App, rect: Rect) void {
-        const line_h: f32 = 14.0;
-        const usable_h = @max(0.0, rect.height() - 10.0);
-        const visible_lines: usize = @as(usize, @intFromFloat(@floor(usable_h / line_h)));
-
-        self.clampScroll();
-
-        const total = self.messages.items.len;
-        const scroll = @as(usize, @intCast(@max(0, self.scroll_lines)));
-
-        const start = if (total > visible_lines + scroll)
-            total - visible_lines - scroll
-        else
-            0;
-        const end = @min(total, start + visible_lines);
-
-        var y = rect.min[1] + 6.0;
-        var i = start;
-        while (i < end) : (i += 1) {
-            const msg = self.messages.items[i];
-            var line_buf: [1024]u8 = undefined;
-            const raw = std.fmt.bufPrint(&line_buf, "[{s}] {s}", .{ msg.role, msg.content }) catch "";
-            self.drawTextTrimmed(rect.min[0] + 6.0, y, rect.width() - 12.0, raw, self.theme.colors.text_primary);
-            y += line_h;
-        }
-    }
-
     fn tryConnect(self: *App) !void {
-        if (self.server_url.items.len == 0) {
+        if (self.settings_panel.server_url.items.len == 0) {
             self.setConnectionState(.error_state, "Server URL cannot be empty");
             return;
         }
@@ -746,7 +736,7 @@ const App = struct {
         self.setConnectionState(.connecting, "Connecting...");
         self.disconnect();
 
-        var client = ws_client_mod.WebSocketClient.init(self.allocator, self.server_url.items, "") catch |err| {
+        var client = ws_client_mod.WebSocketClient.init(self.allocator, self.settings_panel.server_url.items, "") catch |err| {
             const msg = try std.fmt.allocPrint(self.allocator, "Client init failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
             self.setConnectionState(.error_state, msg);
@@ -763,14 +753,20 @@ const App = struct {
 
         self.ws_client = client;
         self.setConnectionState(.connected, "Connected");
-        self.screen = .chat;
-        self.focus = .none;
-        self.scroll_lines = 0;
+        self.settings_panel.focused = false;
 
         self.clearSessions();
         try self.addSession("main", "Main");
 
         try self.appendMessage("system", "Connected to Spiderweb");
+        
+        // Switch to chat panel by focusing it
+        for (self.manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .Chat) {
+                self.manager.focusPanel(panel.id);
+                break;
+            }
+        }
     }
 
     fn disconnect(self: *App) void {
@@ -780,13 +776,6 @@ const App = struct {
         }
         self.current_session_key = null;
         self.clearSessions();
-    }
-
-    fn sendChatMessage(self: *App) !void {
-        if (self.chat_input.items.len == 0) return;
-        try self.sendChatMessageText(self.chat_input.items);
-        self.chat_input.clearRetainingCapacity();
-        self.scroll_lines = 0;
     }
 
     fn sendChatMessageText(self: *App, text: []const u8) !void {
@@ -816,8 +805,6 @@ const App = struct {
                 try self.appendMessage("system", err_text);
             };
         }
-
-        self.scroll_lines = 0;
     }
 
     fn appendMessage(self: *App, role: []const u8, content: []const u8) !void {
@@ -928,22 +915,18 @@ const App = struct {
         self.status_text = copy;
     }
 
-    fn clampScroll(self: *App) void {
-        const line_h: f32 = 14.0;
-        const usable_h = @max(0.0, self.last_chat_history_rect.height() - 10.0);
-        const visible_lines: usize = @as(usize, @intFromFloat(@floor(usable_h / line_h)));
-        const total = self.messages.items.len;
-        const max_scroll: i32 = @intCast(if (total > visible_lines) total - visible_lines else 0);
-
-        if (self.scroll_lines < 0) self.scroll_lines = 0;
-        if (self.scroll_lines > max_scroll) self.scroll_lines = max_scroll;
+    // Drawing helpers
+    
+    fn drawSurfacePanel(self: *App, rect: Rect) void {
+        const fill = Paint{ .solid = self.theme.colors.surface };
+        self.drawPaintRect(rect, fill);
+        self.drawRect(rect, self.theme.colors.border);
     }
 
     fn drawPaintRect(self: *App, rect: Rect, paint: Paint) void {
         switch (paint) {
             .solid => |color| self.drawFilledRect(rect, color),
             .gradient4 => |g| {
-                // Use gradient for proper gradient support
                 self.ui_commands.pushRectGradient(
                     .{ .min = rect.min, .max = rect.max },
                     .{
@@ -974,8 +957,8 @@ const App = struct {
         );
     }
 
-    fn drawLabel(self: *App, rect: Rect, text: []const u8, color: [4]f32) void {
-        self.drawTextTrimmed(rect.min[0], rect.min[1], rect.width(), text, color);
+    fn drawLabel(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
+        self.drawText(x, y, text, color);
     }
 
     fn drawCenteredText(self: *App, rect: Rect, text: []const u8, color: [4]f32) void {
@@ -987,6 +970,11 @@ const App = struct {
 
     fn drawText(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
         self.ui_commands.pushText(text, .{ x, y }, color, .body, 14);
+    }
+    
+    fn measureText(self: *App, text: []const u8) f32 {
+        _ = self;
+        return @as(f32, @floatFromInt(text.len)) * 8.0;
     }
 
     fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
@@ -1009,25 +997,9 @@ const App = struct {
         tmp[copy_len + 2] = '.';
         self.drawText(x, y, tmp[0 .. copy_len + 3], color);
     }
-
-    fn windowSize(self: *App) WindowSize {
-        var w: i32 = 0;
-        var h: i32 = 0;
-        _ = c.SDL_GetWindowSize(self.window, &w, &h);
-        return .{ .w = w, .h = h };
-    }
 };
 
-fn backspaceUtf8(list: *std.ArrayList(u8)) void {
-    if (list.items.len == 0) return;
-
-    var idx = list.items.len - 1;
-    while (idx > 0 and (list.items[idx] & 0b1100_0000) == 0b1000_0000) {
-        idx -= 1;
-    }
-    list.items.len = idx;
-}
-
+// Image loading stubs required by ziggy-ui
 pub export fn zsc_load_icon_rgba_from_memory(data: [*c]const u8, len: c_int, width: [*c]c_int, height: [*c]c_int) [*c]u8 {
     _ = data;
     _ = len;
