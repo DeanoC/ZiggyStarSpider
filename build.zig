@@ -19,6 +19,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const zgpu = ziggy_ui.builder.dependency("zgpu", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const sdl3 = b.dependency("sdl3", .{
         .target = target,
         .optimize = optimize,
@@ -27,6 +32,7 @@ pub fn build(b: *std.Build) void {
     const ziggy_ui_module = ziggy_ui.module("ziggy-ui");
     const ziggy_ui_src = ziggy_ui.path("src");
     ziggy_ui_module.addIncludePath(ziggy_ui_src);
+    ziggy_ui_module.addImport("zgpu", zgpu.module("root"));
 
     const zsc_bridge_module = b.createModule(.{
         .root_source_file = b.path("src/gui/zsc_bridge.zig"),
@@ -84,6 +90,40 @@ pub fn build(b: *std.Build) void {
         });
 
         gui_exe.linkLibrary(sdl3.artifact("SDL3"));
+
+        // Dawn/WebGPU setup
+        gui_exe.root_module.addIncludePath(zgpu.path("libs/dawn/include"));
+        gui_exe.addCSourceFile(.{ .file = zgpu.path("src/dawn.cpp"), .flags = &.{"-std=c++17"} });
+        gui_exe.addCSourceFile(.{ .file = zgpu.path("src/dawn_proc.c"), .flags = &.{} });
+        gui_exe.root_module.link_libcpp = true;
+        
+        // Dawn/WebGPU setup - use lazy dependencies for prebuilt dawn binaries
+        if (os_tag == .windows) {
+            if (b.lazyDependency("dawn_x86_64_windows_gnu", .{})) |dawn| {
+                gui_exe.addLibraryPath(dawn.path(""));
+            }
+        } else if (os_tag == .linux) {
+            if (target.result.cpu.arch.isX86()) {
+                if (b.lazyDependency("dawn_x86_64_linux_gnu", .{})) |dawn| {
+                    gui_exe.addLibraryPath(dawn.path(""));
+                }
+            } else if (target.result.cpu.arch.isAARCH64()) {
+                if (b.lazyDependency("dawn_aarch64_linux_gnu", .{})) |dawn| {
+                    gui_exe.addLibraryPath(dawn.path(""));
+                }
+            }
+        } else if (os_tag == .macos) {
+            if (target.result.cpu.arch.isX86()) {
+                if (b.lazyDependency("dawn_x86_64_macos", .{})) |dawn| {
+                    gui_exe.addLibraryPath(dawn.path(""));
+                }
+            } else if (target.result.cpu.arch.isAARCH64()) {
+                if (b.lazyDependency("dawn_aarch64_macos", .{})) |dawn| {
+                    gui_exe.addLibraryPath(dawn.path(""));
+                }
+            }
+        }
+        gui_exe.root_module.linkSystemLibrary("dawn", .{});
 
         switch (os_tag) {
             .windows => {

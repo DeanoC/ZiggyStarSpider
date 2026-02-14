@@ -2,9 +2,8 @@ const std = @import("std");
 const zui = @import("ziggy-ui");
 const ws_client_mod = @import("websocket_client.zig");
 
-const c = @cImport({
-    @cInclude("SDL3/SDL.h");
-});
+const zapp = zui.ui.app;
+const c = zapp.sdl_app.c;
 
 const widgets = zui.widgets;
 const zlayout = zui.core.layout;
@@ -12,15 +11,12 @@ const zcolors = zui.theme.colors;
 const ui_draw_context = zui.ui.draw_context;
 const ui_input_router = zui.ui.input.input_router;
 const ui_input_state = zui.ui.input.input_state;
+const ui_input_backend = zui.ui.input.input_backend;
+const ui_sdl_input_backend = zui.ui.input.sdl_input_backend;
 
 const Rect = zui.core.Rect;
 const UiRect = ui_draw_context.Rect;
 const Paint = zui.theme_engine.Paint;
-
-const UiInputEvent = std.meta.Child(@TypeOf((@as(ui_input_state.InputQueue, undefined)).events.items));
-const UiKeyEvent = @FieldType(UiInputEvent, "key_down");
-const UiInputKey = @FieldType(UiKeyEvent, "key");
-const UiModifiers = @FieldType(UiKeyEvent, "mods");
 
 const Screen = enum {
     settings,
@@ -89,7 +85,8 @@ const WindowSize = struct { w: i32, h: i32 };
 const App = struct {
     allocator: std.mem.Allocator,
     window: *c.SDL_Window,
-    renderer: *c.SDL_Renderer,
+    gpu: zapp.multi_window_renderer.Shared,
+    swapchain: zapp.multi_window_renderer.WindowSwapchain,
 
     screen: Screen = .settings,
     focus: FocusField = .server_url,
@@ -125,41 +122,48 @@ const App = struct {
     scroll_lines: i32 = 0,
     last_chat_history_rect: Rect = Rect.fromXYWH(0, 0, 0, 0),
     message_counter: u64 = 0,
+    frame_clock: zapp.frame_clock.FrameClock,
 
     pub fn init(allocator: std.mem.Allocator) !App {
-        if (!c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_EVENTS)) {
-            return error.SdlInitFailed;
-        }
+        try zapp.sdl_app.init(.{ .video = true, .events = true, .gamepad = false });
+        zapp.clipboard.init();
 
-        const window = c.SDL_CreateWindow("ZiggyStarSpider GUI", 1024, 720, c.SDL_WINDOW_RESIZABLE) orelse {
+        const window = zapp.sdl_app.createWindow("ZiggyStarSpider GUI", 1024, 720, c.SDL_WINDOW_RESIZABLE) catch {
             return error.CreateWindowFailed;
         };
+        errdefer c.SDL_DestroyWindow(window);
 
-        const renderer = c.SDL_CreateRenderer(window, null) orelse {
-            c.SDL_DestroyWindow(window);
-            return error.CreateRendererFailed;
-        };
+        var gpu = try zapp.multi_window_renderer.Shared.init(allocator, window);
+        errdefer gpu.deinit();
 
-        _ = c.SDL_StartTextInput(window);
+        const swapchain = zapp.multi_window_renderer.WindowSwapchain.initMain(&gpu, window);
+
+        zapp.sdl_app.startTextInput(window);
 
         zui.theme.setMode(.dark);
 
         var app = App{
             .allocator = allocator,
             .window = window,
-            .renderer = renderer,
+            .gpu = gpu,
+            .swapchain = swapchain,
             .status_text = try allocator.dupe(u8, "Not connected"),
             .theme = zui.theme.current(),
             .layout_engine = zlayout.LayoutEngine.init(allocator),
             .settings_ids = undefined,
             .chat_ids = undefined,
             .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
+            .frame_clock = zapp.frame_clock.FrameClock.init(60),
         };
         errdefer app.layout_engine.deinit();
         errdefer allocator.free(app.status_text);
 
         try app.initLayoutTrees();
         try app.server_url.appendSlice(allocator, "ws://127.0.0.1:18790");
+
+        ui_sdl_input_backend.init(allocator);
+        ui_input_router.setBackend(ui_input_backend.sdl3);
+
         return app;
     }
 
@@ -178,14 +182,17 @@ const App = struct {
 
         self.ui_commands.deinit();
         ui_input_router.deinit(self.allocator);
+        ui_sdl_input_backend.deinit();
 
         self.layout_engine.deinit();
         self.allocator.free(self.status_text);
 
-        _ = c.SDL_StopTextInput(self.window);
-        c.SDL_DestroyRenderer(self.renderer);
+        self.swapchain.deinit();
+        self.gpu.deinit();
+
+        zapp.sdl_app.stopTextInput(self.window);
         c.SDL_DestroyWindow(self.window);
-        c.SDL_Quit();
+        zapp.sdl_app.deinit();
     }
 
     fn initLayoutTrees(self: *App) !void {
@@ -228,102 +235,53 @@ const App = struct {
 
     pub fn run(self: *App) !void {
         while (self.running) {
+            _ = self.frame_clock.beginFrame();
             self.mouse_clicked = false;
             self.mouse_released = false;
 
-            _ = ui_input_router.beginFrame(self.allocator);
+            const queue = ui_input_router.beginFrame(self.allocator);
+            const polled = zapp.sdl_app.pollEventsToInput();
+            if (polled.quit_requested) {
+                self.running = false;
+            }
+            if (polled.window_close_requested and polled.window_close_id == c.SDL_GetWindowID(self.window)) {
+                self.running = false;
+            }
 
-            try self.pollEvents();
+            zapp.sdl_app.collectWindowInput(self.allocator, self.window, queue);
+            try self.processInputEvents(queue);
             try self.pollWebSocket();
 
             self.drawFrame();
-            ui_input_state.endFrame(ui_input_router.getQueue());
-            _ = c.SDL_Delay(16);
+            ui_input_state.endFrame(queue);
+            self.frame_clock.endFrame();
         }
     }
 
-    fn pollEvents(self: *App) !void {
-        const queue = ui_input_router.getQueue();
+    fn processInputEvents(self: *App, queue: *ui_input_state.InputQueue) !void {
+        self.mouse_x = queue.state.mouse_pos[0];
+        self.mouse_y = queue.state.mouse_pos[1];
+        self.mouse_down = queue.state.mouse_down_left;
 
-        var event: c.SDL_Event = undefined;
-        while (c.SDL_PollEvent(&event)) {
-            switch (event.type) {
-                c.SDL_EVENT_QUIT => {
-                    self.running = false;
+        for (queue.events.items) |evt| {
+            switch (evt) {
+                .mouse_down => |md| {
+                    if (md.button == .left) self.mouse_clicked = true;
                 },
-                c.SDL_EVENT_MOUSE_MOTION => {
-                    self.mouse_x = event.motion.x;
-                    self.mouse_y = event.motion.y;
-                    queue.state.mouse_pos = .{ self.mouse_x, self.mouse_y };
-                    queue.push(self.allocator, .{ .mouse_move = .{ .pos = .{ self.mouse_x, self.mouse_y } } });
+                .mouse_up => |mu| {
+                    if (mu.button == .left) self.mouse_released = true;
                 },
-                c.SDL_EVENT_MOUSE_BUTTON_DOWN => {
-                    const pos: [2]f32 = .{ event.button.x, event.button.y };
-                    queue.state.mouse_pos = pos;
-                    switch (event.button.button) {
-                        c.SDL_BUTTON_LEFT => {
-                            self.mouse_down = true;
-                            self.mouse_clicked = true;
-                            queue.state.mouse_down_left = true;
-                            queue.push(self.allocator, .{ .mouse_down = .{ .button = .left, .pos = pos } });
-                        },
-                        c.SDL_BUTTON_RIGHT => {
-                            queue.state.mouse_down_right = true;
-                            queue.push(self.allocator, .{ .mouse_down = .{ .button = .right, .pos = pos } });
-                        },
-                        c.SDL_BUTTON_MIDDLE => {
-                            queue.state.mouse_down_middle = true;
-                            queue.push(self.allocator, .{ .mouse_down = .{ .button = .middle, .pos = pos } });
-                        },
-                        else => {},
-                    }
+                .mouse_wheel => |mw| {
+                    self.handleMouseWheel(mw.delta[1]);
                 },
-                c.SDL_EVENT_MOUSE_BUTTON_UP => {
-                    const pos: [2]f32 = .{ event.button.x, event.button.y };
-                    queue.state.mouse_pos = pos;
-                    switch (event.button.button) {
-                        c.SDL_BUTTON_LEFT => {
-                            self.mouse_down = false;
-                            self.mouse_released = true;
-                            queue.state.mouse_down_left = false;
-                            queue.push(self.allocator, .{ .mouse_up = .{ .button = .left, .pos = pos } });
-                        },
-                        c.SDL_BUTTON_RIGHT => {
-                            queue.state.mouse_down_right = false;
-                            queue.push(self.allocator, .{ .mouse_up = .{ .button = .right, .pos = pos } });
-                        },
-                        c.SDL_BUTTON_MIDDLE => {
-                            queue.state.mouse_down_middle = false;
-                            queue.push(self.allocator, .{ .mouse_up = .{ .button = .middle, .pos = pos } });
-                        },
-                        else => {},
-                    }
+                .key_down => |ke| {
+                    try self.handleKeyDownEvent(ke);
                 },
-                c.SDL_EVENT_MOUSE_WHEEL => {
-                    self.handleMouseWheel(event.wheel.y);
-                    queue.push(self.allocator, .{ .mouse_wheel = .{ .delta = .{ event.wheel.x, event.wheel.y } } });
+                .text_input => |txt| {
+                    try self.handleTextInput(txt.text);
                 },
-                c.SDL_EVENT_KEY_DOWN => {
-                    try self.handleKeyDown(event.key.key);
-                    if (mapKeycode(event.key.key)) |mapped| {
-                        const mods = currentModifiers();
-                        queue.state.modifiers = mods;
-                        queue.push(self.allocator, .{ .key_down = .{ .key = mapped, .mods = mods, .repeat = false } });
-                    }
-                },
-                c.SDL_EVENT_KEY_UP => {
-                    if (mapKeycode(event.key.key)) |mapped| {
-                        const mods = currentModifiers();
-                        queue.state.modifiers = mods;
-                        queue.push(self.allocator, .{ .key_up = .{ .key = mapped, .mods = mods, .repeat = false } });
-                    }
-                },
-                c.SDL_EVENT_TEXT_INPUT => {
-                    const text = std.mem.span(event.text.text);
-                    try self.handleTextInput(text);
-                    if (text.len > 0) {
-                        queue.push(self.allocator, .{ .text_input = .{ .text = try self.allocator.dupe(u8, text) } });
-                    }
+                .focus_lost => {
+                    self.mouse_down = false;
                 },
                 else => {},
             }
@@ -370,29 +328,35 @@ const App = struct {
         self.clampScroll();
     }
 
-    fn handleKeyDown(self: *App, key: c.SDL_Keycode) !void {
-        if (key == c.SDLK_ESCAPE) {
-            self.running = false;
-            return;
-        }
-
-        if (key == c.SDLK_TAB) {
-            if (self.screen == .settings) {
-                self.focus = .server_url;
-            }
-            return;
-        }
-
-        if (self.screen == .settings and key == c.SDLK_BACKSPACE) {
-            if (self.focus == .server_url) {
-                backspaceUtf8(&self.server_url);
-            }
-            return;
-        }
-
-        if (self.screen == .settings and (key == c.SDLK_RETURN or key == c.SDLK_KP_ENTER)) {
-            try self.tryConnect();
-            return;
+    fn handleKeyDownEvent(self: *App, key_evt: anytype) !void {
+        switch (key_evt.key) {
+            .escape => {
+                self.running = false;
+            },
+            .tab => {
+                if (self.screen == .settings) {
+                    self.focus = .server_url;
+                }
+            },
+            .back_space => {
+                if (self.screen == .settings and self.focus == .server_url) {
+                    backspaceUtf8(&self.server_url);
+                }
+            },
+            .enter, .keypad_enter => {
+                if (self.screen == .settings) {
+                    try self.tryConnect();
+                }
+            },
+            .v => {
+                if (self.screen == .settings and self.focus == .server_url and key_evt.mods.ctrl and !key_evt.repeat) {
+                    const clip = zapp.clipboard.getTextZ();
+                    if (clip.len > 0) {
+                        try self.server_url.appendSlice(self.allocator, clip);
+                    }
+                }
+            },
+            else => {},
         }
     }
 
@@ -412,21 +376,37 @@ const App = struct {
     fn drawFrame(self: *App) void {
         self.theme = zui.theme.current();
 
-        const bg = self.theme.colors.background;
-        _ = c.SDL_SetRenderDrawColor(self.renderer, colorToU8(bg[0]), colorToU8(bg[1]), colorToU8(bg[2]), 255);
-        _ = c.SDL_RenderClear(self.renderer);
+        var fb_w: c_int = 0;
+        var fb_h: c_int = 0;
+        _ = c.SDL_GetWindowSizeInPixels(self.window, &fb_w, &fb_h);
+        const fb_width: u32 = @intCast(if (fb_w > 0) fb_w else 1);
+        const fb_height: u32 = @intCast(if (fb_h > 0) fb_h else 1);
+
+        self.swapchain.beginFrame(&self.gpu, fb_width, fb_height);
 
         switch (self.screen) {
             .settings => self.drawSettingsScreen(),
             .chat => self.drawChatScreen(),
         }
 
-        _ = c.SDL_RenderPresent(self.renderer);
+        // Render the UI commands through WebGPU
+        self.gpu.ui_renderer.beginFrame(fb_width, fb_height);
+        self.swapchain.render(&self.gpu, &self.ui_commands);
     }
 
     fn drawSettingsScreen(self: *App) void {
+        self.ui_commands.clear();
+        ui_draw_context.setGlobalCommandList(&self.ui_commands);
+        defer ui_draw_context.clearGlobalCommandList();
+
         const dims = self.windowSize();
         const rects = self.computeSettingsRects(dims) catch return;
+
+        // Draw background
+        self.ui_commands.pushRect(
+            .{ .min = .{ 0, 0 }, .max = .{ @floatFromInt(dims.w), @floatFromInt(dims.h) } },
+            .{ .fill = self.theme.colors.background },
+        );
 
         self.drawLabel(rects.title, "ZiggyStarSpider - GUI Client", self.theme.colors.text_primary);
         self.drawLabel(rects.subtitle, "Settings / Auth", self.theme.colors.text_secondary);
@@ -489,7 +469,6 @@ const App = struct {
             null,
         );
 
-        self.drawUiCommands();
         self.handleChatPanelAction(action);
     }
 
@@ -942,65 +921,6 @@ const App = struct {
         }
     }
 
-    fn drawUiCommands(self: *App) void {
-        for (self.ui_commands.commands.items) |cmd| {
-            switch (cmd) {
-                .rect => |r| {
-                    const rect = cmdRectToCoreRect(r.rect);
-                    if (r.style.fill) |fill| self.drawFilledRect(rect, fill);
-                    if (r.style.stroke) |stroke| self.drawRect(rect, stroke);
-                },
-                .rect_gradient => |r| {
-                    const rect = cmdRectToCoreRect(r.rect);
-                    const avg: [4]f32 = .{
-                        (r.colors.tl[0] + r.colors.tr[0] + r.colors.bl[0] + r.colors.br[0]) * 0.25,
-                        (r.colors.tl[1] + r.colors.tr[1] + r.colors.bl[1] + r.colors.br[1]) * 0.25,
-                        (r.colors.tl[2] + r.colors.tr[2] + r.colors.bl[2] + r.colors.br[2]) * 0.25,
-                        (r.colors.tl[3] + r.colors.tr[3] + r.colors.bl[3] + r.colors.br[3]) * 0.25,
-                    };
-                    self.drawFilledRect(rect, avg);
-                },
-                .rounded_rect => |r| {
-                    const rect = cmdRectToCoreRect(r.rect);
-                    if (r.style.fill) |fill| self.drawFilledRect(rect, fill);
-                    if (r.style.stroke) |stroke| self.drawRect(rect, stroke);
-                },
-                .rounded_rect_gradient => |r| {
-                    const rect = cmdRectToCoreRect(r.rect);
-                    const avg: [4]f32 = .{
-                        (r.colors.tl[0] + r.colors.tr[0] + r.colors.bl[0] + r.colors.br[0]) * 0.25,
-                        (r.colors.tl[1] + r.colors.tr[1] + r.colors.bl[1] + r.colors.br[1]) * 0.25,
-                        (r.colors.tl[2] + r.colors.tr[2] + r.colors.bl[2] + r.colors.br[2]) * 0.25,
-                        (r.colors.tl[3] + r.colors.tr[3] + r.colors.bl[3] + r.colors.br[3]) * 0.25,
-                    };
-                    self.drawFilledRect(rect, avg);
-                },
-                .soft_rounded_rect => |r| {
-                    self.drawFilledRect(cmdRectToCoreRect(r.draw_rect), r.color);
-                },
-                .text => |t| {
-                    const start = t.text_offset;
-                    const end = start + t.text_len;
-                    if (end <= self.ui_commands.text_storage.items.len) {
-                        const text = self.ui_commands.text_storage.items[start..end];
-                        self.drawText(t.pos[0], t.pos[1], text, t.color);
-                    }
-                },
-                .line => |line| {
-                    _ = c.SDL_SetRenderDrawColor(
-                        self.renderer,
-                        colorToU8(line.color[0]),
-                        colorToU8(line.color[1]),
-                        colorToU8(line.color[2]),
-                        colorToU8(line.color[3]),
-                    );
-                    _ = c.SDL_RenderLine(self.renderer, line.from[0], line.from[1], line.to[0], line.to[1]);
-                },
-                .image, .nine_slice, .clip_push, .clip_pop => {},
-            }
-        }
-    }
-
     fn setConnectionState(self: *App, state: ConnectionState, text: []const u8) void {
         self.connection_state = state;
         const copy = self.allocator.dupe(u8, text) catch return;
@@ -1023,13 +943,16 @@ const App = struct {
         switch (paint) {
             .solid => |color| self.drawFilledRect(rect, color),
             .gradient4 => |g| {
-                const avg: [4]f32 = .{
-                    (g.tl[0] + g.tr[0] + g.bl[0] + g.br[0]) * 0.25,
-                    (g.tl[1] + g.tr[1] + g.bl[1] + g.br[1]) * 0.25,
-                    (g.tl[2] + g.tr[2] + g.bl[2] + g.br[2]) * 0.25,
-                    (g.tl[3] + g.tr[3] + g.bl[3] + g.br[3]) * 0.25,
-                };
-                self.drawFilledRect(rect, avg);
+                // Use gradient for proper gradient support
+                self.ui_commands.pushRectGradient(
+                    .{ .min = rect.min, .max = rect.max },
+                    .{
+                        .tl = g.tl,
+                        .tr = g.tr,
+                        .bl = g.bl,
+                        .br = g.br,
+                    },
+                );
             },
             .image => {
                 self.drawFilledRect(rect, self.theme.colors.surface);
@@ -1038,27 +961,17 @@ const App = struct {
     }
 
     fn drawFilledRect(self: *App, rect: Rect, color: [4]f32) void {
-        _ = c.SDL_SetRenderDrawColor(
-            self.renderer,
-            colorToU8(color[0]),
-            colorToU8(color[1]),
-            colorToU8(color[2]),
-            colorToU8(color[3]),
+        self.ui_commands.pushRect(
+            .{ .min = rect.min, .max = rect.max },
+            .{ .fill = color },
         );
-        var sdl_rect = c.SDL_FRect{ .x = rect.min[0], .y = rect.min[1], .w = rect.width(), .h = rect.height() };
-        _ = c.SDL_RenderFillRect(self.renderer, &sdl_rect);
     }
 
     fn drawRect(self: *App, rect: Rect, color: [4]f32) void {
-        _ = c.SDL_SetRenderDrawColor(
-            self.renderer,
-            colorToU8(color[0]),
-            colorToU8(color[1]),
-            colorToU8(color[2]),
-            colorToU8(color[3]),
+        self.ui_commands.pushRect(
+            .{ .min = rect.min, .max = rect.max },
+            .{ .stroke = color },
         );
-        var sdl_rect = c.SDL_FRect{ .x = rect.min[0], .y = rect.min[1], .w = rect.width(), .h = rect.height() };
-        _ = c.SDL_RenderRect(self.renderer, &sdl_rect);
     }
 
     fn drawLabel(self: *App, rect: Rect, text: []const u8, color: [4]f32) void {
@@ -1073,16 +986,7 @@ const App = struct {
     }
 
     fn drawText(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
-        var buf: [1024]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&buf, "{s}", .{text}) catch return;
-        _ = c.SDL_SetRenderDrawColor(
-            self.renderer,
-            colorToU8(color[0]),
-            colorToU8(color[1]),
-            colorToU8(color[2]),
-            colorToU8(color[3]),
-        );
-        _ = c.SDL_RenderDebugText(self.renderer, x, y, z.ptr);
+        self.ui_commands.pushText(text, .{ x, y }, color, .body, 14);
     }
 
     fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
@@ -1114,11 +1018,6 @@ const App = struct {
     }
 };
 
-fn colorToU8(component: f32) u8 {
-    const scaled = @round(std.math.clamp(component, 0.0, 1.0) * 255.0);
-    return @as(u8, @intFromFloat(scaled));
-}
-
 fn backspaceUtf8(list: *std.ArrayList(u8)) void {
     if (list.items.len == 0) return;
 
@@ -1127,53 +1026,6 @@ fn backspaceUtf8(list: *std.ArrayList(u8)) void {
         idx -= 1;
     }
     list.items.len = idx;
-}
-
-fn currentModifiers() UiModifiers {
-    const mods = c.SDL_GetModState();
-    return .{
-        .ctrl = (mods & c.SDL_KMOD_CTRL) != 0,
-        .shift = (mods & c.SDL_KMOD_SHIFT) != 0,
-        .alt = (mods & c.SDL_KMOD_ALT) != 0,
-        .super = (mods & c.SDL_KMOD_GUI) != 0,
-    };
-}
-
-fn mapKeycode(sdl_key: c.SDL_Keycode) ?UiInputKey {
-    return switch (sdl_key) {
-        c.SDLK_RETURN => .enter,
-        c.SDLK_KP_ENTER => .keypad_enter,
-        c.SDLK_BACKSPACE => .back_space,
-        c.SDLK_DELETE => .delete,
-        c.SDLK_TAB => .tab,
-        c.SDLK_LEFT => .left_arrow,
-        c.SDLK_RIGHT => .right_arrow,
-        c.SDLK_UP => .up_arrow,
-        c.SDLK_DOWN => .down_arrow,
-        c.SDLK_HOME => .home,
-        c.SDLK_END => .end,
-        c.SDLK_PAGEUP => .page_up,
-        c.SDLK_PAGEDOWN => .page_down,
-        c.SDLK_A => .a,
-        c.SDLK_C => .c,
-        c.SDLK_V => .v,
-        c.SDLK_X => .x,
-        c.SDLK_Z => .z,
-        c.SDLK_Y => .y,
-        c.SDLK_LCTRL => .left_ctrl,
-        c.SDLK_RCTRL => .right_ctrl,
-        c.SDLK_LSHIFT => .left_shift,
-        c.SDLK_RSHIFT => .right_shift,
-        c.SDLK_LALT => .left_alt,
-        c.SDLK_RALT => .right_alt,
-        c.SDLK_LGUI => .left_super,
-        c.SDLK_RGUI => .right_super,
-        else => null,
-    };
-}
-
-fn cmdRectToCoreRect(rect: anytype) Rect {
-    return .{ .min = rect.min, .max = rect.max };
 }
 
 pub export fn zsc_load_icon_rgba_from_memory(data: [*c]const u8, len: c_int, width: [*c]c_int, height: [*c]c_int) [*c]u8 {
