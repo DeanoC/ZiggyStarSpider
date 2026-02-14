@@ -1,11 +1,17 @@
 const std = @import("std");
-const zui_theme = @import("ziggy_ui_theme");
-const zui_profile = @import("ziggy_ui_profile");
+const zui = @import("ziggy-ui");
 const ws_client_mod = @import("websocket_client.zig");
 
 const c = @cImport({
     @cInclude("SDL3/SDL.h");
 });
+
+const widgets = zui.widgets;
+const zlayout = zui.core.layout;
+const zcolors = zui.theme.colors;
+
+const Rect = zui.core.Rect;
+const Paint = zui.theme_engine.Paint;
 
 const Screen = enum {
     settings,
@@ -25,49 +31,50 @@ const ConnectionState = enum {
     error_state,
 };
 
-const Rect = struct {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-
-    fn contains(self: Rect, px: f32, py: f32) bool {
-        return px >= self.x and px <= self.x + self.w and py >= self.y and py <= self.y + self.h;
-    }
-};
-
-const widgets = struct {
-    pub const ButtonState = struct {
-        hovered: bool,
-        pressed: bool,
-    };
-
-    pub fn buttonState(rect: Rect, mouse_pos: [2]f32, mouse_down: bool) ButtonState {
-        const inside = rect.contains(mouse_pos[0], mouse_pos[1]);
-        return .{
-            .hovered = inside,
-            .pressed = inside and mouse_down,
-        };
-    }
-
-    pub const TextInputState = struct {
-        hovered: bool,
-        focused: bool,
-    };
-
-    pub fn textInputState(rect: Rect, mouse_pos: [2]f32, mouse_clicked: bool, currently_focused: bool) TextInputState {
-        const inside = rect.contains(mouse_pos[0], mouse_pos[1]);
-        return .{
-            .hovered = inside,
-            .focused = if (mouse_clicked) inside else currently_focused,
-        };
-    }
-};
-
 const ChatMessage = struct {
     role: []u8,
     content: []u8,
 };
+
+const SettingsLayoutIds = struct {
+    root: u64,
+    title: u64,
+    subtitle: u64,
+    url_label: u64,
+    url_input: u64,
+    connect_button: u64,
+    status: u64,
+    tip: u64,
+};
+
+const ChatLayoutIds = struct {
+    root: u64,
+    header: u64,
+    history: u64,
+    composer: u64,
+    chat_input: u64,
+    send_button: u64,
+};
+
+const SettingsRects = struct {
+    title: Rect,
+    subtitle: Rect,
+    url_label: Rect,
+    url_input: Rect,
+    connect_button: Rect,
+    status: Rect,
+    tip: Rect,
+};
+
+const ChatRects = struct {
+    header: Rect,
+    history: Rect,
+    composer: Rect,
+    chat_input: Rect,
+    send_button: Rect,
+};
+
+const WindowSize = struct { w: i32, h: i32 };
 
 const App = struct {
     allocator: std.mem.Allocator,
@@ -85,8 +92,12 @@ const App = struct {
 
     connection_state: ConnectionState = .disconnected,
     status_text: []u8,
-    ui_profile: zui_profile.Profile,
-    theme: *const zui_theme.Theme,
+
+    theme: *const zui.Theme,
+
+    layout_engine: zlayout.LayoutEngine,
+    settings_ids: SettingsLayoutIds,
+    chat_ids: ChatLayoutIds,
 
     running: bool = true,
 
@@ -97,6 +108,7 @@ const App = struct {
     mouse_released: bool = false,
 
     scroll_lines: i32 = 0,
+    last_chat_history_rect: Rect = Rect.fromXYWH(0, 0, 0, 0),
 
     pub fn init(allocator: std.mem.Allocator) !App {
         if (!c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_EVENTS)) {
@@ -114,18 +126,22 @@ const App = struct {
 
         _ = c.SDL_StartTextInput(window);
 
-        const caps = zui_profile.PlatformCaps.defaultForTarget();
-        const profile = zui_profile.defaultsFor(.desktop, caps);
+        zui.theme.setMode(.dark);
 
         var app = App{
             .allocator = allocator,
             .window = window,
             .renderer = renderer,
             .status_text = try allocator.dupe(u8, "Not connected"),
-            .ui_profile = profile,
-            .theme = zui_theme.get(.dark),
+            .theme = zui.theme.current(),
+            .layout_engine = zlayout.LayoutEngine.init(allocator),
+            .settings_ids = undefined,
+            .chat_ids = undefined,
         };
+        errdefer app.layout_engine.deinit();
+        errdefer allocator.free(app.status_text);
 
+        try app.initLayoutTrees();
         try app.server_url.appendSlice(allocator, "ws://127.0.0.1:18790");
         return app;
     }
@@ -141,12 +157,51 @@ const App = struct {
         self.server_url.deinit(self.allocator);
         self.chat_input.deinit(self.allocator);
 
+        self.layout_engine.deinit();
         self.allocator.free(self.status_text);
 
         _ = c.SDL_StopTextInput(self.window);
         c.SDL_DestroyRenderer(self.renderer);
         c.SDL_DestroyWindow(self.window);
         c.SDL_Quit();
+    }
+
+    fn initLayoutTrees(self: *App) !void {
+        const s_root = try self.layout_engine.createNode(null);
+        const s_title = try self.layout_engine.createNode(s_root);
+        const s_subtitle = try self.layout_engine.createNode(s_root);
+        const s_url_label = try self.layout_engine.createNode(s_root);
+        const s_url_input = try self.layout_engine.createNode(s_root);
+        const s_connect = try self.layout_engine.createNode(s_root);
+        const s_status = try self.layout_engine.createNode(s_root);
+        const s_tip = try self.layout_engine.createNode(s_root);
+
+        self.settings_ids = .{
+            .root = s_root,
+            .title = s_title,
+            .subtitle = s_subtitle,
+            .url_label = s_url_label,
+            .url_input = s_url_input,
+            .connect_button = s_connect,
+            .status = s_status,
+            .tip = s_tip,
+        };
+
+        const c_root = try self.layout_engine.createNode(null);
+        const c_header = try self.layout_engine.createNode(c_root);
+        const c_history = try self.layout_engine.createNode(c_root);
+        const c_composer = try self.layout_engine.createNode(c_root);
+        const c_input = try self.layout_engine.createNode(c_composer);
+        const c_send = try self.layout_engine.createNode(c_composer);
+
+        self.chat_ids = .{
+            .root = c_root,
+            .header = c_header,
+            .history = c_history,
+            .composer = c_composer,
+            .chat_input = c_input,
+            .send_button = c_send,
+        };
     }
 
     pub fn run(self: *App) !void {
@@ -158,7 +213,6 @@ const App = struct {
             try self.pollWebSocket();
 
             self.drawFrame();
-
             _ = c.SDL_Delay(16);
         }
     }
@@ -184,15 +238,9 @@ const App = struct {
                         self.mouse_released = true;
                     }
                 },
-                c.SDL_EVENT_MOUSE_WHEEL => {
-                    self.handleMouseWheel(event.wheel.y);
-                },
-                c.SDL_EVENT_KEY_DOWN => {
-                    try self.handleKeyDown(event.key.key);
-                },
-                c.SDL_EVENT_TEXT_INPUT => {
-                    try self.handleTextInput(std.mem.span(event.text.text));
-                },
+                c.SDL_EVENT_MOUSE_WHEEL => self.handleMouseWheel(event.wheel.y),
+                c.SDL_EVENT_KEY_DOWN => try self.handleKeyDown(event.key.key),
+                c.SDL_EVENT_TEXT_INPUT => try self.handleTextInput(std.mem.span(event.text.text)),
                 else => {},
             }
         }
@@ -227,17 +275,7 @@ const App = struct {
 
     fn handleMouseWheel(self: *App, wheel_y: f32) void {
         if (self.screen != .chat) return;
-
-        const dims = self.windowSize();
-        const control_h = self.ui_profile.hit_target_min_px + 4;
-        const history_rect = Rect{
-            .x = 20,
-            .y = 50,
-            .w = @as(f32, @floatFromInt(dims.w)) - 40,
-            .h = @as(f32, @floatFromInt(dims.h)) - 50 - (control_h + 34),
-        };
-
-        if (!history_rect.contains(self.mouse_x, self.mouse_y)) return;
+        if (!self.last_chat_history_rect.contains(.{ self.mouse_x, self.mouse_y })) return;
 
         if (wheel_y > 0) {
             self.scroll_lines += 1;
@@ -256,12 +294,8 @@ const App = struct {
 
         if (key == c.SDLK_TAB) {
             switch (self.screen) {
-                .settings => {
-                    self.focus = .server_url;
-                },
-                .chat => {
-                    self.focus = if (self.focus == .chat_input) .none else .chat_input;
-                },
+                .settings => self.focus = .server_url,
+                .chat => self.focus = if (self.focus == .chat_input) .none else .chat_input,
             }
             return;
         }
@@ -307,6 +341,8 @@ const App = struct {
     }
 
     fn drawFrame(self: *App) void {
+        self.theme = zui.theme.current();
+
         const bg = self.theme.colors.background;
         _ = c.SDL_SetRenderDrawColor(self.renderer, colorToU8(bg[0]), colorToU8(bg[1]), colorToU8(bg[2]), 255);
         _ = c.SDL_RenderClear(self.renderer);
@@ -321,98 +357,313 @@ const App = struct {
 
     fn drawSettingsScreen(self: *App) void {
         const dims = self.windowSize();
+        const rects = self.computeSettingsRects(dims) catch return;
 
-        self.drawText(24, 18, "ZiggyStarSpider - GUI Client");
-        self.drawText(24, 36, "Settings / Auth");
+        self.drawLabel(rects.title, "ZiggyStarSpider - GUI Client", self.theme.colors.text_primary);
+        self.drawLabel(rects.subtitle, "Settings / Auth", self.theme.colors.text_secondary);
+        self.drawLabel(rects.url_label, "Server URL", self.theme.colors.text_primary);
 
-        self.drawText(24, 74, "Server URL:");
-
-        const control_h = self.ui_profile.hit_target_min_px + 4;
-        const url_rect = Rect{ .x = 24, .y = 92, .w = @as(f32, @floatFromInt(dims.w)) - 48, .h = control_h };
-        const connect_rect = Rect{ .x = 24, .y = 144, .w = 140, .h = control_h };
-
-        const url_state = widgets.textInputState(
-            url_rect,
-            .{ self.mouse_x, self.mouse_y },
-            self.mouse_clicked,
+        const url_focused = self.drawTextInputWidget(
+            rects.url_input,
+            self.server_url.items,
             self.focus == .server_url,
+            .{ .placeholder = "ws://127.0.0.1:18790" },
         );
-        if (url_state.focused) self.focus = .server_url;
-        if (self.mouse_clicked and !url_rect.contains(self.mouse_x, self.mouse_y)) {
+
+        if (url_focused) {
+            self.focus = .server_url;
+        } else if (self.mouse_clicked and !rects.url_input.contains(.{ self.mouse_x, self.mouse_y })) {
             self.focus = .none;
         }
 
-        self.drawInput(url_rect, self.server_url.items, self.focus == .server_url);
-
-        const connect_state = widgets.buttonState(
-            connect_rect,
-            .{ self.mouse_x, self.mouse_y },
-            self.mouse_down,
+        const connect_clicked = self.drawButtonWidget(
+            rects.connect_button,
+            "Connect",
+            .{ .variant = .primary, .disabled = self.connection_state == .connecting },
         );
-
-        self.drawButton(connect_rect, "Connect", connect_state.hovered, self.connection_state == .connecting);
-
-        if (self.mouse_released and connect_rect.contains(self.mouse_x, self.mouse_y) and self.connection_state != .connecting) {
+        if (connect_clicked) {
             self.tryConnect() catch {};
         }
 
-        self.drawConnectionIndicator(24, 204);
-        self.drawText(48, 206, self.status_text);
-        self.drawText(24, 240, "Tip: Enter URL, press Connect, then chat.");
+        self.drawStatusRow(rects.status);
+        self.drawLabel(rects.tip, "Tip: Enter URL, press Connect, then chat.", self.theme.colors.text_secondary);
     }
 
     fn drawChatScreen(self: *App) void {
         const dims = self.windowSize();
+        const rects = self.computeChatRects(dims) catch return;
 
-        const top_h: f32 = 32;
-        const control_h = self.ui_profile.hit_target_min_px + 4;
-        const history_rect = Rect{
-            .x = 20,
-            .y = top_h + 18,
-            .w = @as(f32, @floatFromInt(dims.w)) - 40,
-            .h = @as(f32, @floatFromInt(dims.h)) - (top_h + 18) - (control_h + 34),
-        };
-        const input_rect = Rect{ .x = 20, .y = @as(f32, @floatFromInt(dims.h)) - (control_h + 24), .w = @as(f32, @floatFromInt(dims.w)) - 150, .h = control_h };
-        const send_rect = Rect{ .x = @as(f32, @floatFromInt(dims.w)) - 118, .y = @as(f32, @floatFromInt(dims.h)) - (control_h + 24), .w = 98, .h = control_h };
+        self.last_chat_history_rect = rects.history;
+        self.clampScroll();
 
-        self.drawText(20, 10, "Connected");
-        self.drawText(120, 10, self.server_url.items);
+        var header_buf: [1024]u8 = undefined;
+        const header = std.fmt.bufPrint(&header_buf, "Connected: {s}", .{self.server_url.items}) catch "Connected";
+        self.drawLabel(rects.header, header, self.theme.colors.text_primary);
 
-        self.drawBox(history_rect, 36, 38, 44, true);
-        self.drawBox(input_rect, 36, 38, 44, true);
+        self.drawSurfacePanel(rects.history);
+        self.drawMessageList(rects.history);
 
-        if (self.mouse_clicked and history_rect.contains(self.mouse_x, self.mouse_y)) {
+        const chat_focused = self.drawTextInputWidget(
+            rects.chat_input,
+            self.chat_input.items,
+            self.focus == .chat_input,
+            .{ .placeholder = "Type your message..." },
+        );
+
+        if (chat_focused) {
+            self.focus = .chat_input;
+        } else if (self.mouse_clicked and rects.history.contains(.{ self.mouse_x, self.mouse_y })) {
             self.focus = .none;
         }
 
-        const input_state = widgets.textInputState(
-            input_rect,
-            .{ self.mouse_x, self.mouse_y },
-            self.mouse_clicked,
-            self.focus == .chat_input,
-        );
-        if (input_state.focused) self.focus = .chat_input;
-
-        self.drawInput(input_rect, self.chat_input.items, self.focus == .chat_input);
-
-        const send_state = widgets.buttonState(
-            send_rect,
-            .{ self.mouse_x, self.mouse_y },
-            self.mouse_down,
-        );
-
-        self.drawButton(send_rect, "Send", send_state.hovered, false);
-        if (self.mouse_released and send_rect.contains(self.mouse_x, self.mouse_y)) {
+        const send_clicked = self.drawButtonWidget(rects.send_button, "Send", .{ .variant = .primary });
+        if (send_clicked) {
             self.sendChatMessage() catch {};
         }
+    }
 
-        self.drawMessageList(history_rect);
+    fn computeSettingsRects(self: *App, dims: WindowSize) !SettingsRects {
+        const pad = self.theme.spacing.lg;
+        const root = Rect.fromXYWH(
+            pad,
+            pad,
+            @max(120, @as(f32, @floatFromInt(dims.w)) - pad * 2.0),
+            @max(120, @as(f32, @floatFromInt(dims.h)) - pad * 2.0),
+        );
+
+        const line_h: f32 = 14.0;
+        const input_h = widgets.text_input.defaultHeight(self.theme, line_h);
+        const button_h = widgets.button.defaultHeight(self.theme, line_h);
+
+        self.layout_engine.setNodeRect(self.settings_ids.root, root);
+
+        if (self.layout_engine.getNode(self.settings_ids.root)) |node| {
+            node.padding = .{ 0, 0, 0, 0 };
+        }
+
+        self.setNodePreferred(self.settings_ids.title, .{ root.width(), line_h + 4.0 }, 0.0, null);
+        self.setNodePreferred(self.settings_ids.subtitle, .{ root.width(), line_h + 2.0 }, 0.0, null);
+        self.setNodePreferred(self.settings_ids.url_label, .{ root.width(), line_h + 2.0 }, 0.0, null);
+        self.setNodePreferred(self.settings_ids.url_input, .{ root.width(), input_h }, 0.0, null);
+        self.setNodePreferred(self.settings_ids.connect_button, .{ 150.0, button_h }, 0.0, .start);
+        self.setNodePreferred(self.settings_ids.status, .{ root.width(), line_h + 18.0 }, 0.0, null);
+        self.setNodePreferred(self.settings_ids.tip, .{ root.width(), line_h + 2.0 }, 0.0, null);
+
+        try self.layout_engine.computeFlexLayout(self.settings_ids.root, root.size(), .{
+            .direction = .vertical,
+            .main_align = .start,
+            .cross_align = .stretch,
+            .spacing = .{ .main = self.theme.spacing.sm },
+        });
+
+        return .{
+            .title = self.nodeRect(self.settings_ids.title),
+            .subtitle = self.nodeRect(self.settings_ids.subtitle),
+            .url_label = self.nodeRect(self.settings_ids.url_label),
+            .url_input = self.nodeRect(self.settings_ids.url_input),
+            .connect_button = self.nodeRect(self.settings_ids.connect_button),
+            .status = self.nodeRect(self.settings_ids.status),
+            .tip = self.nodeRect(self.settings_ids.tip),
+        };
+    }
+
+    fn computeChatRects(self: *App, dims: WindowSize) !ChatRects {
+        const pad = self.theme.spacing.md + 4.0;
+        const root = Rect.fromXYWH(
+            pad,
+            pad,
+            @max(120, @as(f32, @floatFromInt(dims.w)) - pad * 2.0),
+            @max(120, @as(f32, @floatFromInt(dims.h)) - pad * 2.0),
+        );
+
+        const line_h: f32 = 14.0;
+        const input_h = widgets.text_input.defaultHeight(self.theme, line_h);
+        const button_h = widgets.button.defaultHeight(self.theme, line_h);
+
+        self.layout_engine.setNodeRect(self.chat_ids.root, root);
+
+        if (self.layout_engine.getNode(self.chat_ids.root)) |node| {
+            node.padding = .{ 0, 0, 0, 0 };
+        }
+
+        self.setNodePreferred(self.chat_ids.header, .{ root.width(), line_h + 4.0 }, 0.0, null);
+        self.setNodePreferred(self.chat_ids.history, .{ root.width(), 200.0 }, 1.0, null);
+        self.setNodePreferred(self.chat_ids.composer, .{ root.width(), @max(input_h, button_h) }, 0.0, null);
+
+        try self.layout_engine.computeFlexLayout(self.chat_ids.root, root.size(), .{
+            .direction = .vertical,
+            .main_align = .start,
+            .cross_align = .stretch,
+            .spacing = .{ .main = self.theme.spacing.sm },
+        });
+
+        const composer_rect = self.nodeRect(self.chat_ids.composer);
+        self.layout_engine.setNodeRect(self.chat_ids.composer, composer_rect);
+
+        if (self.layout_engine.getNode(self.chat_ids.composer)) |node| {
+            node.padding = .{ 0, 0, 0, 0 };
+        }
+
+        self.setNodePreferred(self.chat_ids.chat_input, .{ composer_rect.width(), input_h }, 1.0, null);
+        self.setNodePreferred(self.chat_ids.send_button, .{ 100.0, button_h }, 0.0, .stretch);
+
+        try self.layout_engine.computeFlexLayout(self.chat_ids.composer, composer_rect.size(), .{
+            .direction = .horizontal,
+            .main_align = .start,
+            .cross_align = .stretch,
+            .spacing = .{ .main = self.theme.spacing.sm },
+        });
+
+        return .{
+            .header = self.nodeRect(self.chat_ids.header),
+            .history = self.nodeRect(self.chat_ids.history),
+            .composer = composer_rect,
+            .chat_input = self.nodeRect(self.chat_ids.chat_input),
+            .send_button = self.nodeRect(self.chat_ids.send_button),
+        };
+    }
+
+    fn nodeRect(self: *App, node_id: u64) Rect {
+        if (self.layout_engine.getNode(node_id)) |node| {
+            return node.rect;
+        }
+        return Rect.fromXYWH(0, 0, 0, 0);
+    }
+
+    fn setNodePreferred(
+        self: *App,
+        node_id: u64,
+        preferred: [2]f32,
+        flex: f32,
+        align_self: ?zlayout.Alignment,
+    ) void {
+        if (self.layout_engine.getNode(node_id)) |node| {
+            node.preferred_size = preferred;
+            node.flex = flex;
+            node.align_self = align_self;
+            node.margin = .{ 0, 0, 0, 0 };
+        }
+    }
+
+    fn drawSurfacePanel(self: *App, rect: Rect) void {
+        const fill = Paint{ .solid = self.theme.colors.surface };
+        self.drawPaintRect(rect, fill);
+        self.drawRect(rect, self.theme.colors.border);
+    }
+
+    fn drawStatusRow(self: *App, rect: Rect) void {
+        self.drawSurfacePanel(rect);
+
+        const indicator = Rect.fromXYWH(rect.min[0] + 8.0, rect.min[1] + 8.0, 12.0, 12.0);
+        const dot = switch (self.connection_state) {
+            .disconnected => zcolors.rgba(200, 80, 80, 255),
+            .connecting => zcolors.rgba(220, 200, 60, 255),
+            .connected => zcolors.rgba(90, 210, 90, 255),
+            .error_state => zcolors.rgba(230, 120, 70, 255),
+        };
+        self.drawFilledRect(indicator, dot);
+
+        self.drawTextTrimmed(
+            rect.min[0] + 28.0,
+            rect.min[1] + 7.0,
+            rect.width() - 34.0,
+            self.status_text,
+            self.theme.colors.text_primary,
+        );
+    }
+
+    fn drawButtonWidget(self: *App, rect: Rect, label: []const u8, opts: widgets.button.Options) bool {
+        const state = widgets.button.updateState(
+            .{ .x = rect.min[0], .y = rect.min[1], .width = rect.width(), .height = rect.height() },
+            .{ self.mouse_x, self.mouse_y },
+            self.mouse_down,
+            opts,
+        );
+
+        var fill: [4]f32 = switch (opts.variant) {
+            .primary => self.theme.colors.primary,
+            .secondary => self.theme.colors.surface,
+            .ghost => zcolors.withAlpha(self.theme.colors.primary, 0.08),
+        };
+
+        if (opts.disabled) {
+            fill = zcolors.blend(fill, self.theme.colors.background, 0.45);
+        } else if (state.pressed) {
+            fill = zcolors.blend(fill, zcolors.rgba(255, 255, 255, 255), 0.22);
+        } else if (state.hovered) {
+            fill = zcolors.blend(fill, self.theme.colors.primary, 0.12);
+        }
+
+        self.drawFilledRect(rect, fill);
+
+        var border = self.theme.colors.border;
+        if (state.hovered and !opts.disabled) {
+            border = zcolors.blend(border, self.theme.colors.primary, 0.28);
+        }
+        self.drawRect(rect, border);
+
+        var text_color = switch (opts.variant) {
+            .primary => zcolors.rgba(255, 255, 255, 255),
+            .secondary => self.theme.colors.text_primary,
+            .ghost => self.theme.colors.primary,
+        };
+        if (opts.disabled) {
+            text_color = zcolors.withAlpha(self.theme.colors.text_secondary, 0.7);
+        }
+        self.drawCenteredText(rect, label, text_color);
+
+        return !opts.disabled and self.mouse_released and rect.contains(.{ self.mouse_x, self.mouse_y });
+    }
+
+    fn drawTextInputWidget(
+        self: *App,
+        rect: Rect,
+        text: []const u8,
+        currently_focused: bool,
+        opts: widgets.text_input.Options,
+    ) bool {
+        const state = widgets.text_input.updateState(
+            .{ .x = rect.min[0], .y = rect.min[1], .width = rect.width(), .height = rect.height() },
+            .{ self.mouse_x, self.mouse_y },
+            self.mouse_clicked,
+            currently_focused,
+        );
+
+        const fill = widgets.text_input.getFillPaint(self.theme, state, opts);
+        const border = widgets.text_input.getBorderColor(self.theme, state, opts);
+
+        self.drawPaintRect(rect, fill);
+        self.drawRect(rect, border);
+
+        const text_x = rect.min[0] + 8.0;
+        const text_y = rect.min[1] + 10.0;
+        const max_w = rect.width() - 16.0;
+
+        if (text.len == 0) {
+            const placeholder = if (opts.placeholder.len > 0) opts.placeholder else "";
+            if (placeholder.len > 0) {
+                self.drawTextTrimmed(text_x, text_y, max_w, placeholder, widgets.text_input.getPlaceholderColor(self.theme));
+            }
+        } else {
+            var text_color = self.theme.colors.text_primary;
+            if (opts.disabled) text_color = zcolors.withAlpha(text_color, 0.45);
+            self.drawTextTrimmed(text_x, text_y, max_w, text, text_color);
+        }
+
+        if (state.focused and !opts.disabled and !opts.read_only) {
+            const max_chars = @as(usize, @intFromFloat(@max(0, @floor(max_w / 8.0))));
+            const caret_chars = @min(text.len, max_chars);
+            const caret_x = text_x + @as(f32, @floatFromInt(caret_chars)) * 8.0;
+            self.drawText(caret_x, text_y, "_", widgets.text_input.getCaretColor(self.theme));
+        }
+
+        return state.focused;
     }
 
     fn drawMessageList(self: *App, rect: Rect) void {
-        const line_h: f32 = 14;
-        const max_visible_f = @max(0, @floor((rect.h - 10) / line_h));
-        const visible_lines: usize = @as(usize, @intFromFloat(max_visible_f));
+        const line_h: f32 = 14.0;
+        const usable_h = @max(0.0, rect.height() - 10.0);
+        const visible_lines: usize = @as(usize, @intFromFloat(@floor(usable_h / line_h)));
 
         self.clampScroll();
 
@@ -425,13 +676,13 @@ const App = struct {
             0;
         const end = @min(total, start + visible_lines);
 
-        var y = rect.y + 6;
+        var y = rect.min[1] + 6.0;
         var i = start;
         while (i < end) : (i += 1) {
             const msg = self.messages.items[i];
             var line_buf: [1024]u8 = undefined;
             const raw = std.fmt.bufPrint(&line_buf, "[{s}] {s}", .{ msg.role, msg.content }) catch "";
-            self.drawTextTrimmed(rect.x + 6, y, rect.w - 12, raw);
+            self.drawTextTrimmed(rect.min[0] + 6.0, y, rect.width() - 12.0, raw, self.theme.colors.text_primary);
             y += line_h;
         }
     }
@@ -443,7 +694,6 @@ const App = struct {
         }
 
         self.setConnectionState(.connecting, "Connecting...");
-
         self.disconnect();
 
         var client = ws_client_mod.WebSocketClient.init(self.allocator, self.server_url.items, "") catch |err| {
@@ -518,7 +768,6 @@ const App = struct {
             .content = try self.allocator.dupe(u8, content),
         });
 
-        // Keep memory bounded.
         if (self.messages.items.len > 500) {
             const oldest = self.messages.orderedRemove(0);
             self.allocator.free(oldest.role);
@@ -534,11 +783,9 @@ const App = struct {
     }
 
     fn clampScroll(self: *App) void {
-        const dims = self.windowSize();
-        const control_h = self.ui_profile.hit_target_min_px + 4;
-        const history_h = @as(f32, @floatFromInt(dims.h)) - 50 - (control_h + 34);
-        const line_h: f32 = 14;
-        const visible_lines: usize = @as(usize, @intFromFloat(@max(0, @floor((history_h - 10) / line_h))));
+        const line_h: f32 = 14.0;
+        const usable_h = @max(0.0, self.last_chat_history_rect.height() - 10.0);
+        const visible_lines: usize = @as(usize, @intFromFloat(@floor(usable_h / line_h)));
         const total = self.messages.items.len;
         const max_scroll: i32 = @intCast(if (total > visible_lines) total - visible_lines else 0);
 
@@ -546,83 +793,81 @@ const App = struct {
         if (self.scroll_lines > max_scroll) self.scroll_lines = max_scroll;
     }
 
-    fn drawConnectionIndicator(self: *App, x: f32, y: f32) void {
-        const color = switch (self.connection_state) {
-            .disconnected => [_]u8{ 200, 80, 80, 255 },
-            .connecting => [_]u8{ 220, 200, 60, 255 },
-            .connected => [_]u8{ 90, 210, 90, 255 },
-            .error_state => [_]u8{ 230, 120, 70, 255 },
-        };
-
-        const r = Rect{ .x = x, .y = y, .w = 14, .h = 14 };
-        self.drawFilledRect(r, color[0], color[1], color[2], color[3]);
-    }
-
-    fn drawInput(self: *App, rect: Rect, text: []const u8, focused: bool) void {
-        const border: [4]u8 = if (focused) .{ 120, 180, 255, 255 } else .{ 90, 95, 110, 255 };
-        self.drawBox(rect, 32, 34, 40, true);
-        self.drawRect(rect, border[0], border[1], border[2], border[3]);
-
-        if (text.len == 0 and focused) {
-            self.drawText(rect.x + 8, rect.y + 11, "_");
-        } else {
-            self.drawTextTrimmed(rect.x + 8, rect.y + 11, rect.w - 16, text);
-            if (focused) {
-                const caret_x = rect.x + 8 + @as(f32, @floatFromInt(@min(text.len, @as(usize, @intFromFloat((rect.w - 16) / 8.0))))) * 8;
-                self.drawText(caret_x, rect.y + 11, "_");
-            }
+    fn drawPaintRect(self: *App, rect: Rect, paint: Paint) void {
+        switch (paint) {
+            .solid => |color| self.drawFilledRect(rect, color),
+            .gradient4 => |g| {
+                const avg: [4]f32 = .{
+                    (g.tl[0] + g.tr[0] + g.bl[0] + g.br[0]) * 0.25,
+                    (g.tl[1] + g.tr[1] + g.bl[1] + g.br[1]) * 0.25,
+                    (g.tl[2] + g.tr[2] + g.bl[2] + g.br[2]) * 0.25,
+                    (g.tl[3] + g.tr[3] + g.bl[3] + g.br[3]) * 0.25,
+                };
+                self.drawFilledRect(rect, avg);
+            },
+            .image => {
+                self.drawFilledRect(rect, self.theme.colors.surface);
+            },
         }
     }
 
-    fn drawButton(self: *App, rect: Rect, label: []const u8, hovered: bool, disabled: bool) void {
-        if (disabled) {
-            self.drawBox(rect, 70, 70, 74, true);
-        } else if (hovered) {
-            self.drawBox(rect, 82, 116, 198, true);
-        } else {
-            self.drawBox(rect, 62, 92, 164, true);
-        }
-        self.drawRect(rect, 120, 130, 160, 255);
-        self.drawText(rect.x + 12, rect.y + 12, label);
-    }
-
-    fn drawBox(self: *App, rect: Rect, r: u8, g: u8, b: u8, fill: bool) void {
-        if (fill) {
-            self.drawFilledRect(rect, r, g, b, 255);
-        } else {
-            self.drawRect(rect, r, g, b, 255);
-        }
-    }
-
-    fn drawFilledRect(self: *App, rect: Rect, r: u8, g: u8, b: u8, a: u8) void {
-        _ = c.SDL_SetRenderDrawColor(self.renderer, r, g, b, a);
-        var sdl_rect = c.SDL_FRect{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+    fn drawFilledRect(self: *App, rect: Rect, color: [4]f32) void {
+        _ = c.SDL_SetRenderDrawColor(
+            self.renderer,
+            colorToU8(color[0]),
+            colorToU8(color[1]),
+            colorToU8(color[2]),
+            colorToU8(color[3]),
+        );
+        var sdl_rect = c.SDL_FRect{ .x = rect.min[0], .y = rect.min[1], .w = rect.width(), .h = rect.height() };
         _ = c.SDL_RenderFillRect(self.renderer, &sdl_rect);
     }
 
-    fn drawRect(self: *App, rect: Rect, r: u8, g: u8, b: u8, a: u8) void {
-        _ = c.SDL_SetRenderDrawColor(self.renderer, r, g, b, a);
-        var sdl_rect = c.SDL_FRect{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+    fn drawRect(self: *App, rect: Rect, color: [4]f32) void {
+        _ = c.SDL_SetRenderDrawColor(
+            self.renderer,
+            colorToU8(color[0]),
+            colorToU8(color[1]),
+            colorToU8(color[2]),
+            colorToU8(color[3]),
+        );
+        var sdl_rect = c.SDL_FRect{ .x = rect.min[0], .y = rect.min[1], .w = rect.width(), .h = rect.height() };
         _ = c.SDL_RenderRect(self.renderer, &sdl_rect);
     }
 
-    fn drawText(self: *App, x: f32, y: f32, text: []const u8) void {
+    fn drawLabel(self: *App, rect: Rect, text: []const u8, color: [4]f32) void {
+        self.drawTextTrimmed(rect.min[0], rect.min[1], rect.width(), text, color);
+    }
+
+    fn drawCenteredText(self: *App, rect: Rect, text: []const u8, color: [4]f32) void {
+        const text_w = @as(f32, @floatFromInt(text.len)) * 8.0;
+        const x = rect.min[0] + @max(0.0, (rect.width() - text_w) * 0.5);
+        const y = rect.min[1] + @max(0.0, (rect.height() - 12.0) * 0.5);
+        self.drawText(x, y, text, color);
+    }
+
+    fn drawText(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
         var buf: [1024]u8 = undefined;
         const z = std.fmt.bufPrintZ(&buf, "{s}", .{text}) catch return;
-        const fg = self.theme.colors.text_primary;
-        _ = c.SDL_SetRenderDrawColor(self.renderer, colorToU8(fg[0]), colorToU8(fg[1]), colorToU8(fg[2]), 255);
+        _ = c.SDL_SetRenderDrawColor(
+            self.renderer,
+            colorToU8(color[0]),
+            colorToU8(color[1]),
+            colorToU8(color[2]),
+            colorToU8(color[3]),
+        );
         _ = c.SDL_RenderDebugText(self.renderer, x, y, z.ptr);
     }
 
-    fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8) void {
+    fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
         const max_chars = @as(usize, @intFromFloat(@max(0, @floor(max_w / 8.0))));
         if (text.len <= max_chars) {
-            self.drawText(x, y, text);
+            self.drawText(x, y, text, color);
             return;
         }
 
         if (max_chars <= 3) {
-            self.drawText(x, y, "...");
+            self.drawText(x, y, "...", color);
             return;
         }
 
@@ -632,10 +877,10 @@ const App = struct {
         tmp[copy_len] = '.';
         tmp[copy_len + 1] = '.';
         tmp[copy_len + 2] = '.';
-        self.drawText(x, y, tmp[0 .. copy_len + 3]);
+        self.drawText(x, y, tmp[0 .. copy_len + 3], color);
     }
 
-    fn windowSize(self: *App) struct { w: i32, h: i32 } {
+    fn windowSize(self: *App) WindowSize {
         var w: i32 = 0;
         var h: i32 = 0;
         _ = c.SDL_GetWindowSize(self.window, &w, &h);

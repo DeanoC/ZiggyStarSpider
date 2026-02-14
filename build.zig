@@ -56,26 +56,13 @@ pub fn build(b: *std.Build) void {
     const desktop_target = os_tag == .linux or os_tag == .windows or os_tag == .macos;
 
     if (desktop_target) {
-        const zui_theme_mod = b.createModule(.{
-            .root_source_file = ziggy_ui.path("src/themes/theme.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-
-        const zui_profile_mod = b.createModule(.{
-            .root_source_file = ziggy_ui.path("src/theme_engine/profile.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-
         const gui_module = b.createModule(.{
             .root_source_file = b.path("src/gui/root.zig"),
             .target = target,
             .optimize = optimize,
         });
         gui_module.addImport("websocket", websocket.module("websocket"));
-        gui_module.addImport("ziggy_ui_theme", zui_theme_mod);
-        gui_module.addImport("ziggy_ui_profile", zui_profile_mod);
+        gui_module.addImport("ziggy-ui", ziggy_ui.module("ziggy-ui"));
         gui_module.addIncludePath(sdl3.path("include"));
 
         const gui_exe = b.addExecutable(.{
