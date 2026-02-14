@@ -33,6 +33,8 @@ pub const WebSocketClient = struct {
             .port = parsed.port,
             .tls = parsed.tls,
         });
+        var client_owned_locally = true;
+        errdefer if (client_owned_locally) client.deinit();
 
         var headers_storage: [512]u8 = undefined;
         const headers = if (self.token_buf.len > 0)
@@ -49,6 +51,7 @@ pub const WebSocketClient = struct {
         try client.readTimeout(0);
 
         self.client = client;
+        client_owned_locally = false;
         self.connected = true;
     }
 
@@ -77,7 +80,8 @@ pub const WebSocketClient = struct {
                 error.WouldBlock => return null,
                 else => return err,
             } orelse return null;
-            defer client.done(msg);
+            var should_done = true;
+            defer if (should_done) client.done(msg);
 
             switch (msg.type) {
                 .text, .binary => return try self.allocator.dupe(u8, msg.data),
@@ -87,6 +91,8 @@ pub const WebSocketClient = struct {
                     return null;
                 },
                 .close => {
+                    should_done = false;
+                    client.done(msg);
                     self.disconnect();
                     return error.ConnectionClosed;
                 },

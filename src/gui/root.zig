@@ -265,6 +265,7 @@ const App = struct {
                     error.ConnectionClosed, error.Closed => {
                         self.setConnectionState(.disconnected, "Disconnected");
                         self.disconnect();
+                        self.focusSettingsPanel();
                         break;
                     },
                     else => {
@@ -837,6 +838,15 @@ const App = struct {
         // Switch to chat panel by focusing it
         for (self.manager.workspace.panels.items) |*panel| {
             if (panel.kind == .Chat) {
+                self.manager.focusPanel(panel.id);
+                break;
+            }
+        }
+    }
+
+    fn focusSettingsPanel(self: *App) void {
+        for (self.manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .Settings or panel.kind == .Control) {
                 self.manager.focusPanel(panel.id);
                 break;
             }
