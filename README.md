@@ -8,7 +8,7 @@ ZiggyStarSpider (ZSS) is the native client for [ZiggySpiderweb](https://github.c
 
 - **Project-oriented work** - agents work on goals, not just chat
 - **Pro-active agency** - PM agent plans, spawns workers, reports progress
-- **Soft workflows** - AI-driven execution, not rigid pipelines  
+- **Soft workflows** - AI-driven execution, not rigid pipelines
 - **Virtual filesystem** - unified workspace across local, remote, and cloud storage
 - **Memory separation** - current chat, working context, long-term memory
 
@@ -23,18 +23,49 @@ ZiggyStarSpider (ZSS) is the native client for [ZiggySpiderweb](https://github.c
 
 Both share a common core (`ziggy-core`) for WebSocket, Canvas, and platform abstractions.
 
-## Quick Start
+## Build
+
+### CLI
 
 ```bash
-# Build
 zig build
-
-# Connect to Spiderweb
-./zig-out/bin/ziggystarspider --url ws://100.101.192.123:18790
-
-# Interactive mode
-./zig-out/bin/ziggystarspider --interactive
+./zig-out/bin/ziggystarspider --help
 ```
+
+### GUI (Windows + Linux + macOS desktop builds)
+
+```bash
+# Build GUI executable
+zig build gui
+
+# Run GUI
+zig build run-gui
+```
+
+Built GUI binary:
+
+- `zig-out/bin/zss-gui`
+
+## GUI Features (MVP)
+
+### Settings / Auth Screen
+
+- Server URL input (default `ws://127.0.0.1:18790`)
+- Connect button
+- Connection status indicator
+
+### Chat Screen
+
+- Message input field
+- Send button
+- Message history list
+- Mouse-wheel scrolling for history
+
+## Notes
+
+- GUI uses SDL3 for the native window/event loop and uses **ziggy-ui widget patterns** (`button` + `text_input` state handling) for interaction behavior.
+- Current chat payload format is JSON:
+  - `{"type":"chat","content":"..."}`
 
 ## Architecture
 
