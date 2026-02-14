@@ -5,10 +5,12 @@
     .minimum_zig_version = "0.15.0",
     .dependencies = .{
         .websocket = .{
-            .path = "../ZiggyStarClaw/deps/websocket",
+            .url = "https://github.com/DeanoC/ziggy-websocket/archive/refs/heads/master.tar.gz",
+            .hash = "ziggy_websocket-0.1.0-n53otiEZAwAiRhjTiMQRiYiXLnQUS-ztE8JjU_wC9VhG",
         },
         .ziggy_core = .{
-            .path = "../ziggy-core",
+            .url = "https://github.com/DeanoC/ziggy-core/archive/refs/heads/master.tar.gz",
+            .hash = "ziggy_core-0.1.0-q2d-rGiFAAA8ZiSbvWysW_gbVUJMoh-fGGn8PINTljE6",
         },
         .ziggy_ui = .{
             .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/tags/v0.1.0.tar.gz",
