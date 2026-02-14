@@ -6,10 +6,9 @@
         .websocket = .{
             .path = "../ZiggyStarClaw/deps/websocket",
         },
-        // TODO: Extract to shared library
-        // .ziggy-core = .{
-        //     .path = "../ziggy-core",
-        // },
+        .ziggy_core = .{
+            .path = "../ziggy-core",
+        },
     },
     .paths = .{
         "build.zig",
