@@ -6,7 +6,7 @@
     .dependencies = .{
         .websocket = .{
             .url = "https://github.com/DeanoC/ziggy-websocket/archive/refs/heads/master.tar.gz",
-            .hash = "ziggy_websocket-0.1.0-n53otiEZAwAiRhjTiMQRiYiXLnQUS-ztE8JjU_wC9VhG",
+            .hash = "ziggy_websocket-0.1.0-51gnxiEZAwAVuYGcMv3wSN-beE1838tl4Q9Tz0lfkRQU",
         },
         .ziggy_core = .{
             .url = "https://github.com/DeanoC/ziggy-core/archive/refs/heads/master.tar.gz",
