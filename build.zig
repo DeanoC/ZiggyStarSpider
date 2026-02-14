@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
     cli_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
 
     const cli_exe = b.addExecutable(.{
-        .name = "ziggystarspider",
+        .name = "zss",
         .root_module = cli_module,
     });
 
