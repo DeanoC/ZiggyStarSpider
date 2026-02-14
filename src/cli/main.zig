@@ -1,9 +1,12 @@
 const std = @import("std");
 const args = @import("args.zig");
 const logger = @import("ziggy-core").utils.logger;
-const profiler = @import("ziggy-core").utils.profiler;
+const WebSocketClient = @import("../client/websocket.zig").WebSocketClient;
 
 // Main CLI entry point for ZiggyStarSpider
+
+var g_client: ?WebSocketClient = null;
+var g_connected: bool = false;
 
 pub fn run(allocator: std.mem.Allocator) !void {
     // Parse arguments
@@ -48,14 +51,26 @@ pub fn run(allocator: std.mem.Allocator) !void {
         // No command and not interactive - show help
         args.printHelp();
     }
+    
+    // Cleanup global client if exists
+    if (g_client) |*client| {
+        client.deinit();
+        g_client = null;
+        g_connected = false;
+    }
+}
+
+fn getOrCreateClient(allocator: std.mem.Allocator, url: []const u8) !*WebSocketClient {
+    if (g_client == null) {
+        g_client = WebSocketClient.init(allocator, url, "");
+        try g_client.?.connect();
+        g_connected = true;
+    }
+    return &g_client.?;
 }
 
 fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
-    
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    
-    // TODO: Implement actual command execution
-    // For now, just print what would be executed
     
     switch (cmd.noun) {
         .chat => {
@@ -67,10 +82,26 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                     }
                     const message = try std.mem.join(allocator, " ", cmd.args);
                     defer allocator.free(message);
-                    try stdout.print("Would send: \"{s}\"\n", .{message});
+                    
+                    // Connect and send
+                    const client = try getOrCreateClient(allocator, options.url);
+                    
+                    const json = try std.fmt.allocPrint(allocator, "{{\"type\":\"chat.send\",\"content\":\"{s}\"}}", .{message});
+                    defer allocator.free(json);
+                    
+                    try client.send(json);
+                    try stdout.print("Sent: \"{s}\"\n", .{message});
+                    
+                    // Wait for response
+                    if (try client.readTimeout(10_000)) |response| {
+                        defer allocator.free(response);
+                        try stdout.print("Response: {s}\n", .{response});
+                    } else {
+                        try stdout.print("(No response received)\n", .{});
+                    }
                 },
                 .history => {
-                    try stdout.print("Would show chat history\n", .{});
+                    try stdout.print("Chat history not yet implemented\n", .{});
                 },
                 else => {
                     logger.err("Unknown chat verb", .{});
@@ -81,7 +112,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
         .project => {
             switch (cmd.verb) {
                 .list => {
-                    try stdout.print("Would list projects\n", .{});
+                    try stdout.print("Project list not yet implemented\n", .{});
                 },
                 .use => {
                     if (cmd.args.len == 0) {
@@ -98,7 +129,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                     try stdout.print("Would create project: {s}\n", .{cmd.args[0]});
                 },
                 .info => {
-                    try stdout.print("Would show project info\n", .{});
+                    try stdout.print("Project info not yet implemented\n", .{});
                 },
                 else => {
                     logger.err("Unknown project verb", .{});
@@ -109,7 +140,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
         .goal => {
             switch (cmd.verb) {
                 .list => {
-                    try stdout.print("Would list goals\n", .{});
+                    try stdout.print("Goal list not yet implemented\n", .{});
                 },
                 .create => {
                     if (cmd.args.len == 0) {
@@ -136,7 +167,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
         .task => {
             switch (cmd.verb) {
                 .list => {
-                    try stdout.print("Would list tasks\n", .{});
+                    try stdout.print("Task list not yet implemented\n", .{});
                 },
                 .info => {
                     if (cmd.args.len == 0) {
@@ -154,7 +185,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
         .worker => {
             switch (cmd.verb) {
                 .list => {
-                    try stdout.print("Would list workers\n", .{});
+                    try stdout.print("Worker list not yet implemented\n", .{});
                 },
                 .logs => {
                     if (cmd.args.len == 0) {
@@ -170,15 +201,33 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
             }
         },
         .connect => {
-            try stdout.print("Would connect to {s}\n", .{options.url});
+            if (g_connected) {
+                try stdout.print("Already connected to {s}\n", .{options.url});
+                return;
+            }
+            
+            const client = try getOrCreateClient(allocator, options.url);
+            _ = client;
+            try stdout.print("Connected to {s}\n", .{options.url});
         },
         .disconnect => {
-            try stdout.print("Would disconnect\n", .{});
+            if (!g_connected) {
+                try stdout.print("Not connected\n", .{});
+                return;
+            }
+            
+            if (g_client) |*client| {
+                client.disconnect();
+                client.deinit();
+            }
+            g_client = null;
+            g_connected = false;
+            try stdout.print("Disconnected\n", .{});
         },
         .status => {
             try stdout.print("Connection status:\n", .{});
             try stdout.print("  Server: {s}\n", .{options.url});
-            try stdout.print("  Connected: No (not implemented)\n", .{});
+            try stdout.print("  Connected: {s}\n", .{if (g_connected) "Yes" else "No"});
         },
         .help => {
             args.printHelp();
@@ -195,7 +244,6 @@ fn runInteractive(allocator: std.mem.Allocator, options: args.Options) !void {
     _ = options;
     
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    // const stdin = std.io.getStdIn().reader();
     
     try stdout.print("\nZiggyStarSpider Interactive Mode\n", .{});
     try stdout.print("Type 'help' for commands, 'quit' to exit.\n\n", .{});
