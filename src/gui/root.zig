@@ -286,7 +286,7 @@ const App = struct {
                     }
                 }
             },
-            .backspace => {
+            .back_space => {
                 if (self.settings_panel.focused and self.settings_panel.server_url.items.len > 0) {
                     _ = self.settings_panel.server_url.pop();
                 }
