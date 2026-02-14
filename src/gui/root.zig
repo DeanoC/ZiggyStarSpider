@@ -38,13 +38,13 @@ const ChatPanel = zui.ChatPanel(ChatMessage, ChatSession);
 const SettingsPanel = struct {
     server_url: std.ArrayList(u8) = .empty,
     focused: bool = true,
-    
+
     pub fn init(allocator: std.mem.Allocator) SettingsPanel {
         var panel = SettingsPanel{};
         panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790") catch {};
         return panel;
     }
-    
+
     pub fn deinit(self: *SettingsPanel, allocator: std.mem.Allocator) void {
         self.server_url.deinit(allocator);
     }
@@ -59,11 +59,11 @@ const App = struct {
     // Panel state
     settings_panel: SettingsPanel,
     chat_panel_state: zui.ui.workspace.ChatPanel = .{},
-    
+
     // Workspace and panel management
     next_panel_id: workspace.PanelId = 1,
     manager: panel_manager.PanelManager,
-    
+
     // Chat state
     chat_input: std.ArrayList(u8) = .empty,
     messages: std.ArrayList(ChatMessage) = .empty,
@@ -92,7 +92,7 @@ const App = struct {
 
     message_counter: u64 = 0,
     frame_clock: zapp.frame_clock.FrameClock,
-    
+
     // UI State for dock
     ui_state: zui.ui.main_window.WindowUiState = .{},
 
@@ -114,11 +114,11 @@ const App = struct {
 
         // Initialize theme - use clean theme (light mode as default for clean look)
         zui.theme.setMode(.light);
-        
+
         // Initialize workspace with default panels
         var ws = try workspace.Workspace.initDefault(allocator);
         errdefer ws.deinit(allocator);
-        
+
         // Replace the default chat panel session key with null for now
         for (ws.panels.items) |*panel| {
             if (panel.kind == .Chat) {
@@ -136,7 +136,7 @@ const App = struct {
         // Load config
         var config = config_mod.Config.load(allocator) catch |err| blk: {
             std.log.warn("Failed to load config: {s}, using defaults", .{@errorName(err)});
-            break :blk config_mod.Config.init(allocator);
+            break :blk try config_mod.Config.init(allocator);
         };
         errdefer config.deinit();
 
@@ -159,10 +159,10 @@ const App = struct {
             .frame_clock = zapp.frame_clock.FrameClock.init(60),
             .manager = undefined, // Will be initialized below
         };
-        
+
         app.manager = panel_manager.PanelManager.init(allocator, ws, &app.next_panel_id);
         errdefer app.manager.deinit();
-        
+
         errdefer app.settings_panel.deinit(allocator);
         errdefer allocator.free(app.status_text);
 
@@ -191,6 +191,7 @@ const App = struct {
         ui_sdl_input_backend.deinit();
 
         self.allocator.free(self.status_text);
+        self.config.deinit();
 
         self.swapchain.deinit();
         self.gpu.deinit();
@@ -318,7 +319,7 @@ const App = struct {
 
     fn handleTextInput(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
-        
+
         if (self.settings_panel.focused) {
             for (text) |ch| {
                 if (ch >= 32 and ch < 127) {
@@ -346,38 +347,38 @@ const App = struct {
         self.gpu.ui_renderer.beginFrame(fb_width, fb_height);
         self.swapchain.render(&self.gpu, &self.ui_commands);
     }
-    
+
     fn drawDockUi(self: *App, fb_width: u32, fb_height: u32) void {
         self.ui_commands.clear();
         ui_draw_context.setGlobalCommandList(&self.ui_commands);
         defer ui_draw_context.clearGlobalCommandList();
-        
+
         const viewport = UiRect.fromMinSize(
             .{ 0, 0 },
             .{ @floatFromInt(fb_width), @floatFromInt(fb_height) },
         );
-        
+
         // Draw background
         self.ui_commands.pushRect(
             .{ .min = .{ 0, 0 }, .max = .{ @floatFromInt(fb_width), @floatFromInt(fb_height) } },
             .{ .fill = self.theme.colors.background },
         );
-        
+
         // Compute dock layout
         const layout = self.manager.workspace.dock_layout.computeLayout(viewport);
-        
+
         // Draw each dock group
         for (layout.slice()) |group| {
             self.drawDockGroup(group.node_id, group.rect);
         }
-        
+
         // Draw connection status overlay
         self.drawStatusOverlay(fb_width, fb_height);
     }
-    
+
     fn drawDockGroup(self: *App, node_id: dock_graph.NodeId, rect: UiRect) void {
         const node = self.manager.workspace.dock_layout.getNode(node_id) orelse return;
-        
+
         switch (node.*) {
             .tabs => |tabs| {
                 self.drawTabsPanel(&tabs, rect);
@@ -387,17 +388,17 @@ const App = struct {
             },
         }
     }
-    
+
     fn drawTabsPanel(self: *App, tabs: *const dock_graph.TabsNode, rect: UiRect) void {
         const pad = self.theme.spacing.sm;
         const tab_height: f32 = 28.0 * self.ui_scale;
-        
+
         // Draw panel background
         self.ui_commands.pushRect(
             .{ .min = rect.min, .max = rect.max },
             .{ .fill = self.theme.colors.surface },
         );
-        
+
         // Draw tab bar
         const tab_bar_rect = UiRect.fromMinSize(
             rect.min,
@@ -407,40 +408,40 @@ const App = struct {
             .{ .min = tab_bar_rect.min, .max = tab_bar_rect.max },
             .{ .fill = self.theme.colors.background },
         );
-        
+
         var tab_x = rect.min[0] + pad;
-        const active_tab_id = if (tabs.active < tabs.tabs.items.len) 
-            tabs.tabs.items[tabs.active] 
-        else 
+        const active_tab_id = if (tabs.active < tabs.tabs.items.len)
+            tabs.tabs.items[tabs.active]
+        else
             null;
-        
+
         // Draw each tab
         for (tabs.tabs.items) |panel_id| {
             const panel = self.findPanelById(panel_id) orelse continue;
             const is_active = panel_id == active_tab_id;
-            
+
             const tab_width = self.measureText(panel.title) + pad * 2.0;
             const tab_rect = UiRect.fromMinSize(
                 .{ tab_x, rect.min[1] },
                 .{ tab_width, tab_height },
             );
-            
+
             // Tab background
-            const tab_color = if (is_active) 
-                self.theme.colors.surface 
-            else 
+            const tab_color = if (is_active)
+                self.theme.colors.surface
+            else
                 self.theme.colors.background;
             self.ui_commands.pushRect(
                 .{ .min = tab_rect.min, .max = tab_rect.max },
                 .{ .fill = tab_color },
             );
-            
+
             // Tab border
             self.ui_commands.pushRect(
                 .{ .min = tab_rect.min, .max = tab_rect.max },
                 .{ .stroke = self.theme.colors.border },
             );
-            
+
             // Tab text
             self.drawText(
                 tab_x + pad,
@@ -448,31 +449,31 @@ const App = struct {
                 panel.title,
                 self.theme.colors.text_primary,
             );
-            
+
             tab_x += tab_width + pad;
         }
-        
+
         // Draw content area for active tab
         const content_rect = UiRect.fromMinSize(
             .{ rect.min[0], rect.min[1] + tab_height },
             .{ rect.max[0] - rect.min[0], rect.max[1] - rect.min[1] - tab_height },
         );
-        
+
         if (active_tab_id) |panel_id| {
             self.drawPanelContent(panel_id, content_rect);
         }
     }
-    
+
     fn findPanelById(self: *App, panel_id: workspace.PanelId) ?*workspace.Panel {
         for (self.manager.workspace.panels.items) |*panel| {
             if (panel.id == panel_id) return panel;
         }
         return null;
     }
-    
+
     fn drawPanelContent(self: *App, panel_id: workspace.PanelId, rect: UiRect) void {
         const panel = self.findPanelById(panel_id) orelse return;
-        
+
         switch (panel.kind) {
             .Chat => {
                 self.drawChatPanel(rect);
@@ -491,11 +492,11 @@ const App = struct {
             },
         }
     }
-    
+
     fn drawSettingsPanel(self: *App, rect: UiRect) void {
         const pad = self.theme.spacing.md;
         var y = rect.min[1] + pad;
-        
+
         // Title
         self.drawLabel(
             rect.min[0] + pad,
@@ -504,7 +505,7 @@ const App = struct {
             self.theme.colors.text_primary,
         );
         y += 30;
-        
+
         // Server URL label
         self.drawLabel(
             rect.min[0] + pad,
@@ -513,7 +514,7 @@ const App = struct {
             self.theme.colors.text_primary,
         );
         y += 20.0 * self.ui_scale;
-        
+
         // URL Input
         const input_height: f32 = 32.0 * self.ui_scale;
         const rect_width = rect.max[0] - rect.min[0];
@@ -523,7 +524,7 @@ const App = struct {
             @max(200, rect_width - pad * 2.0),
             input_height,
         );
-        
+
         const url_focused = self.drawTextInputWidget(
             input_rect,
             self.settings_panel.server_url.items,
@@ -531,14 +532,14 @@ const App = struct {
             .{ .placeholder = "ws://127.0.0.1:18790" },
         );
         self.settings_panel.focused = url_focused;
-        
+
         // Handle click outside to unfocus
         if (self.mouse_clicked and !input_rect.contains(.{ self.mouse_x, self.mouse_y })) {
             self.settings_panel.focused = false;
         }
-        
+
         y += input_height + pad;
-        
+
         // Connect button
         const button_width: f32 = 120.0 * self.ui_scale;
         const button_height: f32 = 32.0 * self.ui_scale;
@@ -548,7 +549,7 @@ const App = struct {
             button_width,
             button_height,
         );
-        
+
         const connect_clicked = self.drawButtonWidget(
             button_rect,
             "Connect",
@@ -557,7 +558,7 @@ const App = struct {
         if (connect_clicked) {
             self.tryConnect() catch {};
         }
-        
+
         // Save Config button
         const save_button_x = button_rect.max[0] + pad;
         const save_button_rect = Rect.fromXYWH(
@@ -577,9 +578,9 @@ const App = struct {
                 std.log.err("Save config failed: {s}", .{@errorName(err)});
             };
         }
-        
+
         y += button_height + pad * 2.0;
-        
+
         // Status row
         const status_height: f32 = 32.0 * self.ui_scale;
         const status_rect = Rect.fromXYWH(
@@ -589,9 +590,9 @@ const App = struct {
             status_height,
         );
         self.drawStatusRow(status_rect);
-        
+
         y += status_height + pad;
-        
+
         // Tip
         self.drawLabel(
             rect.min[0] + pad,
@@ -600,7 +601,7 @@ const App = struct {
             self.theme.colors.text_secondary,
         );
     }
-    
+
     fn drawChatPanel(self: *App, rect: UiRect) void {
         const pad = self.theme.spacing.sm;
         const panel_rect = UiRect.fromMinSize(
@@ -629,7 +630,7 @@ const App = struct {
 
         self.handleChatPanelAction(action);
     }
-    
+
     fn drawStatusOverlay(self: *App, fb_width: u32, fb_height: u32) void {
         const status_height: f32 = 24.0 * self.ui_scale;
         const fb_w: f32 = @floatFromInt(fb_width);
@@ -638,14 +639,14 @@ const App = struct {
             .{ 0, fb_h - status_height },
             .{ fb_w, status_height },
         );
-        
+
         // Semi-transparent background
         const bg_color = zcolors.withAlpha(self.theme.colors.background, 0.9);
         self.ui_commands.pushRect(
             .{ .min = status_rect.min, .max = status_rect.max },
             .{ .fill = bg_color },
         );
-        
+
         // Status indicator
         const indicator_size: f32 = 8.0 * self.ui_scale;
         const indicator_color = switch (self.connection_state) {
@@ -654,7 +655,7 @@ const App = struct {
             .connected => zcolors.rgba(90, 210, 90, 255),
             .error_state => zcolors.rgba(230, 120, 70, 255),
         };
-        
+
         self.ui_commands.pushRect(
             .{
                 .min = .{ status_rect.min[0] + 8, status_rect.min[1] + 8 },
@@ -662,7 +663,7 @@ const App = struct {
             },
             .{ .fill = indicator_color },
         );
-        
+
         // Status text
         self.drawText(
             status_rect.min[0] + 24,
@@ -775,12 +776,12 @@ const App = struct {
             // Draw caret using same measurement as text
             const caret_width: f32 = 2.0 * self.ui_scale;
             const caret_height: f32 = 14.0 * self.ui_scale;
-            
+
             // Measure text up to caret position for accurate placement
             const text_before_caret = text;
             const caret_offset = self.measureText(text_before_caret);
             const caret_x = text_x + @min(caret_offset, max_w - caret_width);
-            
+
             const caret_rect = UiRect.fromMinSize(
                 .{ caret_x, text_y },
                 .{ caret_width, caret_height },
@@ -823,8 +824,7 @@ const App = struct {
         self.settings_panel.focused = false;
 
         // Save URL to config on successful connect
-        self.allocator.free(self.config.server_url);
-        self.config.server_url = try self.allocator.dupe(u8, self.settings_panel.server_url.items);
+        try self.config.setServerUrl(self.settings_panel.server_url.items);
         self.config.save() catch |err| {
             std.log.warn("Failed to save config on connect: {s}", .{@errorName(err)});
         };
@@ -833,7 +833,7 @@ const App = struct {
         try self.addSession("main", "Main");
 
         try self.appendMessage("system", "Connected to Spiderweb");
-        
+
         // Switch to chat panel by focusing it
         for (self.manager.workspace.panels.items) |*panel| {
             if (panel.kind == .Chat) {
@@ -854,8 +854,7 @@ const App = struct {
 
     fn saveConfig(self: *App) !void {
         // Update config with current settings
-        self.allocator.free(self.config.server_url);
-        self.config.server_url = try self.allocator.dupe(u8, self.settings_panel.server_url.items);
+        try self.config.setServerUrl(self.settings_panel.server_url.items);
         try self.config.save();
     }
 
@@ -997,7 +996,7 @@ const App = struct {
     }
 
     // Drawing helpers
-    
+
     fn drawSurfacePanel(self: *App, rect: Rect) void {
         const fill = Paint{ .solid = self.theme.colors.surface };
         self.drawPaintRect(rect, fill);
@@ -1052,7 +1051,7 @@ const App = struct {
     fn drawText(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
         self.ui_commands.pushText(text, .{ x, y }, color, .body, @intFromFloat(14.0 * self.ui_scale));
     }
-    
+
     fn measureText(self: *App, text: []const u8) f32 {
         // Tuned to match actual text rendering (was 7.0, caused offset)
         return @as(f32, @floatFromInt(text.len)) * 6.5 * self.ui_scale;
@@ -1064,7 +1063,7 @@ const App = struct {
             self.drawText(x, y, text, color);
             return;
         }
-        
+
         // Binary search for max chars that fit
         var low: usize = 0;
         var high: usize = text.len;
@@ -1077,12 +1076,12 @@ const App = struct {
                 high = mid - 1;
             }
         }
-        
+
         if (low <= 3) {
             self.drawText(x, y, "...", color);
             return;
         }
-        
+
         var tmp: [1024]u8 = undefined;
         const copy_len = @min(low, @min(text.len, tmp.len - 3));
         if (copy_len > 0) @memcpy(tmp[0..copy_len], text[0..copy_len]);
