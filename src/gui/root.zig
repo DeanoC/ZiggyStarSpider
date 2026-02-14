@@ -736,12 +736,14 @@ const App = struct {
         }
 
         if (state.focused and !opts.disabled and !opts.read_only) {
-            // Draw caret as a vertical line instead of underscore for better visibility
+            // Draw caret using same measurement as text
             const caret_width: f32 = 2.0 * self.ui_scale;
-            const caret_height: f32 = self.theme.typography.body_size * self.ui_scale;
-            const max_chars = @as(usize, @intFromFloat(@max(0, @floor(max_w / 8.0))));
-            const caret_chars = @min(text.len, max_chars);
-            const caret_x = text_x + @as(f32, @floatFromInt(caret_chars)) * 8.0 * self.ui_scale;
+            const caret_height: f32 = 14.0 * self.ui_scale;
+            
+            // Measure text up to caret position for accurate placement
+            const text_before_caret = text;
+            const caret_offset = self.measureText(text_before_caret);
+            const caret_x = text_x + @min(caret_offset, max_w - caret_width);
             
             const caret_rect = UiRect.fromMinSize(
                 .{ caret_x, text_y },
@@ -998,28 +1000,41 @@ const App = struct {
     }
 
     fn drawText(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
-        self.ui_commands.pushText(text, .{ x, y }, color, .body, 14);
+        self.ui_commands.pushText(text, .{ x, y }, color, .body, @intFromFloat(14.0 * self.ui_scale));
     }
     
     fn measureText(self: *App, text: []const u8) f32 {
-        _ = self;
-        return @as(f32, @floatFromInt(text.len)) * 8.0;
+        // Use same measurement as drawText (font size 14)
+        return @as(f32, @floatFromInt(text.len)) * 7.0 * self.ui_scale;
     }
 
     fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
-        const max_chars = @as(usize, @intFromFloat(@max(0, @floor(max_w / 8.0))));
-        if (text.len <= max_chars) {
+        // Use binary search to find how many chars fit
+        if (self.measureText(text) <= max_w) {
             self.drawText(x, y, text, color);
             return;
         }
-
-        if (max_chars <= 3) {
+        
+        // Binary search for max chars that fit
+        var low: usize = 0;
+        var high: usize = text.len;
+        while (low < high) {
+            const mid = low + (high - low + 1) / 2;
+            const w = self.measureText(text[0..mid]);
+            if (w <= max_w - self.measureText("...")) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        
+        if (low <= 3) {
             self.drawText(x, y, "...", color);
             return;
         }
-
+        
         var tmp: [1024]u8 = undefined;
-        const copy_len = @min(max_chars - 3, @min(text.len, tmp.len - 3));
+        const copy_len = @min(low, @min(text.len, tmp.len - 3));
         if (copy_len > 0) @memcpy(tmp[0..copy_len], text[0..copy_len]);
         tmp[copy_len] = '.';
         tmp[copy_len + 1] = '.';
