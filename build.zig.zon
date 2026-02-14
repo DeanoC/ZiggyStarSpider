@@ -13,8 +13,8 @@
             .hash = "ziggy_core-0.1.0-q2d-rGiFAAA8ZiSbvWysW_gbVUJMoh-fGGn8PINTljE6",
         },
         .ziggy_ui = .{
-            .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/heads/master.tar.gz",
-            .hash = "ziggy_ui-0.1.0-dS4PqEGh8AGfiIYo9ChY5m5hFabEKqtRLaxmvSMYLUK0",
+            .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/heads/main.tar.gz",
+            .hash = "ziggy_ui-0.1.0-dS4PqOb_8AESOQ-DcwxxvYNQFdAcYnzeENOEMzIhfeqO",
         },
         .sdl3 = .{
             .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",
