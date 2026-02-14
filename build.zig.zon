@@ -14,7 +14,7 @@
         },
         .ziggy_ui = .{
             .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/tags/v0.1.0.tar.gz",
-            .hash = "ziggy_ui-0.1.0-5ZqCvdEBhADCatnZn2tqAWnoPqte4KcoYzZ4zKlHMomm",
+            .hash = "ziggy_ui-0.1.0-5ZqCvWIChAAnPocnmNzM81zg1Il02EDbO8XzPLRPY2K4",
         },
     },
     .paths = .{
