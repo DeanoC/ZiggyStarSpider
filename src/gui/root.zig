@@ -192,7 +192,7 @@ const App = struct {
             // Get DPI scale and apply to theme
             const dpi_scale_raw: f32 = c.SDL_GetWindowDisplayScale(self.window);
             const dpi_scale: f32 = if (dpi_scale_raw > 0.0) dpi_scale_raw else 1.0;
-            zui.theme.applyTypography(dpi_scale);
+            zui.ui.theme.applyTypography(dpi_scale);
 
             const queue = ui_input_router.beginFrame(self.allocator);
             const polled = zapp.sdl_app.pollEventsToInput();
