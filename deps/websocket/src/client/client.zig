@@ -204,25 +204,38 @@ pub const Client = struct {
             handler.close();
         };
 
+        log.info("[WS] readLoop starting", .{});
+        
         // block until we have data
         try self.readTimeout(0);
 
         while (true) {
+            log.info("[WS] Calling read()...", .{});
             const message = self.read() catch |err| switch (err) {
-                error.Closed => return,
-                else => return err,
+                error.Closed => {
+                    log.info("[WS] read() returned Closed", .{});
+                    return;
+                },
+                else => {
+                    log.err("[WS] read() error: {s}", .{@errorName(err)});
+                    return err;
+                },
             } orelse unreachable;
 
+            log.info("[WS] read() got message type: {s}, len: {d}", .{@tagName(message.type), message.data.len});
+            
             const message_type = message.type;
             defer reader.done(message_type);
 
             switch (message_type) {
                 .text, .binary => {
+                    log.info("[WS] Calling serverMessage handler", .{});
                     switch (comptime @typeInfo(@TypeOf(Handler.serverMessage)).@"fn".params.len) {
                         2 => try handler.serverMessage(message.data),
                         3 => try handler.serverMessage(message.data, if (message_type == .text) .text else .binary),
                         else => @compileError(@typeName(Handler) ++ ".serverMessage must accept 2 or 3 parameters"),
                     }
+                    log.info("[WS] serverMessage completed", .{});
                 },
                 .ping => if (comptime std.meta.hasFn(Handler, "serverPing")) {
                     try handler.serverPing(message.data);
@@ -232,6 +245,7 @@ pub const Client = struct {
                     try self.writeFrame(.pong, @constCast(message.data));
                 },
                 .close => {
+                    log.info("[WS] Got close frame", .{});
                     if (comptime std.meta.hasFn(Handler, "serverClose")) {
                         try handler.serverClose(message.data);
                     } else {
