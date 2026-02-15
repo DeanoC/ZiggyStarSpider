@@ -263,12 +263,14 @@ const App = struct {
                 const maybe_msg = client.read() catch |err| switch (err) {
                     error.WouldBlock => break,
                     error.ConnectionClosed, error.Closed => {
+                        std.log.info("WebSocket closed, disconnecting", .{});
                         self.setConnectionState(.disconnected, "Disconnected");
                         self.disconnect();
                         self.focusSettingsPanel();
                         break;
                     },
                     else => {
+                        std.log.err("WebSocket read error: {s}", .{@errorName(err)});
                         const msg = try std.fmt.allocPrint(self.allocator, "Read error: {s}", .{@errorName(err)});
                         defer self.allocator.free(msg);
                         self.setConnectionState(.error_state, msg);
@@ -278,8 +280,62 @@ const App = struct {
                 };
 
                 if (maybe_msg) |msg| {
+                    std.log.info("Received raw: {s}", .{msg});
                     defer self.allocator.free(msg);
-                    try self.appendMessage("assistant", msg);
+                    
+                    // Parse JSON response
+                    const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch |err| {
+                        std.log.err("Failed to parse JSON: {s}", .{@errorName(err)});
+                        try self.appendMessage("system", "[Parse error]");
+                        continue;
+                    };
+                    defer parsed.deinit();
+                    
+                    const msg_type = parsed.value.object.get("type") orelse {
+                        std.log.warn("Message missing 'type' field", .{});
+                        continue;
+                    };
+                    
+                    if (msg_type != .string) {
+                        std.log.warn("Message 'type' is not a string", .{});
+                        continue;
+                    }
+                    
+                    std.log.info("Message type: {s}", .{msg_type.string});
+                    
+                    if (std.mem.eql(u8, msg_type.string, "session.ack")) {
+                        // Store session key
+                        if (parsed.value.object.get("sessionKey")) |sk| {
+                            if (sk == .string) {
+                                if (self.current_session_key) |old| {
+                                    self.allocator.free(old);
+                                }
+                                self.current_session_key = try self.allocator.dupe(u8, sk.string);
+                                std.log.info("Session established: {s}", .{sk.string});
+                            }
+                        }
+                    } else if (std.mem.eql(u8, msg_type.string, "session.receive")) {
+                        // Extract content from AI response
+                        const content = parsed.value.object.get("content") orelse {
+                            std.log.warn("session.receive missing 'content'", .{});
+                            continue;
+                        };
+                        if (content == .string) {
+                            std.log.info("AI response: {s}", .{content.string});
+                            try self.appendMessage("assistant", content.string);
+                        }
+                    } else if (std.mem.eql(u8, msg_type.string, "error")) {
+                        const err_msg = parsed.value.object.get("message") orelse {
+                            try self.appendMessage("system", "[Error from server]");
+                            continue;
+                        };
+                        if (err_msg == .string) {
+                            std.log.err("Server error: {s}", .{err_msg.string});
+                            try self.appendMessage("system", err_msg.string);
+                        }
+                    } else {
+                        std.log.info("Unhandled message type: {s}", .{msg_type.string});
+                    }
                 } else break;
             }
         }
@@ -877,7 +933,7 @@ const App = struct {
             var payload = std.ArrayList(u8).empty;
             defer payload.deinit(self.allocator);
 
-            try payload.appendSlice(self.allocator, "{\"type\":\"chat\",\"content\":\"");
+            try payload.appendSlice(self.allocator, "{\"type\":\"chat.send\",\"content\":\"");
             for (text) |ch| {
                 switch (ch) {
                     '"' => try payload.appendSlice(self.allocator, "\\\""),
@@ -889,7 +945,9 @@ const App = struct {
             }
             try payload.appendSlice(self.allocator, "\"}");
 
+            std.log.info("Sending: {s}", .{payload.items});
             client.send(payload.items) catch |err| {
+                std.log.err("Send failed: {s}", .{@errorName(err)});
                 const err_text = try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{@errorName(err)});
                 defer self.allocator.free(err_text);
                 try self.appendMessage("system", err_text);

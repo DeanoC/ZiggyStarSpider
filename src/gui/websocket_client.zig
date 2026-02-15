@@ -65,6 +65,7 @@ const WsHandler = struct {
     queue: *MessageQueue,
 
     pub fn serverMessage(self: *WsHandler, data: []const u8) !void {
+        std.log.info("WebSocket received {d} bytes", .{data.len});
         const copy = self.allocator.dupe(u8, data) catch return;
         self.queue.push(copy);
     }
@@ -149,6 +150,7 @@ pub const WebSocketClient = struct {
         };
 
         self.read_thread = try client.readLoopInNewThread(&self.handler.?);
+        std.log.info("WebSocket connected to {s}:{d}", .{ parsed.host, parsed.port });
     }
 
     pub fn disconnect(self: *WebSocketClient) void {
@@ -171,6 +173,7 @@ pub const WebSocketClient = struct {
 
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
         if (!self.connected) return error.NotConnected;
+        std.log.info("WebSocket sending {d} bytes", .{payload.len});
         if (self.client) |*client| {
             try client.write(@constCast(payload));
             return;
