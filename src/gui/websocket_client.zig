@@ -1,5 +1,6 @@
 const std = @import("std");
 const ws = @import("websocket");
+const builtin = @import("builtin");
 
 const MessageQueue = struct {
     mutex: std.Thread.Mutex,
@@ -111,6 +112,10 @@ pub const WebSocketClient = struct {
             .headers = headers,
         });
 
+        // Set socket to non-blocking so read() returns WouldBlock immediately
+        // when no data is available (required for proper thread behavior)
+        try setClientSocketNonBlocking(&client);
+
         self.client = client;
         client_owned_locally = false;
         self.should_stop.store(false, .release);
@@ -125,10 +130,12 @@ pub const WebSocketClient = struct {
 
         while (!self.should_stop.load(.acquire)) {
             if (self.client) |*client| {
-                // Use readTimeout to avoid blocking forever
-                const msg = client.readTimeout(100) catch |err| switch (err) {
+                // Now that socket is non-blocking, read() returns WouldBlock
+                // immediately when no data is available
+                const msg = client.read() catch |err| switch (err) {
                     error.WouldBlock => {
-                        // No data available, continue loop
+                        // No data available, yield briefly
+                        std.Thread.sleep(1 * std.time.ns_per_ms);
                         continue;
                     },
                     error.Closed, error.ConnectionResetByPeer => {
@@ -219,6 +226,18 @@ pub const WebSocketClient = struct {
         return error.WouldBlock;
     }
 };
+
+fn setClientSocketNonBlocking(client: *ws.Client) !void {
+    if (comptime builtin.os.tag == .windows) {
+        return;
+    }
+
+    const socket = client.stream.stream.handle;
+    const flags = try std.posix.fcntl(socket, std.posix.F.GETFL, 0);
+    const nonblock_mask_u32: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
+    const nonblock_mask: usize = @intCast(nonblock_mask_u32);
+    _ = try std.posix.fcntl(socket, std.posix.F.SETFL, flags | nonblock_mask);
+}
 
 const ParsedUrl = struct {
     host: []u8,
