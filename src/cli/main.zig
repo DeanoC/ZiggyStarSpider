@@ -34,6 +34,12 @@ pub fn run(allocator: std.mem.Allocator) !void {
         logger.setLevel(.debug);
     }
     
+    // Route to TUI mode if requested
+    if (options.tui) {
+        try @import("../tui/main.zig").run(allocator, options);
+        return;
+    }
+    
     logger.info("ZiggyStarSpider v0.1.0", .{});
     logger.info("Server: {s}", .{options.url});
     if (options.project) |p| {

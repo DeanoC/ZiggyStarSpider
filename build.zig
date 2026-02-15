@@ -168,6 +168,40 @@ pub fn build(b: *std.Build) void {
     }
 
     // ---------------------------------------------------------------------
+    // TUI executable (opt-in via `zig build tui`)
+    // ---------------------------------------------------------------------
+    const tui_dep = b.dependency("tui", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const tui_module = b.createModule(.{
+        .root_source_file = b.path("src/tui/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tui_module.addImport("tui", tui_dep.module("tui"));
+    tui_module.addImport("websocket", websocket.module("websocket"));
+    tui_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+
+    const tui_exe = b.addExecutable(.{
+        .name = "zss-tui",
+        .root_module = tui_module,
+    });
+
+    const install_tui = b.addInstallArtifact(tui_exe, .{});
+
+    const tui_step = b.step("tui", "Build the TUI executable");
+    tui_step.dependOn(&install_tui.step);
+
+    const run_tui_cmd = b.addRunArtifact(tui_exe);
+    run_tui_cmd.step.dependOn(&install_tui.step);
+    if (b.args) |args| run_tui_cmd.addArgs(args);
+
+    const run_tui_step = b.step("run-tui", "Run the TUI app");
+    run_tui_step.dependOn(&run_tui_cmd.step);
+
+    // ---------------------------------------------------------------------
     // Tests
     // ---------------------------------------------------------------------
     const test_module = b.createModule(.{

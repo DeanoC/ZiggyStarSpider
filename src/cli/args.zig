@@ -39,6 +39,7 @@ pub const Options = struct {
     url: []const u8 = "ws://127.0.0.1:18790",
     project: ?[]const u8 = null,
     interactive: bool = false,
+    tui: bool = false,
     verbose: bool = false,
     show_help: bool = false,
     show_version: bool = false,
@@ -192,6 +193,10 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
         }
         if (std.mem.eql(u8, arg, "--interactive") or std.mem.eql(u8, arg, "-i")) {
             options.interactive = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--tui")) {
+            options.tui = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--verbose")) {
