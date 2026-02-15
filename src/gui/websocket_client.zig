@@ -125,10 +125,10 @@ pub const WebSocketClient = struct {
 
         while (!self.should_stop.load(.acquire)) {
             if (self.client) |*client| {
-                const msg = client.read() catch |err| switch (err) {
+                // Use readTimeout to avoid blocking forever
+                const msg = client.readTimeout(100) catch |err| switch (err) {
                     error.WouldBlock => {
-                        // Small sleep to avoid busy-waiting
-                        std.Thread.sleep(1 * std.time.ns_per_ms);
+                        // No data available, continue loop
                         continue;
                     },
                     error.Closed, error.ConnectionResetByPeer => {
