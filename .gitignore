@@ -1,0 +1,14 @@
+﻿# Zig-specific build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Common IDE/Editor folders
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS-specific files
+.DS_Store
+Thumbs.db
