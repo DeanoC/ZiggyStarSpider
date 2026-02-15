@@ -268,69 +268,70 @@ const App = struct {
 
                 if (maybe_msg) |msg| {
                     std.log.info("[ZSS] Received raw ({d} bytes): {s}", .{ msg.len, msg });
-                defer self.allocator.free(msg);
+                    defer self.allocator.free(msg);
 
-                // Parse JSON response
-                const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch |err| {
-                    std.log.err("[ZSS] Failed to parse JSON: {s}", .{@errorName(err)});
-                    try self.appendMessage("system", "[Parse error]");
-                    return;
-                };
-                defer parsed.deinit();
+                    // Parse JSON response
+                    const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch |err| {
+                        std.log.err("[ZSS] Failed to parse JSON: {s}", .{@errorName(err)});
+                        try self.appendMessage("system", "[Parse error]");
+                        return;
+                    };
+                    defer parsed.deinit();
 
-                const msg_type = parsed.value.object.get("type") orelse {
-                    std.log.warn("[ZSS] Message missing 'type' field", .{});
-                    continue;
-                };
+                    const msg_type = parsed.value.object.get("type") orelse {
+                        std.log.warn("[ZSS] Message missing 'type' field", .{});
+                        continue;
+                    };
 
-                if (msg_type != .string) {
-                    std.log.warn("[ZSS] Message 'type' is not a string", .{});
-                    continue;
-                }
+                    if (msg_type != .string) {
+                        std.log.warn("[ZSS] Message 'type' is not a string", .{});
+                        continue;
+                    }
 
-                std.log.info("[ZSS] Message type: {s}", .{msg_type.string});
+                    std.log.info("[ZSS] Message type: {s}", .{msg_type.string});
 
-                if (std.mem.eql(u8, msg_type.string, "session.ack")) {
-                    // Store session key
-                    if (parsed.value.object.get("sessionKey")) |sk| {
-                        if (sk == .string) {
-                            if (self.current_session_key) |old| {
-                                self.allocator.free(old);
+                    if (std.mem.eql(u8, msg_type.string, "session.ack")) {
+                        // Store session key
+                        if (parsed.value.object.get("sessionKey")) |sk| {
+                            if (sk == .string) {
+                                if (self.current_session_key) |old| {
+                                    self.allocator.free(old);
+                                }
+                                self.current_session_key = try self.allocator.dupe(u8, sk.string);
+                                std.log.info("[ZSS] Session established: {s}", .{sk.string});
                             }
-                            self.current_session_key = try self.allocator.dupe(u8, sk.string);
-                            std.log.info("[ZSS] Session established: {s}", .{sk.string});
                         }
+                    } else if (std.mem.eql(u8, msg_type.string, "session.receive")) {
+                        // Extract content from AI response
+                        const content = parsed.value.object.get("content") orelse {
+                            std.log.warn("[ZSS] session.receive missing 'content'", .{});
+                            continue;
+                        };
+                        if (content == .string) {
+                            std.log.info("[ZSS] AI response: {s}", .{content.string});
+                            std.log.info("[ZSS] Calling appendMessage...", .{});
+                            try self.appendMessage("assistant", content.string);
+                            std.log.info("[ZSS] appendMessage done", .{});
+                        }
+                    } else if (std.mem.eql(u8, msg_type.string, "error")) {
+                        const err_msg = parsed.value.object.get("message") orelse {
+                            try self.appendMessage("system", "[Error from server]");
+                            continue;
+                        };
+                        if (err_msg == .string) {
+                            std.log.err("[ZSS] Server error: {s}", .{err_msg.string});
+                            try self.appendMessage("system", err_msg.string);
+                        }
+                    } else {
+                        std.log.info("[ZSS] Unhandled message type: {s}", .{msg_type.string});
                     }
-                } else if (std.mem.eql(u8, msg_type.string, "session.receive")) {
-                    // Extract content from AI response
-                    const content = parsed.value.object.get("content") orelse {
-                        std.log.warn("[ZSS] session.receive missing 'content'", .{});
-                        continue;
-                    };
-                    if (content == .string) {
-                        std.log.info("[ZSS] AI response: {s}", .{content.string});
-                        std.log.info("[ZSS] Calling appendMessage...", .{});
-                        try self.appendMessage("assistant", content.string);
-                        std.log.info("[ZSS] appendMessage done", .{});
-                    }
-                } else if (std.mem.eql(u8, msg_type.string, "error")) {
-                    const err_msg = parsed.value.object.get("message") orelse {
-                        try self.appendMessage("system", "[Error from server]");
-                        continue;
-                    };
-                    if (err_msg == .string) {
-                        std.log.err("[ZSS] Server error: {s}", .{err_msg.string});
-                        try self.appendMessage("system", err_msg.string);
-                    }
-                } else {
-                    std.log.info("[ZSS] Unhandled message type: {s}", .{msg_type.string});
-                }
 
-                // Continue to next message
-                continue;
-            } else {
-                // No more messages available
-                break;
+                    // Continue to next message
+                    continue;
+                } else {
+                    // No more messages available
+                    break;
+                }
             }
         }
     }
