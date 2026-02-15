@@ -63,10 +63,10 @@ pub const WebSocketClient = struct {
     url_buf: []u8,
     token_buf: []u8,
     client: ?ws.Client = null,
-    connected: bool = false,
 
     // Threading - using manual read loop (like ZSC)
     read_thread: ?std.Thread = null,
+    should_stop: std.atomic.Value(bool),
     message_queue: MessageQueue,
 
     pub fn init(allocator: std.mem.Allocator, url: []const u8, token: []const u8) !WebSocketClient {
@@ -74,6 +74,7 @@ pub const WebSocketClient = struct {
             .allocator = allocator,
             .url_buf = try allocator.dupe(u8, url),
             .token_buf = try allocator.dupe(u8, token),
+            .should_stop = std.atomic.Value(bool).init(false),
             .message_queue = MessageQueue.init(allocator),
         };
     }
@@ -86,7 +87,7 @@ pub const WebSocketClient = struct {
     }
 
     pub fn connect(self: *WebSocketClient) !void {
-        if (self.connected) return;
+        if (self.client != null) return;
 
         const parsed = try parseUrl(self.allocator, self.url_buf);
         defer parsed.deinit(self.allocator);
@@ -110,12 +111,9 @@ pub const WebSocketClient = struct {
             .headers = headers,
         });
 
-        // NOTE: Don't set non-blocking - we use blocking reads with timeout
-        // This matches ZSC's working approach
-
         self.client = client;
         client_owned_locally = false;
-        self.connected = true;
+        self.should_stop.store(false, .release);
 
         // Start our own read loop thread (like ZSC does)
         self.read_thread = try std.Thread.spawn(.{}, readLoop, .{self});
@@ -125,7 +123,7 @@ pub const WebSocketClient = struct {
     fn readLoop(self: *WebSocketClient) void {
         std.log.info("[WS] readLoop thread started", .{});
 
-        while (self.connected) {
+        while (!self.should_stop.load(.acquire)) {
             if (self.client) |*client| {
                 const msg = client.read() catch |err| switch (err) {
                     error.WouldBlock => {
@@ -148,7 +146,10 @@ pub const WebSocketClient = struct {
                 switch (msg.type) {
                     .text, .binary => {
                         std.log.info("[WS] Got message, len={d}", .{msg.data.len});
-                        const copy = self.allocator.dupe(u8, msg.data) catch continue;
+                        const copy = self.allocator.dupe(u8, msg.data) catch |err| {
+                            std.log.err("[WS] Failed to allocate copy: {s}", .{@errorName(err)});
+                            continue;
+                        };
                         self.message_queue.push(copy);
                     },
                     .ping => {
@@ -169,7 +170,10 @@ pub const WebSocketClient = struct {
     }
 
     pub fn disconnect(self: *WebSocketClient) void {
-        // Close connection (this will stop the read loop)
+        // Signal thread to stop
+        self.should_stop.store(true, .release);
+        
+        // Close connection
         if (self.client) |*client| {
             client.close(.{}) catch {};
             
@@ -182,11 +186,10 @@ pub const WebSocketClient = struct {
             client.deinit();
             self.client = null;
         }
-        self.connected = false;
     }
 
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
-        if (!self.connected) return error.NotConnected;
+        if (self.client == null) return error.NotConnected;
         std.log.info("WebSocket sending {d} bytes", .{payload.len});
         if (self.client) |*client| {
             try client.write(@constCast(payload));
@@ -209,7 +212,7 @@ pub const WebSocketClient = struct {
     /// Returns error.WouldBlock if no message available (matching original API)
     /// Returns error.ConnectionClosed when connection is closed
     pub fn read(self: *WebSocketClient) (error{ NotConnected, WouldBlock, ConnectionClosed, Closed }!?[]u8) {
-        if (!self.connected) return error.NotConnected;
+        if (self.client == null) return error.NotConnected;
         if (self.tryReceive()) |msg| {
             return msg;
         }
