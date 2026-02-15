@@ -12,21 +12,25 @@ pub const WebSocketClient = struct {
     is_connected: bool = false,
     client: ?ws.Client = null,
     read_timeout_ms: u32 = 5_000,
+    session_key: ?[]const u8 = null,
 
     // Message handling
-    message_queue: std.ArrayList([]const u8),
+    message_queue: std.ArrayListUnmanaged([]const u8),
 
     pub fn init(allocator: std.mem.Allocator, url: []const u8, token: []const u8) WebSocketClient {
         return .{
             .allocator = allocator,
             .url = url,
             .token = token,
-            .message_queue = std.ArrayList([]const u8).empty,
+            .message_queue = .empty,
         };
     }
 
     pub fn deinit(self: *WebSocketClient) void {
         self.disconnect();
+        if (self.session_key) |key| {
+            self.allocator.free(key);
+        }
         for (self.message_queue.items) |msg| {
             self.allocator.free(msg);
         }

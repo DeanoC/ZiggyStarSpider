@@ -86,18 +86,82 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                     // Connect and send
                     const client = try getOrCreateClient(allocator, options.url);
                     
-                    const json = try std.fmt.allocPrint(allocator, "{{\"type\":\"chat.send\",\"content\":\"{s}\"}}", .{message});
-                    defer allocator.free(json);
+                    var payload = std.ArrayListUnmanaged(u8).empty;
+                    defer payload.deinit(allocator);
                     
-                    try client.send(json);
+                    try payload.appendSlice(allocator, "{\"type\":\"chat.send\",");
+                    if (client.session_key) |key| {
+                        try payload.appendSlice(allocator, "\"sessionKey\":\"");
+                        try payload.appendSlice(allocator, key);
+                        try payload.appendSlice(allocator, "\",");
+                    }
+                    try payload.appendSlice(allocator, "\"content\":\"");
+                    try payload.appendSlice(allocator, message);
+                    try payload.appendSlice(allocator, "\"}");
+                    
+                    try client.send(payload.items);
                     try stdout.print("Sent: \"{s}\"\n", .{message});
                     
-                    // Wait for response
-                    if (try client.readTimeout(10_000)) |response| {
-                        defer allocator.free(response);
-                        try stdout.print("Response: {s}\n", .{response});
-                    } else {
-                        try stdout.print("(No response received)\n", .{});
+                    // Wait for response(s)
+                    const start_time = std.time.milliTimestamp();
+                    var got_content = false;
+                    while (std.time.milliTimestamp() - start_time < 15_000) {
+                        if (try client.readTimeout(5_000)) |response| {
+                            defer allocator.free(response);
+                            
+                            // Try to parse message
+                            const parsed = std.json.parseFromSlice(std.json.Value, allocator, response, .{}) catch null;
+                            if (parsed) |p| {
+                                defer p.deinit();
+                                if (p.value == .object) {
+                                    const msg_obj = p.value.object;
+                                    
+                                    // Handle sessionKey
+                                    if (msg_obj.get("sessionKey")) |sk| {
+                                        if (sk == .string) {
+                                            if (client.session_key) |old| allocator.free(old);
+                                            client.session_key = try allocator.dupe(u8, sk.string);
+                                        }
+                                    }
+
+                                    // Handle content
+                                    const msg_type = msg_obj.get("type");
+                                    if (msg_type) |mt| {
+                                        if (mt == .string) {
+                                            if (std.mem.eql(u8, mt.string, "chat.receive") or std.mem.eql(u8, mt.string, "session.receive")) {
+                                                if (msg_obj.get("content")) |content| {
+                                                    if (content == .string) {
+                                                        try stdout.print("AI: {s}\n", .{content.string});
+                                                        got_content = true;
+                                                        break;
+                                                    }
+                                                }
+                                            } else if (std.mem.eql(u8, mt.string, "error")) {
+                                                if (msg_obj.get("message")) |msg| {
+                                                    if (msg == .string) {
+                                                        try stdout.print("Error: {s}\n", .{msg.string});
+                                                    }
+                                                }
+                                                break;
+                                            } else if (std.mem.eql(u8, mt.string, "session.ack")) {
+                                                // Already handled sessionKey above, just log it if verbose
+                                                logger.debug("Received session.ack", .{});
+                                            } else {
+                                                logger.debug("Received other message type: {s}", .{mt.string});
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                try stdout.print("Raw Response: {s}\n", .{response});
+                            }
+                        } else {
+                            // Timeout on single read
+                            if (got_content) break;
+                        }
+                    }
+                    if (!got_content) {
+                        try stdout.print("(Timed out waiting for AI response)\n", .{});
                     }
                 },
                 .history => {

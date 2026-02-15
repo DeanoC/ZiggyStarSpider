@@ -5,7 +5,7 @@ const builtin = @import("builtin");
 const MessageQueue = struct {
     mutex: std.Thread.Mutex,
     cond: std.Thread.Condition,
-    items: std.ArrayList([]u8),
+    items: std.ArrayListUnmanaged([]u8),
     allocator: std.mem.Allocator,
 
     fn init(allocator: std.mem.Allocator) MessageQueue {
@@ -19,43 +19,42 @@ const MessageQueue = struct {
 
     fn deinit(self: *MessageQueue) void {
         self.mutex.lock();
+        defer self.mutex.unlock();
         for (self.items.items) |item| {
             self.allocator.free(item);
         }
         self.items.deinit(self.allocator);
-        self.mutex.unlock();
     }
 
     fn push(self: *MessageQueue, msg: []u8) void {
         self.mutex.lock();
-        self.items.append(self.allocator, msg) catch {};
+        defer self.mutex.unlock();
+        self.items.append(self.allocator, msg) catch {
+            std.log.err("[WS] MessageQueue.push failed to append", .{});
+            return;
+        };
         self.cond.signal();
-        self.mutex.unlock();
     }
 
     fn pop(self: *MessageQueue) ?[]u8 {
         self.mutex.lock();
+        defer self.mutex.unlock();
         if (self.items.items.len == 0) {
-            self.mutex.unlock();
             return null;
         }
-        const msg = self.items.orderedRemove(0);
-        self.mutex.unlock();
-        return msg;
+        return self.items.swapRemove(0);
     }
 
     fn popWait(self: *MessageQueue, timeout_ms: u32) ?[]u8 {
         self.mutex.lock();
+        defer self.mutex.unlock();
         if (self.items.items.len == 0) {
             self.cond.timedWait(&self.mutex, timeout_ms * std.time.ns_per_ms) catch {};
         }
         if (self.items.items.len == 0) {
-            self.mutex.unlock();
             return null;
         }
-        const msg = self.items.orderedRemove(0);
-        self.mutex.unlock();
-        return msg;
+        return self.items.swapRemove(0);
     }
 };
 
@@ -78,6 +77,18 @@ pub const WebSocketClient = struct {
             .should_stop = std.atomic.Value(bool).init(false),
             .message_queue = MessageQueue.init(allocator),
         };
+    }
+
+    pub fn create(allocator: std.mem.Allocator, url: []const u8, token: []const u8) !*WebSocketClient {
+        const self = try allocator.create(WebSocketClient);
+        self.* = try init(allocator, url, token);
+        return self;
+    }
+
+    pub fn destroy(self: *WebSocketClient) void {
+        const allocator = self.allocator;
+        self.deinit();
+        allocator.destroy(self);
     }
 
     pub fn deinit(self: *WebSocketClient) void {
@@ -128,13 +139,15 @@ pub const WebSocketClient = struct {
     fn readLoop(self: *WebSocketClient) void {
         std.log.info("[WS] readLoop thread started", .{});
 
+        var loop_count: u64 = 0;
         while (!self.should_stop.load(.acquire)) {
-            std.log.info("[WS] loop iteration, should_stop=false", .{});
+            loop_count += 1;
+            if (loop_count % 1000 == 0) {
+                std.log.debug("[WS] readLoop still running, iteration {d}", .{loop_count});
+            }
             if (self.client) |*client| {
-                std.log.info("[WS] have client, calling read()...", .{});
                 const msg = client.read() catch |err| switch (err) {
                     error.WouldBlock => {
-                        std.log.info("[WS] read() returned WouldBlock", .{});
                         std.Thread.sleep(1 * std.time.ns_per_ms);
                         continue;
                     },
@@ -147,11 +160,11 @@ pub const WebSocketClient = struct {
                         break;
                     },
                 } orelse {
-                    std.log.info("[WS] read() returned null", .{});
+                    std.Thread.sleep(1 * std.time.ns_per_ms);
                     continue;
                 };
 
-                std.log.info("[WS] read() got message, len={d}", .{msg.data.len});
+                std.log.info("[WS] read() got message, type={s}, len={d}", .{@tagName(msg.type), msg.data.len});
                 defer client.done(msg);
 
                 switch (msg.type) {
@@ -203,9 +216,13 @@ pub const WebSocketClient = struct {
 
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
         if (self.client == null) return error.NotConnected;
-        std.log.info("WebSocket sending {d} bytes", .{payload.len});
+        std.log.info("[WS] Sending {d} bytes: {s}", .{ payload.len, payload });
         if (self.client) |*client| {
-            try client.write(@constCast(payload));
+            client.write(@constCast(payload)) catch |err| {
+                std.log.err("[WS] Send failed: {s}", .{@errorName(err)});
+                return err;
+            };
+            std.log.info("[WS] Send successful", .{});
             return;
         }
         return error.NotConnected;
@@ -234,11 +251,17 @@ pub const WebSocketClient = struct {
 };
 
 fn setClientSocketNonBlocking(client: *ws.Client) !void {
+    const handle = client.stream.stream.handle;
     if (comptime builtin.os.tag == .windows) {
+        var mode: u32 = 1;
+        const result = std.os.windows.ws2_32.ioctlsocket(handle, std.os.windows.ws2_32.FIONBIO, &mode);
+        if (result != 0) {
+            return error.Unexpected;
+        }
         return;
     }
 
-    const socket = client.stream.stream.handle;
+    const socket = handle;
     const flags = try std.posix.fcntl(socket, std.posix.F.GETFL, 0);
     const nonblock_mask_u32: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
     const nonblock_mask: usize = @intCast(nonblock_mask_u32);

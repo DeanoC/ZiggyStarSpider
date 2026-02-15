@@ -259,8 +259,10 @@ const App = struct {
 
     fn pollWebSocket(self: *App) !void {
         if (self.ws_client) |*client| {
+            var count: u32 = 0;
             // Drain all available messages (non-blocking, like ZSC)
             while (client.tryReceive()) |msg| {
+                count += 1;
                 std.log.info("[ZSS] Received raw ({d} bytes): {s}", .{ msg.len, msg });
                 defer self.allocator.free(msg);
 
@@ -272,8 +274,9 @@ const App = struct {
                 };
                 defer parsed.deinit();
 
-                const msg_type = parsed.value.object.get("type") orelse {
-                    std.log.warn("[ZSS] Message missing 'type' field", .{});
+                const msg_obj = parsed.value.object;
+                const msg_type = msg_obj.get("type") orelse {
+                    std.log.warn("[ZSS] Message missing 'type' field: {s}", .{msg});
                     continue;
                 };
 
@@ -286,7 +289,7 @@ const App = struct {
 
                 if (std.mem.eql(u8, msg_type.string, "session.ack")) {
                     // Store session key
-                    if (parsed.value.object.get("sessionKey")) |sk| {
+                    if (msg_obj.get("sessionKey")) |sk| {
                         if (sk == .string) {
                             if (self.current_session_key) |old| {
                                 self.allocator.free(old);
@@ -295,20 +298,18 @@ const App = struct {
                             std.log.info("[ZSS] Session established: {s}", .{sk.string});
                         }
                     }
-                } else if (std.mem.eql(u8, msg_type.string, "session.receive")) {
+                } else if (std.mem.eql(u8, msg_type.string, "chat.receive") or std.mem.eql(u8, msg_type.string, "session.receive")) {
                     // Extract content from AI response
-                    const content = parsed.value.object.get("content") orelse {
-                        std.log.warn("[ZSS] session.receive missing 'content'", .{});
+                    const content = msg_obj.get("content") orelse {
+                        std.log.warn("[ZSS] chat.receive missing 'content'", .{});
                         continue;
                     };
                     if (content == .string) {
                         std.log.info("[ZSS] AI response: {s}", .{content.string});
-                        std.log.info("[ZSS] Calling appendMessage...", .{});
                         try self.appendMessage("assistant", content.string);
-                        std.log.info("[ZSS] appendMessage done", .{});
                     }
                 } else if (std.mem.eql(u8, msg_type.string, "error")) {
-                    const err_msg = parsed.value.object.get("message") orelse {
+                    const err_msg = msg_obj.get("message") orelse {
                         try self.appendMessage("system", "[Error from server]");
                         continue;
                     };
@@ -319,6 +320,9 @@ const App = struct {
                 } else {
                     std.log.info("[ZSS] Unhandled message type: {s}", .{msg_type.string});
                 }
+            }
+            if (count > 0) {
+                std.log.debug("[ZSS] Polled {d} messages this frame", .{count});
             }
         }
     }
@@ -843,22 +847,22 @@ const App = struct {
         self.setConnectionState(.connecting, "Connecting...");
         self.disconnect();
 
-        var client = ws_client_mod.WebSocketClient.init(self.allocator, self.settings_panel.server_url.items, "") catch |err| {
+        self.ws_client = ws_client_mod.WebSocketClient.init(self.allocator, self.settings_panel.server_url.items, "") catch |err| {
             const msg = try std.fmt.allocPrint(self.allocator, "Client init failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
             self.setConnectionState(.error_state, msg);
             return;
         };
 
-        client.connect() catch |err| {
-            client.deinit();
+        self.ws_client.?.connect() catch |err| {
+            self.ws_client.?.deinit();
+            self.ws_client = null;
             const msg = try std.fmt.allocPrint(self.allocator, "Connect failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
             self.setConnectionState(.error_state, msg);
             return;
         };
 
-        self.ws_client = client;
         self.setConnectionState(.connected, "Connected");
         self.settings_panel.focused = false;
 
@@ -922,7 +926,16 @@ const App = struct {
             var payload = std.ArrayList(u8).empty;
             defer payload.deinit(self.allocator);
 
-            try payload.appendSlice(self.allocator, "{\"type\":\"chat.send\",\"content\":\"");
+            try payload.appendSlice(self.allocator, "{\"type\":\"chat.send\",");
+
+            // Add session key if we have one
+            if (self.current_session_key) |key| {
+                try payload.appendSlice(self.allocator, "\"sessionKey\":\"");
+                try payload.appendSlice(self.allocator, key);
+                try payload.appendSlice(self.allocator, "\",");
+            }
+
+            try payload.appendSlice(self.allocator, "\"content\":\"");
             for (text) |ch| {
                 switch (ch) {
                     '"' => try payload.appendSlice(self.allocator, "\\\""),

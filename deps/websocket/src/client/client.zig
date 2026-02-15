@@ -610,6 +610,7 @@ fn readWindows(socket: windows.ws2_32.SOCKET, buf: []u8) !usize {
         &overlapped,
         null,
     ) == windows.ws2_32.SOCKET_ERROR) switch (windows.ws2_32.WSAGetLastError()) {
+        .WSAEWOULDBLOCK => return error.WouldBlock,
         .WSA_IO_PENDING => {
             var result_flags: u32 = undefined;
             if (windows.ws2_32.WSAGetOverlappedResult(
