@@ -259,9 +259,15 @@ const App = struct {
 
     fn pollWebSocket(self: *App) !void {
         if (self.ws_client) |*client| {
+            // Try to receive with a short timeout to avoid busy-waiting
+            // but still be responsive
             while (true) {
-                const maybe_msg = client.read() catch |err| switch (err) {
-                    error.WouldBlock => break,
+                // Use receive with timeout instead of read to avoid WouldBlock issues
+                const maybe_msg = client.receive(10) catch |err| switch (err) {
+                    error.NotConnected => {
+                        std.log.info("WebSocket not connected", .{});
+                        break;
+                    },
                     error.ConnectionClosed, error.Closed => {
                         std.log.info("WebSocket closed, disconnecting", .{});
                         self.setConnectionState(.disconnected, "Disconnected");
@@ -270,11 +276,7 @@ const App = struct {
                         break;
                     },
                     else => {
-                        std.log.err("WebSocket read error: {s}", .{@errorName(err)});
-                        const msg = try std.fmt.allocPrint(self.allocator, "Read error: {s}", .{@errorName(err)});
-                        defer self.allocator.free(msg);
-                        self.setConnectionState(.error_state, msg);
-                        self.disconnect();
+                        std.log.err("WebSocket receive error: {s}", .{@errorName(err)});
                         break;
                     },
                 };
@@ -336,7 +338,10 @@ const App = struct {
                     } else {
                         std.log.info("Unhandled message type: {s}", .{msg_type.string});
                     }
-                } else break;
+                } else {
+                    // No message available, break to avoid blocking
+                    break;
+                }
             }
         }
     }
@@ -911,10 +916,17 @@ const App = struct {
 
     fn disconnect(self: *App) void {
         if (self.ws_client) |*client| {
+            // Drain any pending messages before disconnecting
+            while (client.tryReceive()) |msg| {
+                self.allocator.free(msg);
+            }
             client.deinit();
             self.ws_client = null;
         }
-        self.current_session_key = null;
+        if (self.current_session_key) |key| {
+            self.allocator.free(key);
+            self.current_session_key = null;
+        }
         self.clearSessions();
     }
 
