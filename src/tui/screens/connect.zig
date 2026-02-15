@@ -39,7 +39,7 @@ pub const ConnectScreen = struct {
             .attrs = .{ .bold = true },
         };
         
-        const title_x = @divTrunc(width - @as(u16, @intCast(title.len)), 2);
+        const title_x = if (width > title.len) @divTrunc(width - @as(u16, @intCast(title.len)), 2) else 0;
         ctx.screen.moveCursor(title_x, 2);
         ctx.screen.setStyle(title_style);
         ctx.screen.putString(title);
@@ -50,20 +50,20 @@ pub const ConnectScreen = struct {
             .fg = tui.Color.white,
         };
         
-        const subtitle_x = @divTrunc(width - @as(u16, @intCast(subtitle.len)), 2);
+        const subtitle_x = if (width > subtitle.len) @divTrunc(width - @as(u16, @intCast(subtitle.len)), 2) else 0;
         ctx.screen.moveCursor(subtitle_x, 4);
         ctx.screen.setStyle(subtitle_style);
         ctx.screen.putString(subtitle);
 
         // URL label
         const label = "Server URL:";
-        const label_x = @divTrunc(width - 52, 2);
+        const label_x = if (width > 52) @divTrunc(width - 52, 2) else 2;
         ctx.screen.moveCursor(label_x, 7);
         ctx.screen.setStyle(tui.Style{ .fg = tui.Color.white });
         ctx.screen.putString(label);
 
         // URL input field
-        const input_x = @divTrunc(width - 50, 2);
+        const input_x = if (width > 50) @divTrunc(width - 50, 2) else 2;
         const input_y = 8;
         
         var input_ctx = tui.RenderContext{
@@ -93,7 +93,7 @@ pub const ConnectScreen = struct {
             .fg = tui.Color.green,
         };
         
-        const button_x = @divTrunc(width - @as(u16, @intCast(button_text.len)), 2);
+        const button_x = if (width > button_text.len) @divTrunc(width - @as(u16, @intCast(button_text.len)), 2) else 0;
         ctx.screen.moveCursor(button_x, 10);
         ctx.screen.setStyle(button_style);
         ctx.screen.putString(button_text);
@@ -113,7 +113,7 @@ pub const ConnectScreen = struct {
             .err => tui.Style{ .fg = tui.Color.red },
         };
         
-        const status_x = @divTrunc(width - @as(u16, @intCast(status_text.len)), 2);
+        const status_x = if (width > status_text.len) @divTrunc(width - @as(u16, @intCast(status_text.len)), 2) else 0;
         ctx.screen.moveCursor(status_x, 13);
         ctx.screen.setStyle(status_style);
         ctx.screen.putString(status_text);
@@ -124,7 +124,7 @@ pub const ConnectScreen = struct {
             .fg = tui.Color.gray,
         };
         
-        const help_x = @divTrunc(width - @as(u16, @intCast(help_text.len)), 2);
+        const help_x = if (width > help_text.len) @divTrunc(width - @as(u16, @intCast(help_text.len)), 2) else 0;
         ctx.screen.moveCursor(help_x, height - 2);
         ctx.screen.setStyle(help_style);
         ctx.screen.putString(help_text);

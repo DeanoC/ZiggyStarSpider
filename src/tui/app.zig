@@ -241,7 +241,7 @@ pub const RootWidget = struct {
 
 pub const App = struct {
     allocator: std.mem.Allocator,
-    state: AppState,
+    state: *AppState,
     
     // TUI App
     tui_app: tui.App,
@@ -250,7 +250,10 @@ pub const App = struct {
     root_widget: RootWidget,
 
     pub fn init(allocator: std.mem.Allocator, options: cli_args.Options) !App {
-        var state = try AppState.init(allocator, options);
+        const state = try allocator.create(AppState);
+        errdefer allocator.destroy(state);
+        
+        state.* = try AppState.init(allocator, options);
         errdefer state.deinit();
 
         var tui_app = try tui.App.initWithAllocator(allocator, .{
@@ -260,7 +263,7 @@ pub const App = struct {
         });
         errdefer tui_app.deinit();
 
-        var root_widget = RootWidget.init(&state);
+        var root_widget = RootWidget.init(state);
         errdefer root_widget.deinit();
 
         return .{
@@ -275,11 +278,15 @@ pub const App = struct {
         self.root_widget.deinit();
         self.tui_app.deinit();
         self.state.deinit();
+        self.allocator.destroy(self.state);
     }
 
     pub fn run(self: *App) !void {
-        // Auto-connect if configured
-        if (self.state.config.auto_connect_on_launch) {
+        // Auto-connect if configured or URL provided via CLI
+        if (self.state.options.url.len > 0) {
+            // CLI --url flag takes precedence
+            _ = self.state.connect(self.state.options.url) catch {};
+        } else if (self.state.config.auto_connect_on_launch) {
             const url = self.state.config.connect_host_override orelse self.state.config.server_url;
             _ = self.state.connect(url) catch {};
         }

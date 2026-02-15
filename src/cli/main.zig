@@ -36,8 +36,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
     
     // Route to TUI mode if requested
     if (options.tui) {
-        try @import("../tui/main.zig").run(allocator, options);
-        return;
+        // TUI mode is only available when built with the TUI target
+        // Use zig build run-tui instead
+        std.log.err("TUI mode must be built with 'zig build tui' or run with 'zig build run-tui'", .{});
+        return error.TuiNotAvailable;
     }
     
     logger.info("ZiggyStarSpider v0.1.0", .{});
