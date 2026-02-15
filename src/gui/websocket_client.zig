@@ -129,12 +129,12 @@ pub const WebSocketClient = struct {
         std.log.info("[WS] readLoop thread started", .{});
 
         while (!self.should_stop.load(.acquire)) {
+            std.log.info("[WS] loop iteration, should_stop=false", .{});
             if (self.client) |*client| {
-                // Now that socket is non-blocking, read() returns WouldBlock
-                // immediately when no data is available
+                std.log.info("[WS] have client, calling read()...", .{});
                 const msg = client.read() catch |err| switch (err) {
                     error.WouldBlock => {
-                        // No data available, yield briefly
+                        std.log.info("[WS] read() returned WouldBlock", .{});
                         std.Thread.sleep(1 * std.time.ns_per_ms);
                         continue;
                     },
@@ -146,18 +146,23 @@ pub const WebSocketClient = struct {
                         std.log.err("[WS] read error: {s}", .{@errorName(err)});
                         break;
                     },
-                } orelse continue;
+                } orelse {
+                    std.log.info("[WS] read() returned null", .{});
+                    continue;
+                };
 
+                std.log.info("[WS] read() got message, len={d}", .{msg.data.len});
                 defer client.done(msg);
 
                 switch (msg.type) {
                     .text, .binary => {
-                        std.log.info("[WS] Got message, len={d}", .{msg.data.len});
+                        std.log.info("[WS] Pushing message to queue", .{});
                         const copy = self.allocator.dupe(u8, msg.data) catch |err| {
                             std.log.err("[WS] Failed to allocate copy: {s}", .{@errorName(err)});
                             continue;
                         };
                         self.message_queue.push(copy);
+                        std.log.info("[WS] Message pushed to queue", .{});
                     },
                     .ping => {
                         client.writePong(@constCast(msg.data)) catch {};
@@ -169,11 +174,12 @@ pub const WebSocketClient = struct {
                     .pong => {},
                 }
             } else {
+                std.log.info("[WS] self.client is null, breaking", .{});
                 break;
             }
         }
 
-        std.log.info("[WS] readLoop thread stopped", .{});
+        std.log.info("[WS] readLoop thread stopped (should_stop={})", .{self.should_stop.load(.acquire)});
     }
 
     pub fn disconnect(self: *WebSocketClient) void {
