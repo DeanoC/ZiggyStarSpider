@@ -13,11 +13,18 @@ const ui_input_router = zui.ui.input.input_router;
 const ui_input_state = zui.ui.input.input_state;
 const ui_input_backend = zui.ui.input.input_backend;
 const ui_sdl_input_backend = zui.ui.input.sdl_input_backend;
+const ui_main_window = zui.ui.main_window;
+const ui_command_inbox = zui.ui.ui_command_inbox;
+const ui_command_queue = zui.ui.render.command_queue;
+const client_state = zui.client.state;
+const client_agents = zui.client.agent_registry;
+const font_system = zui.ui.font_system;
 const protocol_messages = @import("protocol_messages.zig");
 
 const workspace = zui.ui.workspace;
 const panel_manager = zui.ui.panel_manager;
 const dock_graph = zui.ui.layout.dock_graph;
+const dock_drop = zui.ui.layout.dock_drop;
 
 const Rect = zui.core.Rect;
 const UiRect = ui_draw_context.Rect;
@@ -29,6 +36,13 @@ const ConnectionState = enum {
     connected,
     error_state,
 };
+
+const MAX_REASONABLE_PANEL_COUNT: usize = 4096;
+const MAX_REASONABLE_DOCK_NODE_COUNT: usize = 16384;
+const MAX_REASONABLE_NEXT_PANEL_ID: workspace.PanelId = 4097;
+const WORKSPACE_RECOVERY_COOLDOWN_FRAMES: u64 = 60;
+const WORKSPACE_RECOVERY_SUSPEND_FRAMES: u64 = 9000;
+const WORKSPACE_RECOVERY_ATTEMPTS_BEFORE_SUSPEND: u8 = 1;
 
 const ChatAttachment = zui.protocol.types.ChatAttachment;
 const ChatMessage = zui.protocol.types.ChatMessage;
@@ -72,17 +86,66 @@ const SettingsPanel = struct {
     }
 };
 
+const UiWindow = struct {
+    window: *c.SDL_Window,
+    id: u32,
+    queue: ui_input_state.InputQueue,
+    swapchain: zapp.multi_window_renderer.WindowSwapchain,
+    manager: *panel_manager.PanelManager,
+    ui_state: zui.ui.main_window.WindowUiState = .{},
+    title: []u8,
+    persist_in_workspace: bool = false,
+    owns_manager: bool = true,
+    owns_swapchain: bool = true,
+};
+
 const SessionMessageState = struct {
     key: []const u8,
     messages: std.ArrayList(ChatMessage) = .empty,
     streaming_request_id: ?[]const u8 = null,
 };
 
+const DockTabHit = struct {
+    panel_id: workspace.PanelId,
+    node_id: dock_graph.NodeId,
+    tab_index: usize,
+    rect: UiRect,
+};
+
+const DockTabHitList = struct {
+    items: [96]DockTabHit = undefined,
+    len: usize = 0,
+
+    fn append(self: *DockTabHitList, item: DockTabHit) void {
+        if (self.len >= self.items.len) return;
+        self.items[self.len] = item;
+        self.len += 1;
+    }
+
+    fn slice(self: *const DockTabHitList) []const DockTabHit {
+        return self.items[0..self.len];
+    }
+};
+
+fn findTabHitAt(tab_hits: *const DockTabHitList, pos: [2]f32) ?DockTabHit {
+    var idx = tab_hits.len;
+    while (idx > 0) {
+        idx -= 1;
+        const hit = tab_hits.items[idx];
+        if (hit.rect.contains(pos)) return hit;
+    }
+    return null;
+}
+
+
 const App = struct {
     allocator: std.mem.Allocator,
     window: *c.SDL_Window,
     gpu: zapp.multi_window_renderer.Shared,
     swapchain: zapp.multi_window_renderer.WindowSwapchain,
+
+    ui_windows: std.ArrayList(*UiWindow) = .empty,
+    main_window_id: u32 = 0,
 
     // Panel state
     settings_panel: SettingsPanel,
@@ -111,6 +174,8 @@ const App = struct {
     theme: *const zui.Theme,
     ui_scale: f32 = 1.0,
     config: config_mod.Config,
+    client_context: client_state.ClientContext,
+    agent_registry: client_agents.AgentRegistry,
 
     running: bool = true,
 
@@ -120,19 +185,30 @@ const App = struct {
     mouse_down: bool = false,
     mouse_clicked: bool = false,
     mouse_released: bool = false,
+    render_input_queue: ?*ui_input_state.InputQueue = null,
 
     message_counter: u64 = 0,
+    debug_frame_counter: u64 = 0,
     frame_clock: zapp.frame_clock.FrameClock,
+    workspace_recovery_blocked_until: u64 = 0,
+    workspace_recovery_blocked_for_manager: usize = 0,
+    workspace_recovery_suspended_until: u64 = 0,
+    workspace_recovery_suspended_for_manager: usize = 0,
+    workspace_recovery_failures: u8 = 0,
+    workspace_snapshot_restore_cooldown_until: u64 = 0,
 
     // UI State for dock
     ui_state: zui.ui.main_window.WindowUiState = .{},
+    workspace_snapshot: ?workspace.WorkspaceSnapshot = null,
+    workspace_snapshot_stale: bool = false,
+    workspace_snapshot_restore_attempted: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !App {
         try zapp.sdl_app.init(.{ .video = true, .events = true, .gamepad = false });
         zapp.clipboard.init();
 
         const window = zapp.sdl_app.createWindow("ZiggyStarSpider GUI", 1024, 720, c.SDL_WINDOW_RESIZABLE) catch {
-            return error.CreateWindowFailed;
+            return error.SdlWindowCreateFailed;
         };
         errdefer c.SDL_DestroyWindow(window);
 
@@ -202,17 +278,28 @@ const App = struct {
             .gpu = gpu,
             .swapchain = swapchain,
             .settings_panel = settings_panel,
+            .client_context = undefined,
+            .agent_registry = undefined,
             .status_text = try allocator.dupe(u8, "Not connected"),
             .theme = zui.theme.current(),
             .ui_scale = 1.0,
             .config = config,
             .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
             .frame_clock = zapp.frame_clock.FrameClock.init(60),
-            .manager = undefined, // Will be initialized below
+            .manager = undefined,
         };
+        app.applyThemeFromSettings();
+
+        app.client_context = try client_state.ClientContext.init(allocator);
+        errdefer app.client_context.deinit();
+        app.agent_registry = client_agents.AgentRegistry.initEmpty(allocator);
+        errdefer app.agent_registry.deinit(allocator);
 
         app.manager = panel_manager.PanelManager.init(allocator, ws, &app.next_panel_id);
+        app.bindNextPanelId(&app.manager);
         errdefer app.manager.deinit();
+
+        app.captureWorkspaceSnapshot(&app.manager);
 
         if (app.config.default_session) |default_session| {
             const seed = if (default_session.len > 0) default_session else "main";
@@ -221,18 +308,42 @@ const App = struct {
             app.ensureSessionExists("main", "Main") catch {};
         }
 
+        const main_window = try app.createUiWindowFromExisting(
+            window,
+            "ZiggyStarSpider GUI",
+            &app.manager,
+            true,
+            false,
+            false,
+            false,
+        );
+        try app.ui_windows.append(allocator, main_window);
+        app.main_window_id = main_window.id;
+
         errdefer app.settings_panel.deinit(allocator);
         errdefer allocator.free(app.status_text);
 
         ui_sdl_input_backend.init(allocator);
         ui_input_router.setBackend(ui_input_backend.sdl3);
 
+        // Cleanup on initialization failure after this point
+        errdefer {
+            var i: usize = 0;
+            while (i < app.ui_windows.items.len) : (i += 1) {
+                app.destroyUiWindow(app.ui_windows.items[i]);
+            }
+            app.ui_windows.clearRetainingCapacity();
+            app.ui_windows.deinit(app.allocator);
+        }
         return app;
     }
 
     pub fn deinit(self: *App) void {
         self.disconnect();
         self.clearSessions();
+        self.chat_sessions.deinit(self.allocator);
+        self.session_messages.deinit(self.allocator);
+        self.invalidateWorkspaceSnapshot();
         if (self.pending_send_request_id) |request_id| self.allocator.free(request_id);
         if (self.pending_send_message_id) |message_id| self.allocator.free(message_id);
         if (self.pending_send_session_key) |session_key| self.allocator.free(session_key);
@@ -241,9 +352,16 @@ const App = struct {
 
         self.settings_panel.deinit(self.allocator);
         self.chat_input.deinit(self.allocator);
+        self.client_context.deinit();
+        self.agent_registry.deinit(self.allocator);
 
         self.ui_commands.deinit();
         self.manager.deinit();
+        while (self.ui_windows.items.len > 0) {
+            const maybe_window = self.ui_windows.pop();
+            if (maybe_window) |window| self.destroyUiWindow(window);
+        }
+        self.ui_windows.deinit(self.allocator);
         ui_input_router.deinit(self.allocator);
         ui_sdl_input_backend.deinit();
 
@@ -260,37 +378,357 @@ const App = struct {
 
     pub fn run(self: *App) !void {
         while (self.running) {
+            self.bindMainWindowManager();
+            self.debug_frame_counter += 1;
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                const windows = self.ui_windows.items.len;
+                var panels: usize = 0;
+                var dock_nodes: usize = 0;
+                var dock_root: i64 = -1;
+                if (windows > 0) {
+                    const main_manager = self.managerForWindow(self.ui_windows.items[0]);
+                    panels = self.safeWorkspaceCount(main_manager.workspace.panels.items.len, 4096);
+                    dock_nodes = self.safeWorkspaceCount(main_manager.workspace.dock_layout.nodes.items.len, 16384);
+                    if (main_manager.workspace.dock_layout.root) |root| {
+                        dock_root = @intCast(root);
+                    }
+                }
+                std.log.info("frame={} windows={} panels={} dock_nodes={} dock_root={} sessions={} ws_msgs={} connection={s} status={s}",
+                    .{
+                        self.debug_frame_counter,
+                        windows,
+                        panels,
+                        dock_nodes,
+                        dock_root,
+                        self.chat_sessions.items.len,
+                        self.message_counter,
+                        @tagName(self.connection_state),
+                        self.status_text,
+                    },
+                );
+            }
             _ = self.frame_clock.beginFrame();
-            self.mouse_clicked = false;
-            self.mouse_released = false;
-
-            // Get DPI scale and apply to theme
-            const dpi_scale_raw: f32 = c.SDL_GetWindowDisplayScale(self.window);
-            const dpi_scale: f32 = if (dpi_scale_raw > 0.0) dpi_scale_raw else 1.0;
-            self.ui_scale = dpi_scale;
-            zui.ui.theme.applyTypography(dpi_scale);
-
-            const queue = ui_input_router.beginFrame(self.allocator);
             const polled = zapp.sdl_app.pollEventsToInput();
+            _ = ui_input_router.beginFrame(self.allocator);
             if (polled.quit_requested) {
                 self.running = false;
             }
-            if (polled.window_close_requested and polled.window_close_id == c.SDL_GetWindowID(self.window)) {
+
+            if (polled.window_close_requested and polled.window_close_id == self.main_window_id) {
                 self.running = false;
             }
 
-            zapp.sdl_app.collectWindowInput(self.allocator, self.window, queue);
-            ui_input_router.setExternalQueue(queue); // Restore queue after collectWindowInput clears it
-            try self.processInputEvents(queue);
-            try self.pollWebSocket();
+            if (polled.window_close_requested and polled.window_close_id != self.main_window_id) {
+                self.closeUiWindowById(polled.window_close_id);
+            }
 
-            self.drawFrame();
-            ui_input_state.endFrame(queue);
+            var requested_spawn_window = false;
+            var i: usize = 0;
+            while (i < self.ui_windows.items.len) : (i += 1) {
+                const window = self.ui_windows.items[i];
+                const manager = self.managerForWindow(window);
+                if ((window.id == self.main_window_id or window.window == self.window) and window.manager != manager) {
+                    window.manager = manager;
+                    window.owns_manager = false;
+                }
+                if (@intFromPtr(manager) == 0) {
+                    std.log.err("run: window manager pointer is null (window_id={d})", .{window.id});
+                    self.drawUnavailableWorkspaceFrame(window, "Workspace manager pointer is null");
+                    continue;
+                }
+                self.bindNextPanelId(manager);
+                const manager_healthy = self.ensureWindowManagerHealthy(manager);
+                window.queue.clear(self.allocator);
+                self.mouse_clicked = false;
+                self.mouse_released = false;
+
+                // Get DPI scale for window-specific rendering
+                const dpi_scale_raw: f32 = c.SDL_GetWindowDisplayScale(window.window);
+                const dpi_scale: f32 = if (dpi_scale_raw > 0.0) dpi_scale_raw else 1.0;
+                self.ui_scale = dpi_scale;
+                zui.ui.theme.applyTypography(dpi_scale);
+
+                if (!manager_healthy) {
+                    ui_input_router.setExternalQueue(&window.queue);
+                    zapp.sdl_app.collectWindowInput(self.allocator, window.window, &window.queue);
+                    self.drawUnavailableWorkspaceFrame(window, "Unable to recover workspace state");
+                    ui_input_state.endFrame(&window.queue);
+                    ui_input_router.setExternalQueue(null);
+                    continue;
+                }
+
+                ui_input_router.setExternalQueue(&window.queue);
+                zapp.sdl_app.collectWindowInput(self.allocator, window.window, &window.queue);
+                try self.processInputEvents(&window.queue, &requested_spawn_window, window, manager);
+
+                ui_input_router.setExternalQueue(&window.queue);
+                self.drawFrame(window);
+                ui_input_state.endFrame(&window.queue);
+                ui_input_router.setExternalQueue(null);
+            }
+
+            if (requested_spawn_window) {
+                self.spawnUiWindow() catch |err| {
+                    std.log.err("Failed to spawn additional window: {s}", .{@errorName(err)});
+                };
+            }
+
+            try self.pollWebSocket();
             self.frame_clock.endFrame();
         }
     }
 
-    fn processInputEvents(self: *App, queue: *ui_input_state.InputQueue) !void {
+    fn bindMainWindowManager(self: *App) void {
+        var i: usize = 0;
+        while (i < self.ui_windows.items.len) : (i += 1) {
+            const window = self.ui_windows.items[i];
+            if (window.id != self.main_window_id and window.window != self.window) continue;
+            if (window.manager != &self.manager) {
+                if (self.shouldLogDebug(1200)) {
+                    std.log.debug(
+                        "bindMainWindowManager: repairing stale main window manager pointer (old=0x{x}, expected=0x{x})",
+                        .{ @intFromPtr(window.manager), @intFromPtr(&self.manager) },
+                    );
+                }
+                window.manager = &self.manager;
+                window.owns_manager = false;
+            }
+            return;
+        }
+    }
+
+    fn managerForWindow(self: *App, ui_window: *UiWindow) *panel_manager.PanelManager {
+        if (ui_window.id == self.main_window_id or ui_window.window == self.window) {
+            return &self.manager;
+        }
+        return ui_window.manager;
+    }
+
+    fn createUiWindowFromExisting(
+        self: *App,
+        window: *c.SDL_Window,
+        title: []const u8,
+        manager: *panel_manager.PanelManager,
+        is_main_swapchain: bool,
+        persist_in_workspace: bool,
+        owns_manager: bool,
+        owns_swapchain: bool,
+    ) !*UiWindow {
+        const title_copy = try self.allocator.dupe(u8, title);
+        errdefer self.allocator.free(title_copy);
+
+        const swapchain = if (is_main_swapchain)
+            zapp.multi_window_renderer.WindowSwapchain.initMain(&self.gpu, window)
+        else
+            try zapp.multi_window_renderer.WindowSwapchain.initOwned(&self.gpu, window);
+
+        const out = try self.allocator.create(UiWindow);
+        errdefer self.allocator.destroy(out);
+
+        out.* = .{
+            .window = window,
+            .id = c.SDL_GetWindowID(window),
+            .queue = ui_input_state.InputQueue.init(self.allocator),
+            .swapchain = swapchain,
+            .manager = manager,
+            .title = title_copy,
+            .persist_in_workspace = persist_in_workspace,
+            .owns_manager = owns_manager,
+            .owns_swapchain = owns_swapchain,
+        };
+        return out;
+    }
+
+    fn destroyUiWindow(self: *App, w: *UiWindow) void {
+        w.queue.deinit(self.allocator);
+
+        if (w.owns_swapchain) {
+            w.swapchain.deinit();
+        }
+        if (w.owns_manager) {
+            w.manager.deinit();
+            self.allocator.destroy(w.manager);
+        }
+        self.allocator.free(w.title);
+        if (w.window != self.window) {
+            c.SDL_DestroyWindow(w.window);
+        }
+        self.allocator.destroy(w);
+    }
+
+    fn closeUiWindowById(self: *App, window_id: u32) void {
+        var i: usize = 0;
+        while (i < self.ui_windows.items.len) : (i += 1) {
+            const w = self.ui_windows.items[i];
+            if (w.id == window_id and w.id != self.main_window_id) {
+                _ = self.ui_windows.swapRemove(i);
+                if (w.persist_in_workspace) {
+                    self.attachDetachedPanelsToMain(w.manager);
+                }
+                self.destroyUiWindow(w);
+                return;
+            }
+        }
+    }
+
+    fn attachDetachedPanelsToMain(self: *App, source_manager: *panel_manager.PanelManager) void {
+        if (source_manager == &self.manager) return;
+        self.bindNextPanelId(source_manager);
+        self.bindNextPanelId(&self.manager);
+
+        if (!self.isWorkspaceStateReasonable(source_manager)) {
+            std.log.warn("attachDetachedPanelsToMain: source workspace unhealthy, attempting recovery", .{});
+            self.tryDeinitWorkspaceForReset(source_manager);
+            if (!self.isWorkspaceStateReasonable(source_manager)) {
+                source_manager.workspace = workspace.Workspace.initEmpty(self.allocator);
+                return;
+            }
+        }
+
+        if (source_manager.workspace.panels.items.len > MAX_REASONABLE_PANEL_COUNT) {
+            std.log.warn("attachDetachedPanelsToMain: source panels unreasonable ({d}), discarding source workspace", .{
+                source_manager.workspace.panels.items.len,
+            });
+            self.tryDeinitWorkspaceForReset(source_manager);
+            source_manager.workspace = workspace.Workspace.initEmpty(self.allocator);
+            return;
+        }
+
+        if (source_manager.workspace.panels.items.len == 0) {
+            source_manager.workspace.focused_panel_id = null;
+            source_manager.workspace.dock_layout.clear();
+            source_manager.workspace.dock_layout.root = null;
+            source_manager.workspace.markDirty();
+            return;
+        }
+
+        while (source_manager.workspace.panels.items.len > 0) {
+            const panel_id = source_manager.workspace.panels.items[source_manager.workspace.panels.items.len - 1].id;
+            if (source_manager.takePanel(panel_id)) |moved_panel| {
+                self.appendPanelToManager(&self.manager, moved_panel) catch {
+                    var fallback = moved_panel;
+                    fallback.deinit(self.allocator);
+                };
+            } else {
+                break;
+            }
+        }
+
+        if (self.manager.workspace.syncDockLayout() catch false) {
+            self.manager.workspace.markDirty();
+        }
+
+        source_manager.workspace.dock_layout.clear();
+        source_manager.workspace.dock_layout.root = null;
+        source_manager.workspace.focused_panel_id = null;
+        source_manager.workspace.markDirty();
+        self.recomputeManagerNextId(source_manager);
+    }
+
+    fn cloneWorkspace(self: *App, src: *const workspace.Workspace) !workspace.Workspace {
+        var snapshot = try src.toSnapshot(self.allocator);
+        defer snapshot.deinit(self.allocator);
+        return try workspace.Workspace.fromSnapshot(self.allocator, snapshot);
+    }
+
+    fn remapWorkspacePanelIds(
+        self: *App,
+        ws: *workspace.Workspace,
+        next_panel_id: *workspace.PanelId,
+    ) !void {
+        var map = std.AutoHashMap(workspace.PanelId, workspace.PanelId).init(self.allocator);
+        defer map.deinit();
+
+        for (ws.panels.items) |*panel| {
+            const old_id = panel.id;
+            const new_id = next_panel_id.*;
+            next_panel_id.* += 1;
+            panel.id = new_id;
+            try map.put(old_id, new_id);
+        }
+
+        if (ws.focused_panel_id) |old_focus| {
+            ws.focused_panel_id = map.get(old_focus);
+        }
+    }
+
+    fn cloneWorkspaceRemap(
+        self: *App,
+        src: *const workspace.Workspace,
+        next_panel_id: *workspace.PanelId,
+    ) !workspace.Workspace {
+        var ws = try self.cloneWorkspace(src);
+        errdefer ws.deinit(self.allocator);
+        try self.remapWorkspacePanelIds(&ws, next_panel_id);
+        _ = try ws.syncDockLayout();
+        return ws;
+    }
+
+    fn spawnUiWindow(self: *App) !void {
+        const width: c_int = 960;
+        const height: c_int = 720;
+        const title = try std.fmt.allocPrint(self.allocator, "ZiggyStarSpider GUI ({d})", .{self.ui_windows.items.len});
+        defer self.allocator.free(title);
+        const title_with_null = try self.allocator.alloc(u8, title.len + 1);
+        defer self.allocator.free(title_with_null);
+        @memcpy(title_with_null[0..title.len], title);
+        title_with_null[title.len] = 0;
+        const title_z: [:0]const u8 = title_with_null[0..title.len :0];
+
+        const win = zapp.sdl_app.createWindow(title_z, width, height, c.SDL_WINDOW_RESIZABLE) catch {
+            return error.SdlWindowCreateFailed;
+        };
+        errdefer c.SDL_DestroyWindow(win);
+
+        var pos_x: c_int = 0;
+        var pos_y: c_int = 0;
+        _ = c.SDL_GetWindowPosition(self.window, &pos_x, &pos_y);
+        const offset: c_int = @intCast(@min(self.ui_windows.items.len * 24, 220));
+        _ = c.SDL_SetWindowPosition(win, pos_x + offset, pos_y + offset);
+
+        var cloned_workspace = try self.cloneWorkspaceRemap(&self.manager.workspace, &self.next_panel_id);
+        var should_cleanup_workspace = true;
+        errdefer if (should_cleanup_workspace) cloned_workspace.deinit(self.allocator);
+
+        const new_manager = try self.allocator.create(panel_manager.PanelManager);
+        errdefer self.allocator.destroy(new_manager);
+
+        var should_cleanup_new_manager = true;
+        new_manager.* = panel_manager.PanelManager.init(
+            self.allocator,
+            cloned_workspace,
+            &self.next_panel_id,
+        );
+        self.bindNextPanelId(new_manager);
+        should_cleanup_workspace = false;
+        errdefer if (should_cleanup_new_manager) {
+            new_manager.deinit();
+            self.allocator.destroy(new_manager);
+        };
+
+        const new_window = try self.createUiWindowFromExisting(
+            win,
+            title,
+            new_manager,
+            false,
+            true,
+            true,
+            true,
+        );
+        should_cleanup_new_manager = false;
+        self.ui_windows.append(self.allocator, new_window) catch |err| {
+            self.destroyUiWindow(new_window);
+            return err;
+        };
+    }
+
+    fn processInputEvents(
+        self: *App,
+        queue: *ui_input_state.InputQueue,
+        request_spawn_window: *bool,
+        ui_window: *UiWindow,
+        manager: *panel_manager.PanelManager,
+    ) !void {
         self.mouse_x = queue.state.mouse_pos[0];
         self.mouse_y = queue.state.mouse_pos[1];
         self.mouse_down = queue.state.mouse_down_left;
@@ -304,7 +742,7 @@ const App = struct {
                     if (mu.button == .left) self.mouse_released = true;
                 },
                 .key_down => |ke| {
-                    try self.handleKeyDownEvent(ke);
+                    try self.handleKeyDownEvent(ke, request_spawn_window, manager);
                 },
                 .text_input => |txt| {
                     try self.handleTextInput(txt.text);
@@ -312,6 +750,1137 @@ const App = struct {
                 else => {},
             }
         }
+
+        try self.handleDockTabInput(queue, ui_window, manager);
+    }
+
+    fn handleDockTabInput(
+        self: *App,
+        queue: *ui_input_state.InputQueue,
+        ui_window: *UiWindow,
+        manager: *panel_manager.PanelManager,
+    ) !void {
+        if (queue.events.items.len == 0) return;
+
+        const drag_threshold_sq: f32 = 16.0;
+
+        var fb_w: c_int = 0;
+        var fb_h: c_int = 0;
+        _ = c.SDL_GetWindowSizeInPixels(ui_window.window, &fb_w, &fb_h);
+        const dock_area = UiRect.fromMinSize(
+            .{ 0.0, 0.0 },
+            .{
+                if (fb_w > 0) @floatFromInt(fb_w) else 1.0,
+                if (fb_h > 0) @floatFromInt(fb_h) else 1.0,
+            },
+        );
+
+        var tab_hits = DockTabHitList{};
+        self.collectDockTabGeometry(manager, dock_area, &tab_hits);
+
+        const drag_state = &ui_window.ui_state.dock_drag;
+        var left_release = false;
+        var release_pos = queue.state.mouse_pos;
+
+        for (queue.events.items) |evt| {
+            switch (evt) {
+                .focus_lost => {
+                    if (drag_state.panel_id) |pid| {
+                        if (drag_state.dragging) {
+                            self.detachPanelToNewWindow(ui_window, pid);
+                        }
+                    }
+                    drag_state.clear();
+                },
+                .mouse_down => |md| {
+                    if (md.button != .left) continue;
+                    if (findTabHitAt(&tab_hits, md.pos)) |hit| {
+                        drag_state.panel_id = hit.panel_id;
+                        drag_state.source_node_id = hit.node_id;
+                        drag_state.source_tab_index = hit.tab_index;
+                        drag_state.press_pos = md.pos;
+                        drag_state.dragging = false;
+                    }
+                },
+                .mouse_up => |mu| {
+                    if (mu.button == .left) {
+                        left_release = true;
+                        release_pos = mu.pos;
+                    }
+                },
+                else => {},
+            }
+        }
+
+        if (drag_state.panel_id) |pid| {
+            if (self.findPanelById(manager, pid) == null) {
+                drag_state.clear();
+                return;
+            }
+        }
+
+        if (drag_state.panel_id != null and queue.state.mouse_down_left and !left_release) {
+            if (!drag_state.dragging) {
+                const dx = queue.state.mouse_pos[0] - drag_state.press_pos[0];
+                const dy = queue.state.mouse_pos[1] - drag_state.press_pos[1];
+                if (dx * dx + dy * dy >= drag_threshold_sq) {
+                    drag_state.dragging = true;
+                }
+            }
+        }
+
+        const should_finalize = left_release or
+            (drag_state.panel_id != null and !queue.state.mouse_down_left);
+        if (!should_finalize) return;
+
+        const drag_panel_id = drag_state.panel_id orelse {
+            drag_state.clear();
+            return;
+        };
+
+        if (drag_state.dragging) {
+            const target = dock_drop.pickDropTarget(&manager.workspace.dock_layout, dock_area, release_pos);
+            if (target) |drop_target| {
+                const changed = if (drop_target.location == .center)
+                    manager.workspace.dock_layout.movePanelToTabs(drag_panel_id, drop_target.node_id, null) catch false
+                else
+                    manager.workspace.dock_layout.splitNodeWithPanel(
+                        drop_target.node_id,
+                        drag_panel_id,
+                        drop_target.location,
+                    ) catch false;
+                const repaired_layout = manager.workspace.syncDockLayout() catch false;
+                if (changed or repaired_layout) {
+                    manager.workspace.markDirty();
+                }
+                manager.focusPanel(drag_panel_id);
+            } else if (!dock_area.contains(release_pos)) {
+                self.detachPanelToNewWindow(ui_window, drag_panel_id);
+            } else {
+                manager.focusPanel(drag_panel_id);
+            }
+        } else if (findTabHitAt(&tab_hits, release_pos)) |hit| {
+            if (manager.workspace.dock_layout.setActiveTab(hit.node_id, hit.tab_index)) {
+                manager.workspace.markDirty();
+            }
+            manager.focusPanel(hit.panel_id);
+        } else {
+            manager.focusPanel(drag_panel_id);
+        }
+
+        drag_state.clear();
+    }
+
+    fn rebuildDockLayoutFromPanels(self: *App, manager: *panel_manager.PanelManager) bool {
+        const panel_count = manager.workspace.panels.items.len;
+        if (panel_count == 0 or panel_count > 4096) return false;
+
+        const graph = &manager.workspace.dock_layout;
+        graph.clear();
+        const fresh_graph = graph;
+
+        var chat_ids = std.ArrayList(workspace.PanelId).empty;
+        defer chat_ids.deinit(fresh_graph.allocator);
+        var other_ids = std.ArrayList(workspace.PanelId).empty;
+        defer other_ids.deinit(fresh_graph.allocator);
+        var all_ids = std.ArrayList(workspace.PanelId).empty;
+        defer all_ids.deinit(fresh_graph.allocator);
+
+        chat_ids.ensureTotalCapacity(fresh_graph.allocator, panel_count) catch return false;
+        other_ids.ensureTotalCapacity(fresh_graph.allocator, panel_count) catch return false;
+        all_ids.ensureTotalCapacity(fresh_graph.allocator, panel_count) catch return false;
+
+        var chat_count: usize = 0;
+        var other_count: usize = 0;
+        for (manager.workspace.panels.items) |panel| {
+            if (panel.kind == .Chat) {
+                chat_count += 1;
+                chat_ids.append(fresh_graph.allocator, panel.id) catch return false;
+            } else {
+                other_count += 1;
+                other_ids.append(fresh_graph.allocator, panel.id) catch return false;
+            }
+            all_ids.append(fresh_graph.allocator, panel.id) catch return false;
+        }
+        if (self.shouldLogDebug(120)) {
+            std.log.info("rebuildDockLayoutFromPanels: panel_count={} chat={} other={}", .{ panel_count, chat_count, other_count });
+        }
+
+        if (chat_ids.items.len > 0 and other_ids.items.len > 0) {
+            const left = fresh_graph.addTabsNode(chat_ids.items, 0) catch return false;
+            const right = fresh_graph.addTabsNode(other_ids.items, 0) catch return false;
+            const root = fresh_graph.addSplitNode(.vertical, manager.workspace.custom_layout.left_ratio, left, right) catch return false;
+            fresh_graph.root = root;
+            manager.workspace.markDirty();
+            return true;
+        }
+
+        if (all_ids.items.len == 0) return false;
+        const root = fresh_graph.addTabsNode(all_ids.items, 0) catch return false;
+        fresh_graph.root = root;
+        manager.workspace.markDirty();
+        return true;
+    }
+
+    fn recoverDockLayoutFromPanels(self: *App, manager: *panel_manager.PanelManager) bool {
+        const panel_count = manager.workspace.panels.items.len;
+        if (self.shouldLogDebug(120)) {
+            std.log.info("recoverDockLayoutFromPanels: panel_count={}", .{panel_count});
+        }
+        if (panel_count == 0 or panel_count > 4096) return false;
+
+        var graph = &manager.workspace.dock_layout;
+        graph.clear();
+
+        var panel_ids = std.ArrayList(workspace.PanelId).empty;
+        defer panel_ids.deinit(graph.allocator);
+        panel_ids.ensureTotalCapacity(graph.allocator, panel_count) catch return false;
+
+        for (manager.workspace.panels.items) |panel| {
+            panel_ids.append(graph.allocator, panel.id) catch return false;
+        }
+
+        const root = graph.addTabsNode(panel_ids.items, 0) catch return false;
+        graph.root = root;
+        manager.workspace.markDirty();
+        if (self.shouldLogDebug(120)) {
+            std.log.info("recoverDockLayoutFromPanels: built root={}", .{@as(i64, @intCast(root))});
+        }
+        return true;
+    }
+
+    fn collectDockLayoutSafe(
+        self: *App,
+        manager: *panel_manager.PanelManager,
+        dock_area: UiRect,
+        out: *dock_graph.LayoutResult,
+    ) bool {
+        if (!self.isWorkspaceStateReasonable(manager)) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("collectDockLayoutSafe: manager unhealthy", .{});
+            }
+            return false;
+        }
+
+        if (self.shouldLogDebug(240)) {
+            const dock_root = if (manager.workspace.dock_layout.root) |r|
+                @as(i64, @intCast(r))
+            else
+                -1;
+            const panel_count = self.safeWorkspaceCount(manager.workspace.panels.items.len, 4096);
+            const node_count = self.safeWorkspaceCount(manager.workspace.dock_layout.nodes.items.len, 16384);
+            std.log.info("collectDockLayoutSafe begin: panels={} root={} nodes={}", .{
+                panel_count,
+                dock_root,
+                node_count,
+            });
+        }
+        out.len = 0;
+        if (manager.workspace.panels.items.len > 4096 or manager.workspace.dock_layout.nodes.items.len > 16384)
+        {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn(
+                    "collectDockLayoutSafe: invalid workspace sizes (panels={} nodes={})",
+                    .{
+                        manager.workspace.panels.items.len,
+                        manager.workspace.dock_layout.nodes.items.len,
+                    },
+                );
+            }
+            return false;
+        }
+        if (!self.isDockLayoutGraphHeaderSane(&manager.workspace.dock_layout)) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("collectDockLayoutSafe: dock graph header failed sanity check", .{});
+            }
+            return false;
+        }
+
+        if (manager.workspace.panels.items.len == 0) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("collectDockLayoutSafe: no panels available", .{});
+            }
+            return false;
+        }
+
+        if (self.collectDockLayout(manager, dock_area, out)) {
+            if (self.shouldLogDebug(240)) {
+                std.log.info("collectDockLayoutSafe: existing layout valid", .{});
+            }
+            return true;
+        }
+        if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("collectDockLayoutSafe: existing layout invalid, rebuilding", .{});
+        }
+
+        if (self.rebuildDockLayoutFromPanels(manager)) {
+            _ = manager.workspace.syncDockLayout() catch {};
+            if (self.collectDockLayout(manager, dock_area, out)) {
+                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                    std.log.info("collectDockLayoutSafe: rebuilt layout valid", .{});
+                }
+                return true;
+            }
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("collectDockLayoutSafe: rebuilt layout still invalid", .{});
+            }
+        }
+
+        if (self.recoverDockLayoutFromPanels(manager)) {
+            if (self.collectDockLayout(manager, dock_area, out)) {
+                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                    std.log.info("collectDockLayoutSafe: recovered layout valid", .{});
+                }
+                return true;
+            }
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("collectDockLayoutSafe: recovered layout still invalid", .{});
+            }
+        }
+
+        if (self.buildSingleTabPanelLayout(manager, dock_area, out)) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.info("collectDockLayoutSafe: single-tab fallback used", .{});
+            }
+            return true;
+        }
+        if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+            std.log.warn("collectDockLayoutSafe: single-tab fallback failed", .{});
+        }
+        return false;
+    }
+
+    fn isDockLayoutGraphHeaderSane(self: *App, graph: *const dock_graph.Graph) bool {
+        _ = self;
+        if (graph.nodes.capacity > MAX_REASONABLE_DOCK_NODE_COUNT * 2) return false;
+        if (graph.nodes.items.len > graph.nodes.capacity) return false;
+        if (graph.nodes.items.len > MAX_REASONABLE_DOCK_NODE_COUNT) return false;
+        if (graph.nodes.items.len == 0) return true;
+        const ptr = graph.nodes.items.ptr;
+        if (@intFromPtr(ptr) == 0) return false;
+        if (!std.mem.isAligned(@intFromPtr(ptr), @alignOf(?dock_graph.Node))) return false;
+        return true;
+    }
+
+    fn ensureWindowManagerHealthy(self: *App, manager: *panel_manager.PanelManager) bool {
+        if (@intFromPtr(manager) == 0) {
+            std.log.err("ensureWindowManagerHealthy: null manager pointer", .{});
+            return false;
+        }
+        self.bindNextPanelId(manager);
+        if (self.isWorkspaceRecoverySuspended(manager)) {
+            if (self.shouldLogDebug(240) or self.shouldLogStartup()) {
+                std.log.warn(
+                    "ensureWindowManagerHealthy: recovery suspended (manager=0x{x})",
+                    .{@intFromPtr(manager)},
+                );
+            }
+            return false;
+        }
+
+        if (self.workspace_recovery_failures >= WORKSPACE_RECOVERY_ATTEMPTS_BEFORE_SUSPEND) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn(
+                    "ensureWindowManagerHealthy: recovery attempts exceeded, forcing safe reset",
+                    .{},
+                );
+            }
+            self.workspace_recovery_failures = 0;
+            self.invalidateWorkspaceSnapshot();
+            if (!self.resetManagerToDefaultSafe(manager)) {
+                self.suspendWorkspaceRecovery(manager);
+                self.resetWorkspaceToSafeEmpty(manager);
+                return false;
+            }
+            self.clearWorkspaceRecoveryCooldown();
+            self.clearWorkspaceRecoverySuspend();
+            return self.isWorkspaceStateReasonable(manager) and manager.workspace.panels.items.len > 0;
+        }
+
+        const is_recovery_allowed = self.canRecoverManagerWorkspace(manager);
+        if (!is_recovery_allowed) {
+            if (self.shouldLogDebug(240) or self.shouldLogStartup()) {
+                std.log.warn(
+                    "ensureWindowManagerHealthy: skipping recovery due cooldown (manager=0x{x})",
+                    .{@intFromPtr(manager)},
+                );
+            }
+            return false;
+        }
+
+        if (!self.isWorkspaceStateReasonable(manager)) {
+            self.logWorkspaceState(manager, "invalid-before-reset", self.debug_frame_counter);
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.err(
+                    "ensureWindowManagerHealthy: invalid workspace state, resetting (panels={d} nodes={d} root={d})",
+                    .{
+                        manager.workspace.panels.items.len,
+                        manager.workspace.dock_layout.nodes.items.len,
+                        if (manager.workspace.dock_layout.root) |root| @as(i64, @intCast(root)) else -1,
+                    },
+                );
+            }
+
+            if (!self.workspace_snapshot_stale and self.workspace_snapshot != null and !self.workspace_snapshot_restore_attempted) {
+                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                    std.log.info("ensureWindowManagerHealthy: trying snapshot restore during recovery", .{});
+                }
+                if (
+                    self.debug_frame_counter >= self.workspace_snapshot_restore_cooldown_until and
+                    self.restoreWorkspaceFromSnapshot(manager)
+                ) {
+                    self.workspace_snapshot_stale = false;
+                    self.workspace_snapshot_restore_attempted = false;
+                    self.workspace_recovery_failures = 0;
+                    self.clearWorkspaceRecoveryCooldown();
+                    self.clearWorkspaceRecoverySuspend();
+                    self.workspace_snapshot_restore_cooldown_until = self.debug_frame_counter + WORKSPACE_RECOVERY_COOLDOWN_FRAMES;
+                    return true;
+                }
+                self.invalidateWorkspaceSnapshot();
+                self.workspace_snapshot_stale = true;
+                self.workspace_snapshot_restore_attempted = true;
+                self.workspace_snapshot_restore_cooldown_until = self.debug_frame_counter + WORKSPACE_RECOVERY_COOLDOWN_FRAMES;
+                if (self.workspace_recovery_failures < 250) self.workspace_recovery_failures +%= 1;
+                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                    std.log.warn("ensureWindowManagerHealthy: snapshot restore failed; disabling repeated restore", .{});
+                }
+            } else if (self.workspace_snapshot_stale) {
+                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                    std.log.warn(
+                        "ensureWindowManagerHealthy: skipping restore because workspace snapshot is stale",
+                        .{},
+                    );
+                }
+                if (self.workspace_recovery_failures < 250) self.workspace_recovery_failures +%= 1;
+            } else if (self.debug_frame_counter < self.workspace_snapshot_restore_cooldown_until) {
+                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                    std.log.warn(
+                        "ensureWindowManagerHealthy: snapshot restore cooldown active (frame {} < {})",
+                        .{ self.debug_frame_counter, self.workspace_snapshot_restore_cooldown_until },
+                    );
+                }
+                if (self.workspace_recovery_failures < 250) self.workspace_recovery_failures +%= 1;
+            }
+
+            if (!self.resetManagerToDefaultSafe(manager)) {
+                self.logWorkspaceState(manager, "invalid-after-reset", self.debug_frame_counter);
+                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                    std.log.err(
+                        "ensureWindowManagerHealthy: reset did not produce a valid default workspace",
+                        .{},
+                    );
+                }
+                self.workspace_recovery_failures +%= 1;
+                self.suspendWorkspaceRecovery(manager);
+                return false;
+            }
+
+            if (!self.isWorkspaceStateReasonable(manager) or manager.workspace.panels.items.len == 0) {
+                self.logWorkspaceState(manager, "invalid-after-reset-verify", self.debug_frame_counter);
+                self.workspace_recovery_failures +%= 1;
+                self.suspendWorkspaceRecovery(manager);
+                self.resetWorkspaceToSafeEmpty(manager);
+                return false;
+            }
+
+            self.captureWorkspaceSnapshot(manager);
+            self.workspace_recovery_failures = 0;
+            self.clearWorkspaceRecoveryCooldown();
+            self.clearWorkspaceRecoverySuspend();
+            return true;
+        }
+
+        if (manager.workspace.panels.items.len == 0) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("ensureWindowManagerHealthy: no panels; restoring default workspace", .{});
+            }
+            if (!self.resetManagerToDefaultSafe(manager)) {
+                self.suspendWorkspaceRecovery(manager);
+                self.resetWorkspaceToSafeEmpty(manager);
+                return false;
+            }
+            if (!self.isWorkspaceStateReasonable(manager) or manager.workspace.panels.items.len == 0) {
+                self.suspendWorkspaceRecovery(manager);
+                self.resetWorkspaceToSafeEmpty(manager);
+                return false;
+            }
+            self.clearWorkspaceRecoveryCooldown();
+            self.clearWorkspaceRecoverySuspend();
+            return manager.workspace.panels.items.len > 0;
+        }
+
+        if (manager.workspace.dock_layout.nodes.items.len == 0 and manager.workspace.panels.items.len > 0) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.info("ensureWindowManagerHealthy: no dock nodes; syncing layout", .{});
+            }
+            const synced = manager.workspace.syncDockLayout() catch {
+                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                    std.log.warn("ensureWindowManagerHealthy: sync failed; restoring defaults", .{});
+                }
+                if (!self.resetManagerToDefaultSafe(manager)) {
+                    self.suspendWorkspaceRecovery(manager);
+                    self.resetWorkspaceToSafeEmpty(manager);
+                    return false;
+                }
+                if (!self.isWorkspaceStateReasonable(manager)) {
+                    self.suspendWorkspaceRecovery(manager);
+                    self.resetWorkspaceToSafeEmpty(manager);
+                }
+                return false;
+            };
+            if (!synced) {
+                if (!self.resetManagerToDefaultSafe(manager)) {
+                    self.suspendWorkspaceRecovery(manager);
+                    self.resetWorkspaceToSafeEmpty(manager);
+                    return false;
+                }
+                if (!self.isWorkspaceStateReasonable(manager)) {
+                    self.suspendWorkspaceRecovery(manager);
+                    self.resetWorkspaceToSafeEmpty(manager);
+                }
+                return false;
+            }
+        } else if (self.isDockLayoutCorrupt(manager)) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("ensureWindowManagerHealthy: dock layout corrupt; repairing", .{});
+            }
+            _ = self.repairDockLayout(manager);
+            if (self.isDockLayoutCorrupt(manager)) {
+                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                    std.log.warn("ensureWindowManagerHealthy: repair ineffective; restoring defaults", .{});
+                }
+                if (!self.resetManagerToDefaultSafe(manager)) {
+                    self.suspendWorkspaceRecovery(manager);
+                    self.resetWorkspaceToSafeEmpty(manager);
+                    return false;
+                }
+                if (!self.isWorkspaceStateReasonable(manager)) {
+                    self.suspendWorkspaceRecovery(manager);
+                    self.resetWorkspaceToSafeEmpty(manager);
+                }
+            }
+        }
+
+        if (self.isWorkspaceStateReasonable(manager)) {
+            self.clearWorkspaceRecoveryCooldown();
+            self.clearWorkspaceRecoverySuspend();
+            if (self.workspace_snapshot_stale and self.shouldLogDebug(600)) {
+                std.log.warn("ensureWindowManagerHealthy: skipping snapshot capture while snapshot is stale", .{});
+            }
+        } else {
+            self.suspendWorkspaceRecovery(manager);
+        }
+
+        if (self.isWorkspaceStateReasonable(manager) and self.workspace_snapshot == null) {
+            self.captureWorkspaceSnapshot(manager);
+            self.workspace_snapshot_restore_attempted = false;
+        }
+
+        return self.isWorkspaceStateReasonable(manager) and manager.workspace.panels.items.len > 0;
+    }
+
+    fn canRecoverManagerWorkspace(self: *App, manager: *panel_manager.PanelManager) bool {
+        if (self.workspace_recovery_blocked_until == 0) return true;
+        if (self.workspace_recovery_blocked_for_manager != @intFromPtr(manager)) return true;
+        if (self.debug_frame_counter < self.workspace_recovery_blocked_until) return false;
+        self.workspace_recovery_blocked_until = 0;
+        self.workspace_recovery_blocked_for_manager = 0;
+        return true;
+    }
+
+    fn blockWorkspaceRecovery(self: *App, manager: *panel_manager.PanelManager) void {
+        self.workspace_recovery_blocked_for_manager = @intFromPtr(manager);
+        self.workspace_recovery_blocked_until = self.debug_frame_counter + WORKSPACE_RECOVERY_COOLDOWN_FRAMES;
+    }
+
+    fn isWorkspaceRecoverySuspended(self: *App, manager: *panel_manager.PanelManager) bool {
+        if (self.workspace_recovery_suspended_for_manager != @intFromPtr(manager)) return false;
+        if (self.workspace_recovery_suspended_until == 0) return true;
+        if (self.debug_frame_counter < self.workspace_recovery_suspended_until) return true;
+        self.workspace_recovery_suspended_for_manager = 0;
+        self.workspace_recovery_suspended_until = 0;
+        return false;
+    }
+
+    fn suspendWorkspaceRecovery(self: *App, manager: *panel_manager.PanelManager) void {
+        if (self.workspace_recovery_suspended_for_manager == 0) {
+            self.workspace_recovery_suspended_for_manager = @intFromPtr(manager);
+        }
+        self.workspace_recovery_suspended_until = self.debug_frame_counter + WORKSPACE_RECOVERY_SUSPEND_FRAMES;
+        self.blockWorkspaceRecovery(manager);
+    }
+
+    fn clearWorkspaceRecoverySuspend(self: *App) void {
+        if (self.workspace_recovery_suspended_until != 0) {
+            self.workspace_recovery_suspended_until = 0;
+            self.workspace_recovery_suspended_for_manager = 0;
+        }
+    }
+
+    fn resetWorkspaceToSafeEmpty(self: *App, manager: *panel_manager.PanelManager) void {
+        self.tryDeinitWorkspaceForReset(manager);
+        manager.workspace = workspace.Workspace.initEmpty(self.allocator);
+        self.recomputeManagerNextId(manager);
+    }
+
+    fn clearWorkspaceRecoveryCooldown(self: *App) void {
+        self.workspace_recovery_blocked_until = 0;
+        self.workspace_recovery_blocked_for_manager = 0;
+    }
+
+    fn captureWorkspaceSnapshot(self: *App, manager: *panel_manager.PanelManager) void {
+        if (!self.isWorkspaceStateReasonable(manager)) return;
+        const snapshot = manager.workspace.toSnapshot(self.allocator) catch {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("captureWorkspaceSnapshot: unable to snapshot workspace", .{});
+            }
+            return;
+        };
+        if (self.workspace_snapshot) |*previous| {
+            previous.deinit(self.allocator);
+        }
+        self.workspace_snapshot = snapshot;
+        self.workspace_snapshot_stale = false;
+        self.workspace_snapshot_restore_attempted = false;
+    }
+
+    fn invalidateWorkspaceSnapshot(self: *App) void {
+        if (self.workspace_snapshot) |*snapshot| {
+            snapshot.deinit(self.allocator);
+            self.workspace_snapshot = null;
+        }
+        self.workspace_snapshot_stale = true;
+        self.workspace_snapshot_restore_attempted = true;
+    }
+
+    fn bindNextPanelId(self: *App, manager: *panel_manager.PanelManager) void {
+        if (@intFromPtr(manager.next_panel_id) != @intFromPtr(&self.next_panel_id)) {
+            if (self.shouldLogDebug(1200)) {
+                std.log.debug(
+                    "bindNextPanelId: repairing manager.next_panel_id (old=0x{x}, expected=0x{x})",
+                    .{ @intFromPtr(manager.next_panel_id), @intFromPtr(&self.next_panel_id) },
+                );
+            }
+            manager.next_panel_id = &self.next_panel_id;
+            manager.trusted_next_panel_id = &self.next_panel_id;
+            manager.local_next_panel_id = self.next_panel_id;
+        }
+    }
+
+    fn restoreWorkspaceFromSnapshot(self: *App, manager: *panel_manager.PanelManager) bool {
+        const snapshot = self.workspace_snapshot orelse return false;
+        if (!self.isWorkspaceSnapshotReasonable(snapshot)) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("restoreWorkspaceFromSnapshot: snapshot failed sanity checks", .{});
+            }
+            self.invalidateWorkspaceSnapshot();
+            return false;
+        }
+        var restored = workspace.Workspace.fromSnapshot(self.allocator, snapshot) catch |err| {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn(
+                    "restoreWorkspaceFromSnapshot: failed to restore from snapshot ({s})",
+                    .{@errorName(err)},
+                );
+            }
+            self.invalidateWorkspaceSnapshot();
+            return false;
+        };
+        if (!self.restoreLooksReasonable(&restored)) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("restoreWorkspaceFromSnapshot: restored workspace failed sanity checks", .{});
+            }
+            restored.deinit(self.allocator);
+            self.invalidateWorkspaceSnapshot();
+            return false;
+        }
+
+        self.tryDeinitWorkspaceForReset(manager);
+        manager.workspace = restored;
+
+        if (!self.isWorkspaceStateReasonable(manager)) {
+            manager.workspace.deinit(self.allocator);
+            manager.workspace = workspace.Workspace.initEmpty(self.allocator);
+            self.invalidateWorkspaceSnapshot();
+            return false;
+        }
+        self.recomputeManagerNextId(manager);
+        self.captureWorkspaceSnapshot(manager);
+        return true;
+    }
+
+    fn restoreLooksReasonable(self: *App, candidate: *const workspace.Workspace) bool {
+        _ = self;
+        if (candidate.panels.items.len > MAX_REASONABLE_PANEL_COUNT) return false;
+        if (candidate.dock_layout.nodes.items.len > MAX_REASONABLE_DOCK_NODE_COUNT) return false;
+        if (candidate.panels.items.len > 0 and candidate.dock_layout.nodes.items.len == 0) return false;
+        if (candidate.dock_layout.nodes.capacity > MAX_REASONABLE_DOCK_NODE_COUNT * 2) return false;
+        if (candidate.panels.capacity > MAX_REASONABLE_PANEL_COUNT * 2) return false;
+        if (candidate.dock_layout.root) |root| {
+            if (root >= candidate.dock_layout.nodes.items.len) return false;
+            if (candidate.dock_layout.getNode(root) == null) return false;
+        } else if (candidate.dock_layout.nodes.items.len > 0) {
+            return false;
+        }
+        return true;
+    }
+
+    fn isWorkspaceSnapshotReasonable(self: *App, snapshot: workspace.WorkspaceSnapshot) bool {
+        if (snapshot.next_panel_id == 0) return false;
+        if (snapshot.next_panel_id == 1) return false;
+        if (snapshot.next_panel_id > MAX_REASONABLE_NEXT_PANEL_ID) return false;
+
+        const panel_count: usize = if (snapshot.panels) |panels| panels.len else 0;
+        if (panel_count > MAX_REASONABLE_PANEL_COUNT) return false;
+
+        if (snapshot.layout_v2) |layout| {
+            const layout_nodes = if (layout.nodes) |nodes| nodes.len else 0;
+            if (layout_nodes > MAX_REASONABLE_DOCK_NODE_COUNT) return false;
+        }
+
+        if (snapshot.collapsed_docks) |collapsed| {
+            if (collapsed.len > MAX_REASONABLE_DOCK_NODE_COUNT) return false;
+        }
+
+        if (snapshot.detached_windows) |detached| {
+            if (detached.len > 32) return false;
+        }
+
+        if (snapshot.panels) |panels| {
+            var seen_panel_ids = std.AutoHashMap(workspace.PanelId, void).init(self.allocator);
+            defer seen_panel_ids.deinit();
+            for (panels) |panel| {
+                if (panel.id == 0) return false;
+                if (panel.id >= snapshot.next_panel_id) return false;
+                if (seen_panel_ids.contains(panel.id)) return false;
+                seen_panel_ids.put(panel.id, {}) catch return false;
+            }
+        }
+
+        return true;
+    }
+
+    fn resetManagerWorkspaceToDefault(self: *App, manager: *panel_manager.PanelManager) bool {
+        self.tryDeinitWorkspaceForReset(manager);
+        const fresh = workspace.Workspace.initDefault(self.allocator) catch {
+            std.log.err("ensureWindowManagerHealthy: fallback workspace build failed", .{});
+            manager.workspace = workspace.Workspace.initEmpty(self.allocator);
+            self.recomputeManagerNextId(manager);
+            return false;
+        };
+        if (!self.restoreLooksReasonable(&fresh)) {
+            std.log.err("ensureWindowManagerHealthy: fallback workspace failed post-creation sanity checks", .{});
+            var disposable = fresh;
+            disposable.deinit(self.allocator);
+            manager.workspace = workspace.Workspace.initEmpty(self.allocator);
+            self.recomputeManagerNextId(manager);
+            return false;
+        }
+        manager.workspace = fresh;
+        self.recomputeManagerNextId(manager);
+        self.captureWorkspaceSnapshot(manager);
+        return true;
+    }
+
+    fn resetMainManagerToDefault(self: *App) bool {
+        var fresh = workspace.Workspace.initDefault(self.allocator) catch {
+            std.log.err("ensureWindowManagerHealthy: main fallback workspace build failed", .{});
+            return false;
+        };
+        if (!self.restoreLooksReasonable(&fresh)) {
+            std.log.err("ensureWindowManagerHealthy: main fallback workspace failed post-creation sanity checks", .{});
+            fresh.deinit(self.allocator);
+            return false;
+        }
+
+        self.tryDeinitWorkspaceForReset(&self.manager);
+        self.manager = panel_manager.PanelManager.init(self.allocator, fresh, &self.next_panel_id);
+        self.bindNextPanelId(&self.manager);
+        self.bindMainWindowManager();
+        self.recomputeManagerNextId(&self.manager);
+        self.captureWorkspaceSnapshot(&self.manager);
+        return true;
+    }
+
+    fn resetManagerToDefaultSafe(self: *App, manager: *panel_manager.PanelManager) bool {
+        if (manager == &self.manager) return self.resetMainManagerToDefault();
+        return self.resetManagerWorkspaceToDefault(manager);
+    }
+
+    fn isWorkspaceStateReasonable(self: *App, manager: *panel_manager.PanelManager) bool {
+        if (!self.isWorkspaceHeaderSane(manager)) return false;
+        if (!self.isDockLayoutGraphHeaderSane(&manager.workspace.dock_layout)) return false;
+
+        const panel_count = manager.workspace.panels.items.len;
+        const node_count = manager.workspace.dock_layout.nodes.items.len;
+
+        if (panel_count > MAX_REASONABLE_PANEL_COUNT or node_count > MAX_REASONABLE_DOCK_NODE_COUNT) return false;
+
+        if (manager.workspace.dock_layout.root == null)
+            return node_count == 0;
+
+        if (node_count == 0) return false;
+        const root = manager.workspace.dock_layout.root.?;
+        if (root >= node_count) return false;
+        return manager.workspace.dock_layout.getNode(root) != null;
+    }
+
+    fn resetManagerWorkspace(self: *App, manager: *panel_manager.PanelManager) void {
+        self.bindNextPanelId(manager);
+        _ = self.resetManagerWorkspaceToDefault(manager);
+    }
+
+    fn recomputeManagerNextId(self: *App, manager: *panel_manager.PanelManager) void {
+        self.bindNextPanelId(manager);
+        if (!self.isWorkspaceHeaderSane(manager)) {
+            self.next_panel_id = 1;
+            return;
+        }
+        var max_id: workspace.PanelId = 0;
+        for (manager.workspace.panels.items) |panel| {
+            if (panel.id > max_id) max_id = panel.id;
+        }
+        const candidate = max_id + 1;
+        if (candidate > self.next_panel_id) {
+            self.next_panel_id = candidate;
+        }
+    }
+
+    fn appendPanelToManager(self: *App, manager: *panel_manager.PanelManager, panel: workspace.Panel) !void {
+        self.bindNextPanelId(manager);
+        try manager.workspace.panels.append(self.allocator, panel);
+        manager.workspace.markDirty();
+        self.recomputeManagerNextId(manager);
+    }
+
+    fn tryDeinitWorkspaceForReset(self: *App, manager: *panel_manager.PanelManager) void {
+        if (!self.isWorkspaceHeaderSane(manager)) {
+            self.logWorkspaceState(manager, "header-corrupt-bypass-deinit", self.debug_frame_counter);
+            self.releaseCorruptWorkspaceStorage(manager);
+            manager.workspace = workspace.Workspace.initEmpty(self.allocator);
+            return;
+        }
+        if (self.isWorkspaceStateReasonable(manager)) {
+            manager.workspace.deinit(self.allocator);
+            manager.workspace = workspace.Workspace.initEmpty(self.allocator);
+            return;
+        }
+
+        // On partially-corrupted state, avoid deep deinit paths that assume valid node
+        // internals. Use bounded storage release only and replace with fresh structures.
+        const panel_count = manager.workspace.panels.items.len;
+        const node_count = manager.workspace.dock_layout.nodes.items.len;
+        std.log.warn(
+            "tryDeinitWorkspaceForReset: workspace header suspicious (panels=len={} cap={} nodes=len={} cap={})",
+            .{
+                panel_count,
+                manager.workspace.panels.capacity,
+                node_count,
+                manager.workspace.dock_layout.nodes.capacity,
+            },
+        );
+        self.releaseCorruptWorkspaceStorage(manager);
+        manager.workspace = workspace.Workspace.initEmpty(self.allocator);
+    }
+
+    fn releaseCorruptWorkspaceStorage(self: *App, manager: *panel_manager.PanelManager) void {
+        const panel_len = manager.workspace.panels.items.len;
+        const panel_cap = manager.workspace.panels.capacity;
+        const panel_ptr = manager.workspace.panels.items.ptr;
+        const panel_reasonable = panel_len <= panel_cap and
+            panel_cap > 0 and
+            panel_cap <= MAX_REASONABLE_PANEL_COUNT * 2 and
+            @intFromPtr(panel_ptr) != 0 and
+            std.mem.isAligned(@intFromPtr(panel_ptr), @alignOf(workspace.Panel));
+        if (panel_reasonable) {
+            if (panel_len <= MAX_REASONABLE_PANEL_COUNT) {
+                var idx: usize = 0;
+                while (idx < panel_len) : (idx += 1) {
+                    manager.workspace.panels.items[idx].deinit(self.allocator);
+                }
+            } else if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn(
+                    "releaseCorruptWorkspaceStorage: skipping panel deinit due suspicious panel count ({})",
+                    .{panel_len},
+                );
+            }
+            self.allocator.free(panel_ptr[0..panel_cap]);
+        } else if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+            std.log.warn(
+                "releaseCorruptWorkspaceStorage: skipped panel storage release (len={} cap={} ptr=0x{x})",
+                .{
+                    panel_len,
+                    panel_cap,
+                    @intFromPtr(panel_ptr),
+                },
+            );
+        }
+        manager.workspace.panels = std.ArrayList(workspace.Panel).empty;
+        const node_cap = manager.workspace.dock_layout.nodes.capacity;
+        const node_len = manager.workspace.dock_layout.nodes.items.len;
+        const node_ptr = manager.workspace.dock_layout.nodes.items.ptr;
+        const node_reasonable = node_len <= node_cap and
+            node_cap > 0 and
+            @intFromPtr(node_ptr) != 0 and
+            node_cap <= MAX_REASONABLE_DOCK_NODE_COUNT * 2 and
+            std.mem.isAligned(@intFromPtr(node_ptr), @alignOf(?dock_graph.Node));
+        if (node_reasonable) {
+            if (node_len <= MAX_REASONABLE_DOCK_NODE_COUNT) {
+                var node_idx: usize = 0;
+                while (node_idx < node_len) : (node_idx += 1) {
+                    if (manager.workspace.dock_layout.nodes.items[node_idx]) |*node| {
+                        node.deinit(self.allocator);
+                    }
+                }
+            }
+            self.allocator.free(node_ptr[0..node_cap]);
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn(
+                    "releaseCorruptWorkspaceStorage: released dock node storage (len={} cap={} ptr=0x{x})",
+                    .{
+                        node_len,
+                        node_cap,
+                        @intFromPtr(node_ptr),
+                    },
+                );
+            }
+        } else if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+            std.log.warn(
+                "releaseCorruptWorkspaceStorage: skipped dock node storage release (len={} cap={} ptr=0x{x})",
+                .{
+                    node_len,
+                    node_cap,
+                    @intFromPtr(node_ptr),
+                },
+            );
+        }
+        manager.workspace.dock_layout.nodes = std.ArrayList(?dock_graph.Node).empty;
+        manager.workspace.dock_layout.root = null;
+    }
+
+    fn isWorkspaceHeaderSane(_: *App, manager: *panel_manager.PanelManager) bool {
+        const ws = &manager.workspace;
+
+        if (ws.panels.items.len > MAX_REASONABLE_PANEL_COUNT) return false;
+        if (ws.panels.capacity > MAX_REASONABLE_PANEL_COUNT * 2) return false;
+        if (ws.panels.items.len > ws.panels.capacity) return false;
+        if (ws.panels.items.len > 0 and @intFromPtr(ws.panels.items.ptr) == 0) return false;
+        if (ws.panels.items.len > 0 and !std.mem.isAligned(@intFromPtr(ws.panels.items.ptr), @alignOf(workspace.Panel))) return false;
+        if (ws.panels.capacity == 0 and ws.panels.items.len > 0) return false;
+
+        if (ws.dock_layout.nodes.items.len > MAX_REASONABLE_DOCK_NODE_COUNT) return false;
+        if (ws.dock_layout.nodes.capacity > MAX_REASONABLE_DOCK_NODE_COUNT * 2) return false;
+        if (ws.dock_layout.nodes.items.len > ws.dock_layout.nodes.capacity) return false;
+        if (ws.dock_layout.nodes.items.len > 0 and @intFromPtr(ws.dock_layout.nodes.items.ptr) == 0) return false;
+        if (ws.dock_layout.nodes.items.len > 0 and !std.mem.isAligned(@intFromPtr(ws.dock_layout.nodes.items.ptr), @alignOf(?dock_graph.Node))) return false;
+
+        return true;
+    }
+
+    fn logWorkspaceState(self: *App, manager: *panel_manager.PanelManager, label: []const u8, frame_ctx: u64) void {
+        _ = self;
+        const dock_root = if (manager.workspace.dock_layout.root) |root|
+            @as(i64, @intCast(root))
+        else
+            -1;
+        std.log.err(
+            "workspace-state[{s}] frame={d}: panels(len={d} cap={d} ptr=0x{x}) nodes(len={d} cap={d} ptr=0x{x}) root={d}",
+            .{
+                label,
+                frame_ctx,
+                manager.workspace.panels.items.len,
+                manager.workspace.panels.capacity,
+                @intFromPtr(manager.workspace.panels.items.ptr),
+                manager.workspace.dock_layout.nodes.items.len,
+                manager.workspace.dock_layout.nodes.capacity,
+                @intFromPtr(manager.workspace.dock_layout.nodes.items.ptr),
+                dock_root,
+            },
+        );
+    }
+
+    fn buildSingleTabPanelLayout(
+        self: *App,
+        manager: *panel_manager.PanelManager,
+        dock_area: UiRect,
+        out: *dock_graph.LayoutResult,
+    ) bool {
+        const panel_count = manager.workspace.panels.items.len;
+        if (panel_count == 0 or panel_count > 4096) return false;
+
+        out.len = 0;
+        const graph = &manager.workspace.dock_layout;
+        graph.clear();
+
+        var panel_ids = std.ArrayList(workspace.PanelId).empty;
+        defer panel_ids.deinit(graph.allocator);
+        panel_ids.ensureTotalCapacity(graph.allocator, panel_count) catch return false;
+        for (manager.workspace.panels.items) |panel| {
+            panel_ids.append(graph.allocator, panel.id) catch return false;
+        }
+
+        const root = graph.addTabsNode(panel_ids.items, 0) catch return false;
+        graph.root = root;
+        manager.workspace.markDirty();
+        if (self.shouldLogDebug(120)) {
+            std.log.info("buildSingleTabPanelLayout: built root={} panels={}", .{ @as(i64, @intCast(root)), panel_count });
+        }
+
+        out.append(.{ .node_id = root, .rect = dock_area });
+        return true;
+    }
+
+fn collectDockTabGeometry(
+        self: *App,
+        manager: *panel_manager.PanelManager,
+        dock_area: UiRect,
+        out: *DockTabHitList,
+    ) void {
+        var layout: dock_graph.LayoutResult = .{};
+        if (!self.collectDockLayoutSafe(manager, dock_area, &layout)) {
+            if (self.shouldLogDebug(120)) {
+                std.log.warn("collectDockTabGeometry: no valid dock layout", .{});
+            }
+            return;
+        }
+        const pad = self.theme.spacing.sm;
+        const tab_height: f32 = 28.0 * self.ui_scale;
+        if (tab_height <= 0.0) return;
+
+        for (layout.slice()) |group| {
+            if (!self.isLayoutGroupUsable(manager, group.node_id)) continue;
+            const node = manager.workspace.dock_layout.getNode(group.node_id) orelse continue;
+            const tabs_node = switch (node.*) {
+                .tabs => |tabs| tabs,
+                .split => {
+                    continue;
+                },
+            };
+            if (!self.isTabsNodeUsable(manager, &tabs_node)) continue;
+
+            if (tabs_node.tabs.items.len == 0) continue;
+
+            var tab_x = group.rect.min[0] + pad;
+            for (tabs_node.tabs.items, 0..) |panel_id, idx| {
+                const panel = self.findPanelById(manager, panel_id) orelse continue;
+                const tab_width = self.measureText(panel.title) + pad * 2.0;
+                const tab_rect = UiRect.fromMinSize(
+                    .{ tab_x, group.rect.min[1] },
+                    .{ tab_width, tab_height },
+                );
+                if (tab_rect.min[0] + tab_width > group.rect.max[0]) break;
+                out.append(.{
+                    .panel_id = panel_id,
+                    .node_id = group.node_id,
+                    .tab_index = idx,
+                    .rect = tab_rect,
+                });
+                tab_x = tab_rect.max[0] + pad;
+            }
+        }
+    }
+
+    fn shouldLogDebug(self: *App, every_frames: u64) bool {
+        if (every_frames == 0) return false;
+        return self.debug_frame_counter > 0 and (self.debug_frame_counter % every_frames) == 0;
+    }
+
+    fn shouldLogStartup(self: *App) bool {
+        return self.debug_frame_counter <= 5;
+    }
+
+    fn safeWorkspaceCount(_: *App, value: usize, max: usize) usize {
+        if (value > max) return max;
+        return value;
+    }
+
+    fn detachPanelToNewWindow(self: *App, source_window: *UiWindow, panel_id: workspace.PanelId) void {
+        const moved = source_window.manager.takePanel(panel_id) orelse return;
+        if (source_window.manager.workspace.syncDockLayout() catch false) {
+            source_window.manager.workspace.markDirty();
+        }
+        if (!self.createDetachedWindowFromPanel(source_window, moved)) {
+            self.appendPanelToManager(source_window.manager, moved) catch {
+                var tmp = moved;
+                tmp.deinit(self.allocator);
+            };
+            source_window.manager.workspace.markDirty();
+            if (source_window.manager.workspace.syncDockLayout() catch false) {
+                source_window.manager.workspace.markDirty();
+            }
+        }
+    }
+
+    fn createDetachedWindowFromPanel(self: *App, source_window: *UiWindow, panel: workspace.Panel) bool {
+        var ws = workspace.Workspace.initEmpty(self.allocator);
+        var ws_owned = true;
+        defer if (ws_owned) ws.deinit(self.allocator);
+
+        ws.panels.append(self.allocator, panel) catch return false;
+        ws.focused_panel_id = panel.id;
+        _ = ws.syncDockLayout() catch false;
+
+        const new_manager = self.allocator.create(panel_manager.PanelManager) catch return false;
+        var owns_manager = true;
+        defer if (owns_manager) {
+            new_manager.deinit();
+            self.allocator.destroy(new_manager);
+        };
+
+        new_manager.* = panel_manager.PanelManager.init(
+            self.allocator,
+            ws,
+            &self.next_panel_id,
+        );
+        self.bindNextPanelId(new_manager);
+        ws_owned = false;
+        if (self.createDetachedWindowFromManager(source_window, new_manager, panel.title, true)) |_| {
+            owns_manager = false;
+            return true;
+        } else |_| {
+            return false;
+        }
+    }
+
+    fn createDetachedWindowFromManager(
+        self: *App,
+        source_window: *UiWindow,
+        manager: *panel_manager.PanelManager,
+        title: []const u8,
+        persist_in_workspace: bool,
+    ) !*UiWindow {
+        const width: c_int = 960;
+        const height: c_int = 720;
+        const title_with_null = try self.allocator.alloc(u8, title.len + 1);
+        defer self.allocator.free(title_with_null);
+        @memcpy(title_with_null[0..title.len], title);
+        title_with_null[title.len] = 0;
+        const title_z: [:0]const u8 = title_with_null[0..title.len :0];
+
+        const win = zapp.sdl_app.createWindow(title_z, width, height, c.SDL_WINDOW_RESIZABLE) catch {
+            return error.SdlWindowCreateFailed;
+        };
+        errdefer c.SDL_DestroyWindow(win);
+
+        var pos_x: c_int = 0;
+        var pos_y: c_int = 0;
+        _ = c.SDL_GetWindowPosition(source_window.window, &pos_x, &pos_y);
+        const offset: c_int = @intCast(@min(self.ui_windows.items.len * 24, 220));
+        _ = c.SDL_SetWindowPosition(win, pos_x + offset, pos_y + offset);
+
+        const out = try self.createUiWindowFromExisting(
+            win,
+            title,
+            manager,
+            false,
+            persist_in_workspace,
+            true,
+            true,
+        );
+        errdefer self.destroyUiWindow(out);
+        try self.ui_windows.append(self.allocator, out);
+        return out;
     }
 
     fn pollWebSocket(self: *App) !void {
@@ -335,15 +1904,20 @@ const App = struct {
         }
     }
 
-    fn handleKeyDownEvent(self: *App, key_evt: anytype) !void {
+    fn handleKeyDownEvent(self: *App, key_evt: anytype, request_spawn_window: *bool, manager: *panel_manager.PanelManager) !void {
         switch (key_evt.key) {
             .escape => {
                 self.running = false;
             },
+            .y => {
+                if (key_evt.mods.ctrl and !key_evt.repeat) {
+                    request_spawn_window.* = true;
+                }
+            },
             .enter, .keypad_enter => {
                 // Check if we're focused on settings URL input
                 if (self.settings_panel.focused_field != .none) {
-                    try self.tryConnect();
+                    try self.tryConnect(manager);
                 }
             },
             .v => {
@@ -443,28 +2017,51 @@ const App = struct {
         try self.config.setThemePack(if (self.settings_panel.ui_theme_pack.items.len > 0) self.settings_panel.ui_theme_pack.items else null);
         self.config.setWatchThemePack(self.settings_panel.watch_theme_pack);
         try self.config.save();
+
+        self.applyThemeFromSettings();
     }
 
-    fn drawFrame(self: *App) void {
+    fn applyThemeFromSettings(self: *App) void {
+        const label = if (self.settings_panel.ui_theme.items.len > 0)
+            self.settings_panel.ui_theme.items
+        else
+            null;
+        const mode: zui.theme.Mode = if (label) |value|
+            if (std.ascii.eqlIgnoreCase(value, "dark"))
+                .dark
+            else
+                .light
+        else
+            .light;
+        zui.theme.setMode(mode);
         self.theme = zui.theme.current();
+    }
+
+    fn drawFrame(self: *App, ui_window: *UiWindow) void {
+        self.theme = zui.theme.current();
+        self.render_input_queue = &ui_window.queue;
+        defer self.render_input_queue = null;
+
+        ui_input_router.setExternalQueue(&ui_window.queue);
+        defer ui_input_router.setExternalQueue(null);
 
         var fb_w: c_int = 0;
         var fb_h: c_int = 0;
-        _ = c.SDL_GetWindowSizeInPixels(self.window, &fb_w, &fb_h);
+        _ = c.SDL_GetWindowSizeInPixels(ui_window.window, &fb_w, &fb_h);
         const fb_width: u32 = @intCast(if (fb_w > 0) fb_w else 1);
         const fb_height: u32 = @intCast(if (fb_h > 0) fb_h else 1);
 
-        self.swapchain.beginFrame(&self.gpu, fb_width, fb_height);
+        ui_window.swapchain.beginFrame(&self.gpu, fb_width, fb_height);
 
         // Draw the dock-based UI
-        self.drawDockUi(fb_width, fb_height);
+        self.drawDockUi(ui_window, fb_width, fb_height);
 
         // Render the UI commands through WebGPU
         self.gpu.ui_renderer.beginFrame(fb_width, fb_height);
-        self.swapchain.render(&self.gpu, &self.ui_commands);
+        ui_window.swapchain.render(&self.gpu, &self.ui_commands);
     }
 
-    fn drawDockUi(self: *App, fb_width: u32, fb_height: u32) void {
+    fn drawDockUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
         self.ui_commands.clear();
         ui_draw_context.setGlobalCommandList(&self.ui_commands);
         defer ui_draw_context.clearGlobalCommandList();
@@ -480,32 +2077,259 @@ const App = struct {
             .{ .fill = self.theme.colors.background },
         );
 
-        // Compute dock layout
-        const layout = self.manager.workspace.dock_layout.computeLayout(viewport);
-
+        var layout: dock_graph.LayoutResult = .{};
+        if (!self.collectDockLayoutSafe(ui_window.manager, viewport, &layout)) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("drawDockUi: unable to recover dock layout; no panels available", .{});
+            }
+            self.drawText(
+                viewport.min[0] + 12.0,
+                viewport.min[1] + 12.0,
+                "Unable to recover dock layout; no panels available.",
+                self.theme.colors.text_secondary,
+            );
+            self.drawStatusOverlay(fb_width, fb_height);
+            return;
+        }
         // Draw each dock group
         for (layout.slice()) |group| {
-            self.drawDockGroup(group.node_id, group.rect);
+            if (!self.isLayoutGroupUsable(ui_window.manager, group.node_id)) continue;
+            self.drawDockGroup(ui_window.manager, group.node_id, group.rect);
         }
 
         // Draw connection status overlay
         self.drawStatusOverlay(fb_width, fb_height);
     }
 
-    fn drawDockGroup(self: *App, node_id: dock_graph.NodeId, rect: UiRect) void {
-        const node = self.manager.workspace.dock_layout.getNode(node_id) orelse return;
+    fn drawUnavailableWorkspaceFrame(self: *App, ui_window: *UiWindow, message: []const u8) void {
+        var fb_w: c_int = 0;
+        var fb_h: c_int = 0;
+        _ = c.SDL_GetWindowSizeInPixels(ui_window.window, &fb_w, &fb_h);
+        const fb_width: u32 = @intCast(if (fb_w > 0) fb_w else 1);
+        const fb_height: u32 = @intCast(if (fb_h > 0) fb_h else 1);
+        self.render_input_queue = &ui_window.queue;
+        defer self.render_input_queue = null;
 
+        self.ui_commands.clear();
+        ui_draw_context.setGlobalCommandList(&self.ui_commands);
+        defer ui_draw_context.clearGlobalCommandList();
+
+        self.ui_commands.pushRect(
+            .{ .min = .{ 0, 0 }, .max = .{ @floatFromInt(fb_width), @floatFromInt(fb_height) } },
+            .{ .fill = self.theme.colors.background },
+        );
+
+        const viewport = UiRect.fromMinSize(
+            .{ 0, 0 },
+            .{ @floatFromInt(fb_width), @floatFromInt(fb_height) },
+        );
+
+        self.drawText(
+            viewport.min[0] + 12.0,
+            viewport.min[1] + 12.0,
+            message,
+            self.theme.colors.text_primary,
+        );
+
+        self.drawText(
+            viewport.min[0] + 12.0,
+            viewport.min[1] + 36.0,
+            "Please wait; layout is being restored.",
+            self.theme.colors.text_secondary,
+        );
+
+        self.drawStatusOverlay(fb_width, fb_height);
+
+        ui_window.swapchain.beginFrame(&self.gpu, fb_width, fb_height);
+        self.gpu.ui_renderer.beginFrame(fb_width, fb_height);
+        ui_window.swapchain.render(&self.gpu, &self.ui_commands);
+    }
+
+    fn drawDockGroup(self: *App, manager: *panel_manager.PanelManager, node_id: dock_graph.NodeId, rect: UiRect) void {
+        if (!self.isLayoutGroupUsable(manager, node_id)) return;
+        const node = manager.workspace.dock_layout.getNode(node_id) orelse return;
+        const tabs_node = switch (node.*) {
+            .tabs => |tabs| tabs,
+            .split => return,
+        };
+        if (!self.isTabsNodeUsable(manager, &tabs_node)) return;
+        if (tabs_node.tabs.items.len == 0) return;
+        if (tabs_node.tabs.items.len > manager.workspace.panels.items.len) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("drawDockGroup: tabs node references unknown panel count; skipping render", .{});
+            }
+            return;
+        }
+        self.drawTabsPanel(manager, &tabs_node, rect);
+    }
+
+    fn collectDockLayout(
+        self: *App,
+        manager: *panel_manager.PanelManager,
+        root_rect: UiRect,
+        out: *dock_graph.LayoutResult,
+    ) bool {
+        out.len = 0;
+
+        const graph = &manager.workspace.dock_layout;
+        if (manager.workspace.panels.items.len > 4096) return false;
+        if (graph.nodes.items.len > 16384) return false;
+        if (!self.isDockLayoutGraphHeaderSane(graph)) return false;
+        const root = graph.root orelse return false;
+
+        if (root >= graph.nodes.items.len) {
+            if (self.shouldLogDebug(240)) {
+                std.log.debug("collectDockLayout: root {} out of range nodes_len={}", .{ root, graph.nodes.items.len });
+            }
+            return false;
+        }
+        if (graph.nodes.items.len == 0) {
+            if (self.shouldLogDebug(240)) {
+                std.log.debug("collectDockLayout: empty node list", .{});
+            }
+            return false;
+        }
+        if (self.isDockLayoutCorrupt(manager)) return false;
+        const computed = graph.computeLayout(root_rect);
+        for (computed.slice()) |group| {
+            if (self.isLayoutGroupUsable(manager, group.node_id)) {
+                out.append(group);
+            }
+        }
+        return out.len > 0;
+    }
+
+    fn isLayoutGroupUsable(self: *App, manager: *panel_manager.PanelManager, node_id: dock_graph.NodeId) bool {
+        if (node_id >= manager.workspace.dock_layout.nodes.items.len) return false;
+        if (!self.isDockLayoutGraphHeaderSane(&manager.workspace.dock_layout)) return false;
+        const node = manager.workspace.dock_layout.getNode(node_id) orelse return false;
+        const tabs_node = switch (node.*) {
+            .tabs => |tabs| tabs,
+            .split => return false,
+        };
+        if (tabs_node.tabs.items.len == 0) return false;
+        if (tabs_node.tabs.items.len > manager.workspace.panels.items.len) return false;
+        return true;
+    }
+
+fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { first: UiRect, second: UiRect } {
+    const size = rect.size();
+    const clamped_ratio = std.math.clamp(ratio, 0.1, 0.9);
+    const gap: f32 = 6.0;
+    if (axis == .vertical) {
+        const avail = @max(0.0, size[0] - gap);
+        const first_w = avail * clamped_ratio;
+        const second_w = avail - first_w;
+        const first_rect = UiRect.fromMinSize(rect.min, .{ first_w, size[1] });
+        const second_min = .{ rect.min[0] + first_w + gap, rect.min[1] };
+        const second_rect = UiRect.fromMinSize(second_min, .{ second_w, size[1] });
+        return .{ .first = first_rect, .second = second_rect };
+    }
+
+    const avail = @max(0.0, size[1] - gap);
+    const first_h = avail * clamped_ratio;
+    const second_h = avail - first_h;
+    const first_rect = UiRect.fromMinSize(rect.min, .{ size[0], first_h });
+    const second_min = .{ rect.min[0], rect.min[1] + first_h + gap };
+    const second_rect = UiRect.fromMinSize(second_min, .{ size[0], second_h });
+    return .{ .first = first_rect, .second = second_rect };
+}
+
+    fn repairDockLayout(self: *App, manager: *panel_manager.PanelManager) bool {
+        _ = self;
+        if (manager.workspace.panels.items.len == 0) return false;
+        var graph = &manager.workspace.dock_layout;
+        const panel_count = manager.workspace.panels.items.len;
+        if (panel_count > 4096) {
+            graph.nodes.clearRetainingCapacity();
+            graph.root = null;
+            return false;
+        }
+
+        graph.nodes.clearRetainingCapacity();
+        graph.root = null;
+        return manager.workspace.syncDockLayout() catch false;
+    }
+
+    fn isDockLayoutCorrupt(self: *App, manager: *panel_manager.PanelManager) bool {
+        const graph = &manager.workspace.dock_layout;
+        if (!self.isDockLayoutGraphHeaderSane(graph)) return true;
+        if (graph.root == null) {
+            return graph.nodes.items.len > 0;
+        }
+        const root = graph.root.?;
+        if (root >= graph.nodes.items.len) return true;
+        if (graph.getNode(root) == null) return true;
+
+        if (graph.nodes.items.len == 0) return true;
+        const visited = self.allocator.alloc(bool, graph.nodes.items.len) catch return true;
+        defer self.allocator.free(visited);
+        const in_stack = self.allocator.alloc(bool, graph.nodes.items.len) catch return true;
+        defer self.allocator.free(in_stack);
+        @memset(visited, false);
+        @memset(in_stack, false);
+
+        return !self.validateDockNode(
+            manager,
+            root,
+            graph,
+            visited,
+            in_stack,
+        );
+    }
+
+    fn validateDockNode(
+        self: *App,
+        manager: *panel_manager.PanelManager,
+        node_id: dock_graph.NodeId,
+        graph: *const dock_graph.Graph,
+        visited: []bool,
+        in_stack: []bool,
+    ) bool {
+        if (node_id >= graph.nodes.items.len) return false;
+        if (node_id >= visited.len) return false;
+        const idx: usize = @intCast(node_id);
+        if (visited[idx]) return true;
+        if (in_stack[idx]) return false;
+        visited[idx] = true;
+        in_stack[idx] = true;
+        defer in_stack[idx] = false;
+
+        const node = graph.getNode(node_id) orelse return false;
         switch (node.*) {
             .tabs => |tabs| {
-                self.drawTabsPanel(&tabs, rect);
+                if (tabs.tabs.items.len == 0) return false;
+                if (tabs.active >= tabs.tabs.items.len) {
+                    if (self.shouldLogDebug(480)) {
+                        std.log.debug("validateDockNode: stale active tab index {d} for {} tabs", .{
+                            tabs.active,
+                            tabs.tabs.items.len,
+                        });
+                    }
+                }
+                if (tabs.tabs.items.len > 4096) return false;
+                for (tabs.tabs.items) |panel_id| {
+                    if (self.findPanelById(manager, panel_id) == null) {
+                        if (self.shouldLogDebug(480)) {
+                            std.log.debug("validateDockNode: panel id {} not in workspace", .{panel_id});
+                        }
+                        return false;
+                    }
+                }
+                return true;
             },
-            .split => |_| {
-                // Split nodes are handled by layout computation, children drawn separately
+            .split => |split| {
+                if (!std.math.isFinite(split.ratio) or split.ratio < 0.0 or split.ratio > 1.0) return false;
+                if (split.first >= graph.nodes.items.len or split.second >= graph.nodes.items.len) return false;
+                if (split.first == split.second) return false;
+                return self.validateDockNode(manager, split.first, graph, visited, in_stack) and
+                    self.validateDockNode(manager, split.second, graph, visited, in_stack);
             },
         }
     }
 
-    fn drawTabsPanel(self: *App, tabs: *const dock_graph.TabsNode, rect: UiRect) void {
+    fn drawTabsPanel(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode, rect: UiRect) void {
+        if (!self.isTabsNodeUsable(manager, tabs)) return;
         const pad = self.theme.spacing.sm;
         const tab_height: f32 = 28.0 * self.ui_scale;
 
@@ -526,14 +2350,22 @@ const App = struct {
         );
 
         var tab_x = rect.min[0] + pad;
-        const active_tab_id = if (tabs.active < tabs.tabs.items.len)
+        var active_tab_id = if (tabs.active < tabs.tabs.items.len)
             tabs.tabs.items[tabs.active]
         else
             null;
+        if (active_tab_id == null) {
+            for (tabs.tabs.items) |candidate_panel_id| {
+                if (self.findPanelById(manager, candidate_panel_id) != null) {
+                    active_tab_id = candidate_panel_id;
+                    break;
+                }
+            }
+        }
 
-        // Draw each tab
-        for (tabs.tabs.items) |panel_id| {
-            const panel = self.findPanelById(panel_id) orelse continue;
+            // Draw each tab
+            for (tabs.tabs.items) |panel_id| {
+                const panel = self.findPanelById(manager, panel_id) orelse continue;
             const is_active = panel_id == active_tab_id;
 
             const tab_width = self.measureText(panel.title) + pad * 2.0;
@@ -576,26 +2408,50 @@ const App = struct {
         );
 
         if (active_tab_id) |panel_id| {
-            self.drawPanelContent(panel_id, content_rect);
+            self.drawPanelContent(manager, panel_id, content_rect);
         }
     }
 
-    fn findPanelById(self: *App, panel_id: workspace.PanelId) ?*workspace.Panel {
-        for (self.manager.workspace.panels.items) |*panel| {
+    fn isTabsNodeUsable(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode) bool {
+        if (tabs.tabs.items.len == 0) return false;
+        if (tabs.tabs.items.len > MAX_REASONABLE_PANEL_COUNT) return false;
+        if (tabs.active >= tabs.tabs.items.len) {
+            if (self.shouldLogDebug(480) or self.shouldLogStartup()) {
+                std.log.debug("isTabsNodeUsable: stale active index {d} for {} tabs", .{
+                    tabs.active,
+                    tabs.tabs.items.len,
+                });
+            }
+        }
+        if (tabs.tabs.items.len > manager.workspace.panels.items.len) return false;
+
+        for (tabs.tabs.items) |panel_id| {
+            if (self.findPanelById(manager, panel_id) == null) {
+                if (self.shouldLogDebug(480) or self.shouldLogStartup()) {
+                    std.log.debug("isTabsNodeUsable: unknown panel id {d}", .{panel_id});
+                }
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn findPanelById(_: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId) ?*workspace.Panel {
+        for (manager.workspace.panels.items) |*panel| {
             if (panel.id == panel_id) return panel;
         }
         return null;
     }
 
-    fn drawPanelContent(self: *App, panel_id: workspace.PanelId, rect: UiRect) void {
-        const panel = self.findPanelById(panel_id) orelse return;
+    fn drawPanelContent(self: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId, rect: UiRect) void {
+        const panel = self.findPanelById(manager, panel_id) orelse return;
 
         switch (panel.kind) {
             .Chat => {
                 self.drawChatPanel(rect);
             },
             .Settings, .Control => {
-                self.drawSettingsPanel(rect);
+                self.drawSettingsPanel(manager, rect);
             },
             else => {
                 // Draw placeholder for other panel types
@@ -609,7 +2465,7 @@ const App = struct {
         }
     }
 
-    fn drawSettingsPanel(self: *App, rect: UiRect) void {
+    fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         const pad = self.theme.spacing.md;
         var y = rect.min[1] + pad;
         const rect_width = rect.max[0] - rect.min[0];
@@ -809,7 +2665,7 @@ const App = struct {
             .{ .variant = .primary, .disabled = self.connection_state == .connecting },
         );
         if (connect_clicked) {
-            self.tryConnect() catch {};
+            self.tryConnect(manager) catch {};
         }
 
         // Save Config button
@@ -856,6 +2712,16 @@ const App = struct {
     }
 
     fn drawChatPanel(self: *App, rect: UiRect) void {
+        if (self.render_input_queue == null) {
+            self.drawText(
+                rect.min[0] + 8.0,
+                rect.min[1] + 8.0,
+                "Chat panel unavailable: input system not ready",
+                self.theme.colors.text_secondary,
+            );
+            return;
+        }
+
         const pad = self.theme.spacing.sm;
         const panel_rect = UiRect.fromMinSize(
             .{ rect.min[0] + pad, rect.min[1] + pad },
@@ -864,6 +2730,8 @@ const App = struct {
                 @max(120.0, rect.max[1] - rect.min[1] - pad * 2.0),
             },
         );
+
+        ui_input_router.setExternalQueue(self.render_input_queue);
 
         const action = ChatPanel.draw(
             self.allocator,
@@ -1048,7 +2916,7 @@ const App = struct {
         return state.focused;
     }
 
-    fn tryConnect(self: *App) !void {
+    fn tryConnect(self: *App, manager: *panel_manager.PanelManager) !void {
         if (self.settings_panel.server_url.items.len == 0) {
             self.setConnectionState(.error_state, "Server URL cannot be empty");
             return;
@@ -1099,18 +2967,18 @@ const App = struct {
         try self.appendMessage("system", "Connected to Spiderweb", null);
 
         // Switch to chat panel by focusing it
-        for (self.manager.workspace.panels.items) |*panel| {
+        for (manager.workspace.panels.items) |*panel| {
             if (panel.kind == .Chat) {
-                self.manager.focusPanel(panel.id);
+                manager.focusPanel(panel.id);
                 break;
             }
         }
     }
 
-    fn focusSettingsPanel(self: *App) void {
-        for (self.manager.workspace.panels.items) |*panel| {
+    fn focusSettingsPanel(_: *App, manager: *panel_manager.PanelManager) void {
+        for (manager.workspace.panels.items) |*panel| {
             if (panel.kind == .Settings or panel.kind == .Control) {
-                self.manager.focusPanel(panel.id);
+                manager.focusPanel(panel.id);
                 break;
             }
         }
@@ -1125,12 +2993,7 @@ const App = struct {
             client.deinit();
             self.ws_client = null;
         }
-        self.current_session_key = null;
         self.clearPendingSend();
-        if (self.current_session_key) |key| {
-            self.allocator.free(key);
-            self.current_session_key = null;
-        }
         self.clearSessions();
     }
 
@@ -1673,6 +3536,9 @@ const App = struct {
         const name_copy = try self.allocator.dupe(u8, display_name);
         errdefer self.allocator.free(name_copy);
 
+        if (self.shouldLogDebug(1)) {
+            std.log.debug("addSession: key={s} current={}", .{ key, self.chat_sessions.items.len });
+        }
         try self.chat_sessions.append(self.allocator, .{
             .key = key_copy,
             .display_name = name_copy,
@@ -1687,8 +3553,14 @@ const App = struct {
     fn ensureSessionInList(self: *App, key: []const u8, display_name: []const u8) !void {
         for (self.chat_sessions.items) |session| {
             if (std.mem.eql(u8, session.key, key)) {
+                if (self.shouldLogDebug(120)) {
+                    std.log.debug("ensureSessionInList: key exists {s}", .{key});
+                }
                 return;
             }
+        }
+        if (self.shouldLogDebug(120)) {
+            std.log.debug("ensureSessionInList: adding new key {s}", .{key});
         }
         try self.addSession(key, display_name);
     }
@@ -1902,14 +3774,14 @@ pub export fn zsc_free_image(pixels: ?*anyopaque) void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
     defer _ = gpa.deinit();
 
     var app = try App.init(gpa.allocator());
     defer app.deinit();
 
     if (app.config.auto_connect_on_launch) {
-        app.tryConnect() catch {};
+        app.tryConnect(&app.manager) catch {};
     }
 
     try app.run();
