@@ -183,6 +183,32 @@ pub fn build(b: *std.Build) void {
     tui_module.addImport("tui", tui_dep.module("tui"));
     tui_module.addImport("websocket", websocket.module("websocket"));
     tui_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    
+    // Add CLI and client modules for TUI
+    const cli_args_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/args.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_args_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    tui_module.addImport("cli_args", cli_args_module);
+    
+    const client_config_module = b.createModule(.{
+        .root_source_file = b.path("src/client/config.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    client_config_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    tui_module.addImport("client_config", client_config_module);
+    
+    const websocket_client_module = b.createModule(.{
+        .root_source_file = b.path("src/client/websocket.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    websocket_client_module.addImport("websocket", websocket.module("websocket"));
+    websocket_client_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    tui_module.addImport("websocket_client", websocket_client_module);
 
     const tui_exe = b.addExecutable(.{
         .name = "zss-tui",

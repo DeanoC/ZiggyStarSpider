@@ -1,9 +1,9 @@
 const std = @import("std");
 const tui = @import("tui");
 
-const cli_args = @import("../cli/args.zig");
-const WebSocketClient = @import("../client/websocket.zig").WebSocketClient;
-const Config = @import("../client/config.zig").Config;
+const cli_args = @import("cli_args");
+const WebSocketClient = @import("websocket_client").WebSocketClient;
+const Config = @import("client_config").Config;
 
 const ConnectScreen = @import("screens/connect.zig").ConnectScreen;
 const ChatScreen = @import("screens/chat.zig").ChatScreen;
@@ -12,7 +12,7 @@ pub const ConnectionState = enum {
     disconnected,
     connecting,
     connected,
-    error,
+    err,
 };
 
 pub const Screen = enum {
@@ -93,7 +93,7 @@ pub const AppState = struct {
 
         // Attempt connection
         self.ws_client.?.connect() catch |err| {
-            self.connection_state = .error;
+            self.connection_state = .err;
             if (self.connection_error) |old_err| {
                 self.allocator.free(old_err);
             }

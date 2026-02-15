@@ -35,8 +35,8 @@ pub const ConnectScreen = struct {
         // Title
         const title = "ZiggyStarSpider TUI";
         const title_style = tui.Style{
-            .bold = true,
             .fg = tui.Color.cyan,
+            .attrs = .{ .bold = true },
         };
         
         const title_x = @divTrunc(width - @as(u16, @intCast(title.len)), 2);
@@ -103,14 +103,14 @@ pub const ConnectScreen = struct {
             .disconnected => "Enter server URL to connect",
             .connecting => "Connecting...",
             .connected => "Connected to Spiderweb",
-            .error => if (self.state.connection_error) |err| err else "Connection error",
+            .err => if (self.state.connection_error) |err| err else "Connection error",
         };
 
         const status_style = switch (self.state.connection_state) {
             .disconnected => tui.Style{ .fg = tui.Color.white },
             .connecting => tui.Style{ .fg = tui.Color.yellow },
             .connected => tui.Style{ .fg = tui.Color.green },
-            .error => tui.Style{ .fg = tui.Color.red },
+            .err => tui.Style{ .fg = tui.Color.red },
         };
         
         const status_x = @divTrunc(width - @as(u16, @intCast(status_text.len)), 2);

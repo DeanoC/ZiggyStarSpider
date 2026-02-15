@@ -32,8 +32,8 @@ pub const ChatScreen = struct {
         // Header
         const header = "ZiggyStarSpider - Chat";
         const header_style = tui.Style{
-            .bold = true,
             .fg = tui.Color.cyan,
+            .attrs = .{ .bold = true },
         };
         
         ctx.screen.moveCursor(2, 0);
@@ -132,9 +132,9 @@ pub const ChatScreen = struct {
             
             // Render sender
             const sender_style = if (msg.is_user) 
-                tui.Style{ .fg = tui.Color.green, .bold = true }
+                tui.Style{ .fg = tui.Color.green, .attrs = .{ .bold = true } }
             else 
-                tui.Style{ .fg = tui.Color.cyan, .bold = true };
+                tui.Style{ .fg = tui.Color.cyan, .attrs = .{ .bold = true } };
             
             ctx.screen.moveCursor(2, row);
             ctx.screen.setStyle(sender_style);
