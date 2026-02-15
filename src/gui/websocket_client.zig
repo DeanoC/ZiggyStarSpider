@@ -201,10 +201,32 @@ pub const WebSocketClient = struct {
         }
         return error.WouldBlock;
     }
+
+    /// Manually read a message from the websocket (for Windows workaround)
+    /// This bypasses the background read thread and reads directly
+    pub fn readDirect(self: *WebSocketClient, timeout_ms: u32) !?[]u8 {
+        if (!self.connected) return error.NotConnected;
+        if (self.client) |*client| {
+            // Try to read directly from the client
+            const msg = client.readTimeout(timeout_ms) catch |err| {
+                if (err == error.WouldBlock) return null;
+                return err;
+            };
+            if (msg) |data| {
+                const copy = try self.allocator.dupe(u8, data);
+                return copy;
+            }
+            return null;
+        }
+        return error.NotConnected;
+    }
 };
 
 fn setClientSocketNonBlocking(client: *ws.Client) !void {
     if (comptime builtin.os.tag == .windows) {
+        // On Windows, we need to use a different approach
+        // The library's readLoop may not work properly, so we'll use blocking reads
+        // in a manual polling loop instead
         return;
     }
 
