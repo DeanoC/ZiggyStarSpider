@@ -13,6 +13,7 @@ const ui_input_router = zui.ui.input.input_router;
 const ui_input_state = zui.ui.input.input_state;
 const ui_input_backend = zui.ui.input.input_backend;
 const ui_sdl_input_backend = zui.ui.input.sdl_input_backend;
+const protocol_messages = @import("protocol_messages.zig");
 
 const workspace = zui.ui.workspace;
 const panel_manager = zui.ui.panel_manager;
@@ -31,23 +32,50 @@ const ConnectionState = enum {
 
 const ChatAttachment = zui.protocol.types.ChatAttachment;
 const ChatMessage = zui.protocol.types.ChatMessage;
+const ChatMessageState = zui.protocol.types.LocalChatMessageState;
 const ChatSession = zui.protocol.types.Session;
 
 const ChatPanel = zui.ChatPanel(ChatMessage, ChatSession);
 
+const SettingsFocusField = enum {
+    none,
+    server_url,
+    default_session,
+    ui_theme,
+    ui_profile,
+    ui_theme_pack,
+};
+
 const SettingsPanel = struct {
     server_url: std.ArrayList(u8) = .empty,
-    focused: bool = true,
+    default_session: std.ArrayList(u8) = .empty,
+    ui_theme: std.ArrayList(u8) = .empty,
+    ui_profile: std.ArrayList(u8) = .empty,
+    ui_theme_pack: std.ArrayList(u8) = .empty,
+    watch_theme_pack: bool = false,
+    auto_connect_on_launch: bool = true,
+    focused_field: SettingsFocusField = .server_url,
 
     pub fn init(allocator: std.mem.Allocator) SettingsPanel {
         var panel = SettingsPanel{};
         panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790") catch {};
+        panel.default_session.appendSlice(allocator, "main") catch {};
         return panel;
     }
 
     pub fn deinit(self: *SettingsPanel, allocator: std.mem.Allocator) void {
         self.server_url.deinit(allocator);
+        self.default_session.deinit(allocator);
+        self.ui_theme.deinit(allocator);
+        self.ui_profile.deinit(allocator);
+        self.ui_theme_pack.deinit(allocator);
     }
+};
+
+const SessionMessageState = struct {
+    key: []const u8,
+    messages: std.ArrayList(ChatMessage) = .empty,
+    streaming_request_id: ?[]const u8 = null,
 };
 
 const App = struct {
@@ -66,10 +94,13 @@ const App = struct {
 
     // Chat state
     chat_input: std.ArrayList(u8) = .empty,
-    messages: std.ArrayList(ChatMessage) = .empty,
     chat_sessions: std.ArrayList(ChatSession) = .empty,
+    session_messages: std.ArrayList(SessionMessageState) = .empty,
     current_session_key: ?[]const u8 = null,
-
+    pending_send_request_id: ?[]const u8 = null,
+    pending_send_message_id: ?[]const u8 = null,
+    pending_send_session_key: ?[]const u8 = null,
+    awaiting_reply: bool = false,
     ui_commands: zui.ui.render.command_list.CommandList,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
@@ -140,10 +171,30 @@ const App = struct {
         };
         errdefer config.deinit();
 
-        // Initialize settings panel with config URL
+        // Initialize settings panel with config values
         var settings_panel = SettingsPanel.init(allocator);
         settings_panel.server_url.clearRetainingCapacity();
         settings_panel.server_url.appendSlice(allocator, config.server_url) catch {};
+        settings_panel.default_session.clearRetainingCapacity();
+        if (config.default_session) |value| {
+            settings_panel.default_session.appendSlice(allocator, value) catch {};
+        } else {
+            settings_panel.default_session.appendSlice(allocator, "main") catch {};
+        }
+        if (config.ui_theme) |value| {
+            settings_panel.ui_theme.clearRetainingCapacity();
+            settings_panel.ui_theme.appendSlice(allocator, value) catch {};
+        }
+        if (config.ui_profile) |value| {
+            settings_panel.ui_profile.clearRetainingCapacity();
+            settings_panel.ui_profile.appendSlice(allocator, value) catch {};
+        }
+        if (config.ui_theme_pack) |value| {
+            settings_panel.ui_theme_pack.clearRetainingCapacity();
+            settings_panel.ui_theme_pack.appendSlice(allocator, value) catch {};
+        }
+        settings_panel.watch_theme_pack = config.ui_watch_theme_pack;
+        settings_panel.auto_connect_on_launch = config.auto_connect_on_launch;
 
         var app = App{
             .allocator = allocator,
@@ -163,6 +214,13 @@ const App = struct {
         app.manager = panel_manager.PanelManager.init(allocator, ws, &app.next_panel_id);
         errdefer app.manager.deinit();
 
+        if (app.config.default_session) |default_session| {
+            const seed = if (default_session.len > 0) default_session else "main";
+            app.ensureSessionExists(seed, seed) catch {};
+        } else {
+            app.ensureSessionExists("main", "Main") catch {};
+        }
+
         errdefer app.settings_panel.deinit(allocator);
         errdefer allocator.free(app.status_text);
 
@@ -174,11 +232,10 @@ const App = struct {
 
     pub fn deinit(self: *App) void {
         self.disconnect();
-
-        self.clearMessages();
-        self.messages.deinit(self.allocator);
         self.clearSessions();
-        self.chat_sessions.deinit(self.allocator);
+        if (self.pending_send_request_id) |request_id| self.allocator.free(request_id);
+        if (self.pending_send_message_id) |message_id| self.allocator.free(message_id);
+        if (self.pending_send_session_key) |session_key| self.allocator.free(session_key);
 
         zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
 
@@ -266,60 +323,11 @@ const App = struct {
                 std.log.info("[ZSS] Received raw ({d} bytes): {s}", .{ msg.len, msg });
                 defer self.allocator.free(msg);
 
-                // Parse JSON response
-                const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch |err| {
-                    std.log.err("[ZSS] Failed to parse JSON: {s}", .{@errorName(err)});
-                    try self.appendMessage("system", "[Parse error]");
-                    continue;
+                self.handleIncomingMessage(msg) catch |err| {
+                    const msg_text = try std.fmt.allocPrint(self.allocator, "Failed to parse message: {s}", .{@errorName(err)});
+                    defer self.allocator.free(msg_text);
+                    try self.appendMessage("system", msg_text, null);
                 };
-                defer parsed.deinit();
-
-                const msg_obj = parsed.value.object;
-                const msg_type = msg_obj.get("type") orelse {
-                    std.log.warn("[ZSS] Message missing 'type' field: {s}", .{msg});
-                    continue;
-                };
-
-                if (msg_type != .string) {
-                    std.log.warn("[ZSS] Message 'type' is not a string", .{});
-                    continue;
-                }
-
-                std.log.info("[ZSS] Message type: {s}", .{msg_type.string});
-
-                if (std.mem.eql(u8, msg_type.string, "session.ack")) {
-                    // Store session key
-                    if (msg_obj.get("sessionKey")) |sk| {
-                        if (sk == .string) {
-                            if (self.current_session_key) |old| {
-                                self.allocator.free(old);
-                            }
-                            self.current_session_key = try self.allocator.dupe(u8, sk.string);
-                            std.log.info("[ZSS] Session established: {s}", .{sk.string});
-                        }
-                    }
-                } else if (std.mem.eql(u8, msg_type.string, "chat.receive") or std.mem.eql(u8, msg_type.string, "session.receive")) {
-                    // Extract content from AI response
-                    const content = msg_obj.get("content") orelse {
-                        std.log.warn("[ZSS] chat.receive missing 'content'", .{});
-                        continue;
-                    };
-                    if (content == .string) {
-                        std.log.info("[ZSS] AI response: {s}", .{content.string});
-                        try self.appendMessage("assistant", content.string);
-                    }
-                } else if (std.mem.eql(u8, msg_type.string, "error")) {
-                    const err_msg = msg_obj.get("message") orelse {
-                        try self.appendMessage("system", "[Error from server]");
-                        continue;
-                    };
-                    if (err_msg == .string) {
-                        std.log.err("[ZSS] Server error: {s}", .{err_msg.string});
-                        try self.appendMessage("system", err_msg.string);
-                    }
-                } else {
-                    std.log.info("[ZSS] Unhandled message type: {s}", .{msg_type.string});
-                }
             }
             if (count > 0) {
                 std.log.debug("[ZSS] Polled {d} messages this frame", .{count});
@@ -334,26 +342,49 @@ const App = struct {
             },
             .enter, .keypad_enter => {
                 // Check if we're focused on settings URL input
-                if (self.settings_panel.focused) {
+                if (self.settings_panel.focused_field != .none) {
                     try self.tryConnect();
                 }
             },
             .v => {
-                if (self.settings_panel.focused and key_evt.mods.ctrl and !key_evt.repeat) {
+                if (self.settings_panel.focused_field != .none and key_evt.mods.ctrl and !key_evt.repeat) {
                     const clip = zapp.clipboard.getTextZ();
                     if (clip.len > 0) {
-                        try self.settings_panel.server_url.appendSlice(self.allocator, clip);
+                        switch (self.settings_panel.focused_field) {
+                            .server_url => try self.settings_panel.server_url.appendSlice(self.allocator, clip),
+                            .default_session => try self.settings_panel.default_session.appendSlice(self.allocator, clip),
+                            .ui_theme => try self.settings_panel.ui_theme.appendSlice(self.allocator, clip),
+                            .ui_profile => try self.settings_panel.ui_profile.appendSlice(self.allocator, clip),
+                            .ui_theme_pack => try self.settings_panel.ui_theme_pack.appendSlice(self.allocator, clip),
+                            .none => {},
+                        }
                     }
                 }
             },
             .back_space => {
-                if (self.settings_panel.focused and self.settings_panel.server_url.items.len > 0) {
+                if (self.settings_panel.focused_field == .server_url and self.settings_panel.server_url.items.len > 0) {
                     _ = self.settings_panel.server_url.pop();
+                } else if (self.settings_panel.focused_field == .default_session and self.settings_panel.default_session.items.len > 0) {
+                    _ = self.settings_panel.default_session.pop();
+                } else if (self.settings_panel.focused_field == .ui_theme and self.settings_panel.ui_theme.items.len > 0) {
+                    _ = self.settings_panel.ui_theme.pop();
+                } else if (self.settings_panel.focused_field == .ui_profile and self.settings_panel.ui_profile.items.len > 0) {
+                    _ = self.settings_panel.ui_profile.pop();
+                } else if (self.settings_panel.focused_field == .ui_theme_pack and self.settings_panel.ui_theme_pack.items.len > 0) {
+                    _ = self.settings_panel.ui_theme_pack.pop();
                 }
             },
             .delete => {
-                if (self.settings_panel.focused and self.settings_panel.server_url.items.len > 0) {
+                if (self.settings_panel.focused_field == .server_url and self.settings_panel.server_url.items.len > 0) {
                     _ = self.settings_panel.server_url.pop();
+                } else if (self.settings_panel.focused_field == .default_session and self.settings_panel.default_session.items.len > 0) {
+                    _ = self.settings_panel.default_session.pop();
+                } else if (self.settings_panel.focused_field == .ui_theme and self.settings_panel.ui_theme.items.len > 0) {
+                    _ = self.settings_panel.ui_theme.pop();
+                } else if (self.settings_panel.focused_field == .ui_profile and self.settings_panel.ui_profile.items.len > 0) {
+                    _ = self.settings_panel.ui_profile.pop();
+                } else if (self.settings_panel.focused_field == .ui_theme_pack and self.settings_panel.ui_theme_pack.items.len > 0) {
+                    _ = self.settings_panel.ui_theme_pack.pop();
                 }
             },
             else => {},
@@ -363,13 +394,55 @@ const App = struct {
     fn handleTextInput(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
 
-        if (self.settings_panel.focused) {
-            for (text) |ch| {
-                if (ch >= 32 and ch < 127) {
-                    try self.settings_panel.server_url.append(self.allocator, ch);
+        switch (self.settings_panel.focused_field) {
+            .server_url => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.server_url.append(self.allocator, ch);
+                    }
                 }
-            }
+            },
+            .default_session => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.default_session.append(self.allocator, ch);
+                    }
+                }
+            },
+            .ui_theme => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.ui_theme.append(self.allocator, ch);
+                    }
+                }
+            },
+            .ui_profile => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.ui_profile.append(self.allocator, ch);
+                    }
+                }
+            },
+            .ui_theme_pack => {
+                for (text) |ch| {
+                    if (ch >= 32 and ch < 127) {
+                        try self.settings_panel.ui_theme_pack.append(self.allocator, ch);
+                    }
+                }
+            },
+            .none => {},
         }
+    }
+
+    fn syncSettingsToConfig(self: *App) !void {
+        try self.config.setServerUrl(self.settings_panel.server_url.items);
+        try self.config.setDefaultSession(self.settings_panel.default_session.items);
+        self.config.auto_connect_on_launch = self.settings_panel.auto_connect_on_launch;
+        try self.config.setTheme(if (self.settings_panel.ui_theme.items.len > 0) self.settings_panel.ui_theme.items else null);
+        try self.config.setProfile(if (self.settings_panel.ui_profile.items.len > 0) self.settings_panel.ui_profile.items else null);
+        try self.config.setThemePack(if (self.settings_panel.ui_theme_pack.items.len > 0) self.settings_panel.ui_theme_pack.items else null);
+        self.config.setWatchThemePack(self.settings_panel.watch_theme_pack);
+        try self.config.save();
     }
 
     fn drawFrame(self: *App) void {
@@ -539,6 +612,7 @@ const App = struct {
     fn drawSettingsPanel(self: *App, rect: UiRect) void {
         const pad = self.theme.spacing.md;
         var y = rect.min[1] + pad;
+        const rect_width = rect.max[0] - rect.min[0];
 
         // Title
         self.drawLabel(
@@ -560,7 +634,6 @@ const App = struct {
 
         // URL Input
         const input_height: f32 = 32.0 * self.ui_scale;
-        const rect_width = rect.max[0] - rect.min[0];
         const input_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
@@ -571,24 +644,161 @@ const App = struct {
         const url_focused = self.drawTextInputWidget(
             input_rect,
             self.settings_panel.server_url.items,
-            self.settings_panel.focused,
+            self.settings_panel.focused_field == .server_url,
             .{ .placeholder = "ws://127.0.0.1:18790" },
         );
-        self.settings_panel.focused = url_focused;
-
-        // Handle click outside to unfocus
-        if (self.mouse_clicked and !input_rect.contains(.{ self.mouse_x, self.mouse_y })) {
-            self.settings_panel.focused = false;
-        }
+        if (url_focused) self.settings_panel.focused_field = .server_url;
 
         y += input_height + pad;
 
-        // Connect button
-        const button_width: f32 = 120.0 * self.ui_scale;
-        const button_height: f32 = 32.0 * self.ui_scale;
-        const button_rect = Rect.fromXYWH(
+        // Default Session label
+        self.drawLabel(
             rect.min[0] + pad,
             y,
+            "Default session",
+            self.theme.colors.text_primary,
+        );
+        y += 20.0 * self.ui_scale;
+
+        const default_session_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200, rect_width - pad * 2.0),
+            input_height,
+        );
+        const default_session_focused = self.drawTextInputWidget(
+            default_session_rect,
+            self.settings_panel.default_session.items,
+            self.settings_panel.focused_field == .default_session,
+            .{ .placeholder = "main" },
+        );
+        if (default_session_focused) self.settings_panel.focused_field = .default_session;
+
+        y += input_height + pad;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "UI Theme",
+            self.theme.colors.text_primary,
+        );
+        y += 20.0 * self.ui_scale;
+        const ui_theme_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200, rect_width - pad * 2.0),
+            input_height,
+        );
+        const ui_theme_focused = self.drawTextInputWidget(
+            ui_theme_rect,
+            self.settings_panel.ui_theme.items,
+            self.settings_panel.focused_field == .ui_theme,
+            .{ .placeholder = "default" },
+        );
+        if (ui_theme_focused) self.settings_panel.focused_field = .ui_theme;
+
+        y += input_height + pad;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "UI Profile",
+            self.theme.colors.text_primary,
+        );
+        y += 20.0 * self.ui_scale;
+        const ui_profile_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200, rect_width - pad * 2.0),
+            input_height,
+        );
+        const ui_profile_focused = self.drawTextInputWidget(
+            ui_profile_rect,
+            self.settings_panel.ui_profile.items,
+            self.settings_panel.focused_field == .ui_profile,
+            .{ .placeholder = "default" },
+        );
+        if (ui_profile_focused) self.settings_panel.focused_field = .ui_profile;
+
+        y += input_height + pad;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "UI Theme Pack",
+            self.theme.colors.text_primary,
+        );
+        y += 20.0 * self.ui_scale;
+        const ui_theme_pack_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200, rect_width - pad * 2.0),
+            input_height,
+        );
+        const ui_theme_pack_focused = self.drawTextInputWidget(
+            ui_theme_pack_rect,
+            self.settings_panel.ui_theme_pack.items,
+            self.settings_panel.focused_field == .ui_theme_pack,
+            .{ .placeholder = "" },
+        );
+        if (ui_theme_pack_focused) self.settings_panel.focused_field = .ui_theme_pack;
+
+        y += input_height + pad * 0.5;
+        const watch_button_label = if (self.settings_panel.watch_theme_pack)
+            "Watch Theme Pack: On"
+        else
+            "Watch Theme Pack: Off";
+        const watch_button_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200, rect_width * 0.65),
+            input_height,
+        );
+        const watch_pack_clicked = self.drawButtonWidget(
+            watch_button_rect,
+            watch_button_label,
+            .{ .variant = .secondary },
+        );
+        if (watch_pack_clicked) {
+            self.settings_panel.watch_theme_pack = !self.settings_panel.watch_theme_pack;
+        }
+
+        // Auto connect toggle
+        y += input_height + pad;
+        const button_height: f32 = 32.0 * self.ui_scale;
+        const auto_connect_label = if (self.settings_panel.auto_connect_on_launch)
+            "Auto Connect: On"
+        else
+            "Auto Connect: Off";
+        const auto_connect_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(200, rect_width * 0.55),
+            button_height,
+        );
+        const auto_connect_clicked = self.drawButtonWidget(
+            auto_connect_rect,
+            auto_connect_label,
+            .{ .variant = .secondary },
+        );
+        if (auto_connect_clicked) {
+            self.settings_panel.auto_connect_on_launch = !self.settings_panel.auto_connect_on_launch;
+        }
+
+        // Handle click outside text fields
+        if (self.mouse_clicked and
+            !input_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !default_session_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !ui_theme_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !ui_profile_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !ui_theme_pack_rect.contains(.{ self.mouse_x, self.mouse_y }))
+        {
+            self.settings_panel.focused_field = .none;
+        }
+
+        // Connect button
+        const button_width: f32 = 120.0 * self.ui_scale;
+        const button_y = y + button_height * 1.6;
+        const button_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            button_y,
             button_width,
             button_height,
         );
@@ -606,7 +816,7 @@ const App = struct {
         const save_button_x = button_rect.max[0] + pad;
         const save_button_rect = Rect.fromXYWH(
             save_button_x,
-            y,
+            button_y,
             button_width,
             button_height,
         );
@@ -660,7 +870,7 @@ const App = struct {
             &self.chat_panel_state,
             "zss-gui",
             self.current_session_key,
-            self.messages.items,
+            self.activeMessages(),
             null,
             null,
             "🕷",
@@ -847,12 +1057,15 @@ const App = struct {
         self.setConnectionState(.connecting, "Connecting...");
         self.disconnect();
 
-        self.ws_client = ws_client_mod.WebSocketClient.init(self.allocator, self.settings_panel.server_url.items, "") catch |err| {
+        const effective_url = self.settings_panel.server_url.items;
+        const connect_token = if (self.config.token.len > 0) self.config.token else self.config.auth_token;
+        const client = ws_client_mod.WebSocketClient.init(self.allocator, effective_url, connect_token) catch |err| {
             const msg = try std.fmt.allocPrint(self.allocator, "Client init failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
             self.setConnectionState(.error_state, msg);
             return;
         };
+        self.ws_client = client;
 
         self.ws_client.?.connect() catch |err| {
             self.ws_client.?.deinit();
@@ -864,18 +1077,26 @@ const App = struct {
         };
 
         self.setConnectionState(.connected, "Connected");
-        self.settings_panel.focused = false;
+        self.settings_panel.focused_field = .none;
 
         // Save URL to config on successful connect
-        try self.config.setServerUrl(self.settings_panel.server_url.items);
-        self.config.save() catch |err| {
+        self.config.setAuthToken(connect_token) catch {};
+        if (self.settings_panel.default_session.items.len == 0) {
+            try self.settings_panel.default_session.appendSlice(self.allocator, "main");
+        }
+        self.syncSettingsToConfig() catch |err| {
             std.log.warn("Failed to save config on connect: {s}", .{@errorName(err)});
         };
 
         self.clearSessions();
-        try self.addSession("main", "Main");
+        if (self.config.default_session) |default_session| {
+            const seed = if (default_session.len > 0) default_session else "main";
+            try self.ensureSessionExists(seed, seed);
+        } else {
+            try self.ensureSessionExists("main", "Main");
+        }
 
-        try self.appendMessage("system", "Connected to Spiderweb");
+        try self.appendMessage("system", "Connected to Spiderweb", null);
 
         // Switch to chat panel by focusing it
         for (self.manager.workspace.panels.items) |*panel| {
@@ -904,6 +1125,8 @@ const App = struct {
             client.deinit();
             self.ws_client = null;
         }
+        self.current_session_key = null;
+        self.clearPendingSend();
         if (self.current_session_key) |key| {
             self.allocator.free(key);
             self.current_session_key = null;
@@ -912,69 +1135,491 @@ const App = struct {
     }
 
     fn saveConfig(self: *App) !void {
-        // Update config with current settings
-        try self.config.setServerUrl(self.settings_panel.server_url.items);
-        try self.config.save();
+        if (self.settings_panel.default_session.items.len == 0) {
+            try self.settings_panel.default_session.appendSlice(self.allocator, "main");
+        }
+        try self.syncSettingsToConfig();
     }
 
     fn sendChatMessageText(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
 
-        try self.appendMessage("user", text);
+        // Keep a session key for this send
+        const session_key = try self.currentSessionOrDefault();
+        if (session_key.len == 0) {
+            try self.appendMessage("system", "No active session available", null);
+            return;
+        }
+
+        const user_msg_id = try self.nextMessageId("msg");
+        const appended_user_msg_id = try self.appendMessageWithIdForSession(session_key, "user", text, .sending, user_msg_id);
+        defer self.allocator.free(appended_user_msg_id);
+        self.allocator.free(user_msg_id);
+        try self.setPendingSend(self.allocator, appended_user_msg_id, session_key);
+
+        const request_id = try self.nextMessageId("req");
+        if (self.pending_send_request_id) |request| {
+            self.allocator.free(request);
+        }
+        self.pending_send_request_id = request_id;
+        self.awaiting_reply = true;
 
         if (self.ws_client) |*client| {
-            var payload = std.ArrayList(u8).empty;
-            defer payload.deinit(self.allocator);
+            const payload = protocol_messages.buildChatSend(
+                self.allocator,
+                request_id,
+                text,
+                session_key,
+            ) catch {
+                try self.setMessageFailed(appended_user_msg_id);
+                self.clearPendingSend();
+                return;
+            };
+            defer self.allocator.free(payload);
 
-            try payload.appendSlice(self.allocator, "{\"type\":\"chat.send\",");
-
-            // Add session key if we have one
-            if (self.current_session_key) |key| {
-                try payload.appendSlice(self.allocator, "\"sessionKey\":\"");
-                try payload.appendSlice(self.allocator, key);
-                try payload.appendSlice(self.allocator, "\",");
-            }
-
-            try payload.appendSlice(self.allocator, "\"content\":\"");
-            for (text) |ch| {
-                switch (ch) {
-                    '"' => try payload.appendSlice(self.allocator, "\\\""),
-                    '\\' => try payload.appendSlice(self.allocator, "\\\\"),
-                    '\n' => try payload.appendSlice(self.allocator, "\\n"),
-                    '\r' => {},
-                    else => try payload.append(self.allocator, ch),
-                }
-            }
-            try payload.appendSlice(self.allocator, "\"}");
-
-            std.log.info("Sending: {s}", .{payload.items});
-            client.send(payload.items) catch |err| {
-                std.log.err("Send failed: {s}", .{@errorName(err)});
+            client.send(payload) catch |err| {
                 const err_text = try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{@errorName(err)});
                 defer self.allocator.free(err_text);
-                try self.appendMessage("system", err_text);
+                try self.appendMessage("system", err_text, null);
+                if (self.pending_send_message_id) |message_id| {
+                    try self.setMessageFailed(message_id);
+                } else {
+                    try self.setMessageFailed(appended_user_msg_id);
+                }
+                self.clearPendingSend();
+                return;
             };
+        } else {
+            const err_text = try std.fmt.allocPrint(self.allocator, "Not connected", .{});
+            defer self.allocator.free(err_text);
+            try self.appendMessage("system", err_text, null);
+            if (self.pending_send_message_id) |message_id| {
+                try self.setMessageFailed(message_id);
+            } else {
+                try self.setMessageFailed(appended_user_msg_id);
+            }
+            self.clearPendingSend();
         }
     }
 
-    fn appendMessage(self: *App, role: []const u8, content: []const u8) !void {
+    fn nextMessageId(self: *App, prefix: []const u8) ![]const u8 {
         self.message_counter += 1;
-        const id = try std.fmt.allocPrint(self.allocator, "msg-{d}", .{self.message_counter});
+        return try std.fmt.allocPrint(self.allocator, "{s}-{d}", .{ prefix, self.message_counter });
+    }
+
+    fn setPendingSend(
+        self: *App,
+        allocator: std.mem.Allocator,
+        message_id: []const u8,
+        session_key: []const u8,
+    ) !void {
+        if (self.pending_send_message_id) |value| allocator.free(value);
+        if (self.pending_send_session_key) |value| allocator.free(value);
+        self.pending_send_message_id = try allocator.dupe(u8, message_id);
+        self.pending_send_session_key = try allocator.dupe(u8, session_key);
+    }
+
+    fn clearPendingSend(self: *App) void {
+        if (self.pending_send_request_id) |value| {
+            self.allocator.free(value);
+            for (self.session_messages.items) |*state| {
+                if (state.streaming_request_id) |stream_request_id| {
+                    if (std.mem.eql(u8, value, stream_request_id)) {
+                        self.clearSessionStreamingState(state);
+                    }
+                }
+            }
+            self.pending_send_request_id = null;
+        }
+        if (self.pending_send_message_id) |value| {
+            self.allocator.free(value);
+            self.pending_send_message_id = null;
+        }
+        if (self.pending_send_session_key) |value| {
+            self.allocator.free(value);
+            self.pending_send_session_key = null;
+        }
+        self.awaiting_reply = false;
+    }
+
+    fn currentSessionOrDefault(self: *App) ![]const u8 {
+        self.sanitizeCurrentSessionSelection();
+
+        if (self.current_session_key) |current| return current;
+        if (self.chat_sessions.items.len > 0) {
+            const fallback = self.chat_sessions.items[0].key;
+            try self.setCurrentSessionKey(fallback);
+            return fallback;
+        }
+        const fallback = "main";
+        try self.ensureSessionExists(fallback, fallback);
+        return fallback;
+    }
+
+    fn activeMessages(self: *App) []const ChatMessage {
+        self.sanitizeCurrentSessionSelection();
+
+        if (self.current_session_key) |key| {
+            if (self.findSessionMessageState(key)) |state| {
+                return state.messages.items;
+            }
+        }
+        if (self.chat_sessions.items.len > 0) {
+            if (self.findSessionMessageState(self.chat_sessions.items[0].key)) |state| {
+                return state.messages.items;
+            }
+        }
+        return &[_]ChatMessage{};
+    }
+
+    fn setMessageFailed(self: *App, message_id: []const u8) !void {
+        for (self.session_messages.items) |*state| {
+            for (state.messages.items) |*msg| {
+                if (std.mem.eql(u8, msg.id, message_id)) {
+                    msg.local_state = .failed;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn setMessageState(self: *App, message_id: []const u8, state: ?ChatMessageState) !void {
+        for (self.session_messages.items) |*session_state| {
+            for (session_state.messages.items) |*msg| {
+                if (std.mem.eql(u8, msg.id, message_id)) {
+                    msg.local_state = state;
+                    return;
+                }
+            }
+        }
+    }
+
+    fn handleIncomingMessage(self: *App, msg: []const u8) !void {
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+        const root = parsed.value.object;
+
+        const mt = protocol_messages.parseMessageType(msg) orelse return;
+        switch (mt) {
+            .chat_receive => {
+                const payload = if (root.get("payload")) |payload| switch (payload) {
+                    .object => payload.object,
+                    else => root,
+                } else root;
+
+                const request_id = if (root.get("request_id")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else if (payload.get("request_id")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else null;
+                const session_key = if (payload.get("session_key")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else null;
+                if (session_key) |sk| {
+                    self.ensureSessionInList(sk, sk) catch {};
+                }
+                const role = if (payload.get("role")) |value| switch (value) {
+                    .string => value.string,
+                    else => "assistant",
+                } else "assistant";
+                const timestamp = if (root.get("timestamp")) |value| switch (value) {
+                    .integer => value.integer,
+                    else => std.time.milliTimestamp(),
+                } else if (payload.get("timestamp")) |value| switch (value) {
+                    .integer => value.integer,
+                    else => std.time.milliTimestamp(),
+                } else std.time.milliTimestamp();
+                const content = if (payload.get("content")) |value| switch (value) {
+                    .string => value.string,
+                    else => "",
+                } else "";
+                const content_delta = if (payload.get("content_delta")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else null;
+                const final = if (payload.get("final")) |value| switch (value) {
+                    .bool => value.bool,
+                    else => true,
+                } else true;
+                if (request_id) |req_id| {
+                    if (self.pending_send_request_id) |pending| {
+                        if (std.mem.eql(u8, pending, req_id)) {
+                            if (self.pending_send_message_id) |msg_id| {
+                                self.setMessageState(msg_id, null) catch {};
+                            }
+                            if (session_key) |sk| {
+                                if (self.current_session_key) |current| {
+                                    if (!std.mem.eql(u8, current, sk)) {
+                                        self.setCurrentSessionKey(sk) catch {};
+                                    }
+                                } else {
+                                    self.setCurrentSessionKey(sk) catch {};
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (content_delta) |delta| {
+                    try self.appendOrUpdateStreamingMessage(request_id, session_key, delta, false, timestamp);
+                    return;
+                }
+                if (content.len > 0) {
+                    if (request_id != null) {
+                        const is_final = final;
+                        try self.appendOrUpdateStreamingMessage(request_id, session_key, content, is_final, timestamp);
+                    } else {
+                        try self.appendMessageWithState(role, content, null, null);
+                    }
+                }
+            },
+            .chat_ack => {
+                // Optional: could clear pending state in the future
+            },
+            .error_response => {
+                const payload = if (root.get("payload")) |payload| switch (payload) {
+                    .object => payload.object,
+                    else => root,
+                } else root;
+                const err_message = if (payload.get("message")) |value| switch (value) {
+                    .string => value.string,
+                    else => "Unknown error",
+                } else "Unknown error";
+                try self.appendMessage("system", err_message, null);
+            },
+            else => {
+                if (self.connection_state == .connected) {
+                    return;
+                }
+                try self.appendMessage("system", "Unhandled message", null);
+            },
+        }
+    }
+
+    fn appendOrUpdateStreamingMessage(
+        self: *App,
+        request_id: ?[]const u8,
+        session_key_opt: ?[]const u8,
+        chunk: []const u8,
+        final: bool,
+        timestamp: i64,
+    ) !void {
+        const target_session = if (request_id) |request| blk: {
+            if (self.pending_send_request_id) |pending| {
+                if (std.mem.eql(u8, pending, request)) {
+                    if (self.pending_send_session_key) |key| break :blk key;
+                }
+            }
+            break :blk session_key_opt;
+        } else session_key_opt;
+
+        const target = target_session orelse try self.currentSessionOrDefault();
+
+        if (request_id) |request| {
+            const state = try self.getSessionMessageState(target);
+
+            if (state.streaming_request_id) |existing_request| {
+                if (!std.mem.eql(u8, existing_request, request)) {
+                    self.clearSessionStreamingState(state);
+                }
+            }
+
+            if (state.streaming_request_id == null) {
+                try self.setSessionStreamingRequest(state, request);
+            }
+
+            const stream_id = try self.makeStreamingMessageId(request);
+            defer self.allocator.free(stream_id);
+
+            if (self.findMessageIndex(target, stream_id)) |idx| {
+                if (final) {
+                    try self.setMessageContentByIndex(target, idx, chunk);
+                } else {
+                    try self.appendToMessage(target, idx, chunk);
+                }
+                if (state.messages.items.len > idx) {
+                    state.messages.items[idx].timestamp = timestamp;
+                }
+            } else {
+                _ = try self.appendMessageWithIdForSession(target, "assistant", chunk, null, stream_id);
+            }
+
+            if (self.pending_send_request_id) |pending| {
+                if (std.mem.eql(u8, pending, request)) {
+                    if (self.pending_send_message_id) |msg_id| {
+                        self.setMessageState(msg_id, null) catch {};
+                    }
+                    if (final) {
+                        self.clearSessionStreamingState(state);
+                        self.clearPendingSend();
+                    }
+                }
+            }
+
+            if (final) {
+                self.clearSessionStreamingState(state);
+            }
+            return;
+        }
+
+        try self.appendMessageForSession(target, "assistant", chunk, null);
+    }
+
+    fn findSessionMessageState(self: *App, key: []const u8) ?*SessionMessageState {
+        for (self.session_messages.items) |*state| {
+            if (std.mem.eql(u8, state.key, key)) return state;
+        }
+        return null;
+    }
+
+    fn getSessionMessageState(self: *App, key: []const u8) !*SessionMessageState {
+        if (self.findSessionMessageState(key)) |state| return state;
+        const key_copy = try self.allocator.dupe(u8, key);
+        try self.session_messages.append(self.allocator, .{
+            .key = key_copy,
+            .messages = .empty,
+        });
+        return &self.session_messages.items[self.session_messages.items.len - 1];
+    }
+
+    fn makeStreamingMessageId(self: *App, request_id: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.allocator, "stream:{s}", .{request_id});
+    }
+
+    fn setSessionStreamingRequest(self: *App, state: *SessionMessageState, request_id: []const u8) !void {
+        if (state.streaming_request_id) |existing_request| {
+            if (std.mem.eql(u8, existing_request, request_id)) {
+                return;
+            }
+            self.allocator.free(existing_request);
+        }
+        state.streaming_request_id = try self.allocator.dupe(u8, request_id);
+    }
+
+    fn clearSessionStreamingState(self: *App, state: *SessionMessageState) void {
+        if (state.streaming_request_id) |existing_request| {
+            self.allocator.free(existing_request);
+            state.streaming_request_id = null;
+        }
+    }
+
+    fn setMessageContentByIndex(self: *App, session_key: []const u8, index: usize, content: []const u8) !void {
+        const state = try self.getSessionMessageState(session_key);
+        if (index >= state.messages.items.len) return;
+        const msg = &state.messages.items[index];
+        self.allocator.free(msg.content);
+        msg.content = try self.allocator.dupe(u8, content);
+    }
+
+    fn appendToMessage(self: *App, session_key: []const u8, index: usize, content: []const u8) !void {
+        const state = try self.getSessionMessageState(session_key);
+        var msg = &state.messages.items[index];
+        const old_content = msg.content;
+        const new_len = old_content.len + content.len;
+        var combined = try self.allocator.alloc(u8, new_len);
+        @memcpy(combined[0..old_content.len], old_content);
+        @memcpy(combined[old_content.len..new_len], content);
+        msg.content = combined;
+        self.allocator.free(old_content);
+    }
+
+    fn findMessageIndex(self: *App, session_key: []const u8, message_id: []const u8) ?usize {
+        const state = self.findSessionMessageState(session_key) orelse return null;
+        for (state.messages.items, 0..) |*msg, idx| {
+            if (std.mem.eql(u8, msg.id, message_id)) return idx;
+        }
+        return null;
+    }
+
+    fn appendMessage(self: *App, role: []const u8, content: []const u8, local_state: ?ChatMessageState) !void {
+        const session_key = try self.currentSessionOrDefault();
+        const id = try self.appendMessageWithIdForSession(session_key, role, content, local_state, "");
+        self.allocator.free(id);
+    }
+
+    fn appendMessageForSession(
+        self: *App,
+        session_key: []const u8,
+        role: []const u8,
+        content: []const u8,
+        local_state: ?ChatMessageState,
+    ) !void {
+        const id = try self.appendMessageWithIdForSession(session_key, role, content, local_state, "");
+        self.allocator.free(id);
+    }
+
+    fn appendMessageWithId(
+        self: *App,
+        role: []const u8,
+        content: []const u8,
+        local_state: ?ChatMessageState,
+        id_override: []const u8,
+    ) ![]const u8 {
+        const session_key = try self.currentSessionOrDefault();
+        return self.appendMessageWithIdForSession(session_key, role, content, local_state, id_override);
+    }
+
+    fn appendMessageWithIdForSession(
+        self: *App,
+        session_key: []const u8,
+        role: []const u8,
+        content: []const u8,
+        local_state: ?ChatMessageState,
+        id_override: []const u8,
+    ) ![]const u8 {
+        const id = if (id_override.len > 0) try self.allocator.dupe(u8, id_override) else try self.nextMessageId("msg");
         errdefer self.allocator.free(id);
 
-        try self.messages.append(self.allocator, .{
-            .id = id,
+        const state = try self.getSessionMessageState(session_key);
+        try state.messages.append(self.allocator, .{
+            .id = try self.allocator.dupe(u8, id),
             .role = try self.allocator.dupe(u8, role),
             .content = try self.allocator.dupe(u8, content),
             .timestamp = std.time.milliTimestamp(),
             .attachments = null,
-            .local_state = null,
+            .local_state = local_state,
         });
 
-        if (self.messages.items.len > 500) {
-            var oldest = self.messages.orderedRemove(0);
+        if (state.messages.items.len > 500) {
+            var oldest = state.messages.orderedRemove(0);
+            if (state.streaming_request_id) |stream_request_id| {
+                if (std.mem.startsWith(u8, oldest.id, "stream:")) {
+                    const oldest_request_id = oldest.id["stream:".len..];
+                    if (std.mem.eql(u8, oldest_request_id, stream_request_id)) {
+                        self.allocator.free(stream_request_id);
+                        state.streaming_request_id = null;
+                    }
+                }
+            }
+            if (self.pending_send_message_id) |pending_message_id| {
+                if (std.mem.eql(u8, pending_message_id, oldest.id)) {
+                    self.allocator.free(pending_message_id);
+                    self.pending_send_message_id = null;
+                }
+            }
             self.freeMessage(&oldest);
         }
+
+        return id;
+    }
+
+    fn appendMessageWithState(
+        self: *App,
+        role: []const u8,
+        content: []const u8,
+        local_state: ?ChatMessageState,
+        id_override: ?[]const u8,
+    ) !void {
+        if (id_override) |id| {
+            const id_out = try self.appendMessageWithId(role, content, local_state, id);
+            self.allocator.free(id_out);
+            return;
+        }
+        return self.appendMessage(role, content, local_state);
     }
 
     fn freeMessage(self: *App, msg: *ChatMessage) void {
@@ -992,19 +1637,34 @@ const App = struct {
         }
     }
 
-    fn clearMessages(self: *App) void {
-        for (self.messages.items) |*msg| {
-            self.freeMessage(msg);
+    fn clearAllMessages(self: *App) void {
+        for (self.session_messages.items) |*state| {
+            self.clearSessionStreamingState(state);
+            for (state.messages.items) |*msg| {
+                self.freeMessage(msg);
+            }
+            state.messages.clearRetainingCapacity();
         }
-        self.messages.clearRetainingCapacity();
     }
 
     fn clearSessions(self: *App) void {
+        self.clearAllMessages();
+
+        if (self.current_session_key) |current_session| {
+            self.allocator.free(current_session);
+            self.current_session_key = null;
+        }
         for (self.chat_sessions.items) |session| {
             self.allocator.free(session.key);
             if (session.display_name) |name| self.allocator.free(name);
         }
         self.chat_sessions.clearRetainingCapacity();
+
+        for (self.session_messages.items) |*state| {
+            state.messages.deinit(self.allocator);
+            self.allocator.free(state.key);
+        }
+        self.session_messages.clearRetainingCapacity();
     }
 
     fn addSession(self: *App, key: []const u8, display_name: []const u8) !void {
@@ -1017,6 +1677,67 @@ const App = struct {
             .key = key_copy,
             .display_name = name_copy,
         });
+    }
+
+    fn ensureSessionExists(self: *App, key: []const u8, display_name: []const u8) !void {
+        try self.ensureSessionInList(key, display_name);
+        try self.setCurrentSessionKey(key);
+    }
+
+    fn ensureSessionInList(self: *App, key: []const u8, display_name: []const u8) !void {
+        for (self.chat_sessions.items) |session| {
+            if (std.mem.eql(u8, session.key, key)) {
+                return;
+            }
+        }
+        try self.addSession(key, display_name);
+    }
+
+    fn sanitizeCurrentSessionSelection(self: *App) void {
+        if (self.current_session_key) |current| {
+            for (self.chat_sessions.items) |session| {
+                if (std.mem.eql(u8, current, session.key)) {
+                    return;
+                }
+            }
+
+            self.allocator.free(current);
+            self.current_session_key = null;
+        }
+
+        if (self.current_session_key == null) {
+            if (self.chat_sessions.items.len > 0) {
+                self.setCurrentSessionKey(self.chat_sessions.items[0].key) catch {};
+            }
+        }
+    }
+
+    fn setCurrentSessionByKey(self: *App, session_key: []const u8) bool {
+        for (self.chat_sessions.items) |session| {
+            if (std.mem.eql(u8, session.key, session_key)) {
+                self.setCurrentSessionKey(session.key) catch {};
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn setCurrentSessionByIndex(self: *App, index: usize) bool {
+        if (index >= self.chat_sessions.items.len) return false;
+        self.setCurrentSessionKey(self.chat_sessions.items[index].key) catch {};
+        return true;
+    }
+
+    fn setCurrentSessionKey(self: *App, key: []const u8) !void {
+        if (key.len == 0) return;
+        const key_copy = try self.allocator.dupe(u8, key);
+        self.setCurrentSessionKeyOwned(key_copy);
+    }
+
+    fn setCurrentSessionKeyOwned(self: *App, key_copy: []const u8) void {
+        if (self.current_session_key) |current| {
+            self.allocator.free(current);
+        }
         self.current_session_key = key_copy;
     }
 
@@ -1028,33 +1749,26 @@ const App = struct {
 
         if (action.select_session) |session_key| {
             defer self.allocator.free(session_key);
-            for (self.chat_sessions.items) |session| {
-                if (std.mem.eql(u8, session.key, session_key)) {
-                    self.current_session_key = session.key;
-                    break;
-                }
-            }
+            _ = self.setCurrentSessionByKey(session_key);
         }
 
         if (action.select_session_id) |sid| {
-            self.allocator.free(sid);
+            defer self.allocator.free(sid);
+            if (std.fmt.parseInt(usize, sid, 10)) |index| {
+                if (self.setCurrentSessionByIndex(index)) return;
+            } else |_| {
+                _ = self.setCurrentSessionByKey(sid);
+            }
         }
 
         if (action.new_chat_session_key) |new_key| {
             defer self.allocator.free(new_key);
 
-            var found = false;
-            for (self.chat_sessions.items) |session| {
-                if (std.mem.eql(u8, session.key, new_key)) {
-                    self.current_session_key = session.key;
-                    found = true;
-                    break;
-                }
+            if (self.setCurrentSessionByKey(new_key)) {
+                return;
             }
-
-            if (!found) {
-                self.addSession(new_key, new_key) catch {};
-            }
+            self.addSession(new_key, new_key) catch {};
+            _ = self.setCurrentSessionByKey(new_key);
         }
     }
 
@@ -1193,6 +1907,10 @@ pub fn main() !void {
 
     var app = try App.init(gpa.allocator());
     defer app.deinit();
+
+    if (app.config.auto_connect_on_launch) {
+        app.tryConnect() catch {};
+    }
 
     try app.run();
 }

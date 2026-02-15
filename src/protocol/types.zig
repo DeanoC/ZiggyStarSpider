@@ -92,7 +92,7 @@ pub const TaskStatus = enum {
 pub const WorkerType = enum {
     research, // Research and analysis tasks
     implement, // Code implementation
-    test, // Testing and validation
+    testing, // Testing and validation
     review, // Code review
     doc, // Documentation
     pm, // Project management
@@ -102,7 +102,7 @@ pub const WorkerType = enum {
         return switch (self) {
             .research => "research",
             .implement => "implement",
-            .test => "test",
+            .testing => "test",
             .review => "review",
             .doc => "doc",
             .pm => "pm",
@@ -113,7 +113,7 @@ pub const WorkerType = enum {
     pub fn fromString(s: []const u8) ?WorkerType {
         if (std.mem.eql(u8, s, "research")) return .research;
         if (std.mem.eql(u8, s, "implement")) return .implement;
-        if (std.mem.eql(u8, s, "test")) return .test;
+        if (std.mem.eql(u8, s, "test")) return .testing;
         if (std.mem.eql(u8, s, "review")) return .review;
         if (std.mem.eql(u8, s, "doc")) return .doc;
         if (std.mem.eql(u8, s, "pm")) return .pm;
