@@ -1,6 +1,5 @@
 const std = @import("std");
 const ws = @import("websocket");
-const builtin = @import("builtin");
 
 const MessageQueue = struct {
     mutex: std.Thread.Mutex,
@@ -59,30 +58,6 @@ const MessageQueue = struct {
     }
 };
 
-// Handler for websocket library's readLoop
-const WsHandler = struct {
-    allocator: std.mem.Allocator,
-    queue: *MessageQueue,
-
-    pub fn serverMessage(self: *WsHandler, data: []const u8) !void {
-        std.log.info("WebSocket received {d} bytes", .{data.len});
-        const copy = self.allocator.dupe(u8, data) catch return;
-        self.queue.push(copy);
-    }
-
-    pub fn serverPing(self: *WsHandler, data: []const u8) !void {
-        _ = self;
-        _ = data;
-        // Pong is handled automatically by the library
-    }
-
-    pub fn serverClose(self: *WsHandler, data: []const u8) !void {
-        _ = self;
-        _ = data;
-        std.log.info("WebSocket server closed connection", .{});
-    }
-};
-
 pub const WebSocketClient = struct {
     allocator: std.mem.Allocator,
     url_buf: []u8,
@@ -90,9 +65,8 @@ pub const WebSocketClient = struct {
     client: ?ws.Client = null,
     connected: bool = false,
 
-    // Threading - using library's readLoopInNewThread
+    // Threading - using manual read loop (like ZSC)
     read_thread: ?std.Thread = null,
-    handler: ?WsHandler = null,
     message_queue: MessageQueue,
 
     pub fn init(allocator: std.mem.Allocator, url: []const u8, token: []const u8) !WebSocketClient {
@@ -136,21 +110,62 @@ pub const WebSocketClient = struct {
             .headers = headers,
         });
 
-        // Ensure read() returns immediately when no bytes are available.
-        try setClientSocketNonBlocking(&client);
+        // NOTE: Don't set non-blocking - we use blocking reads with timeout
+        // This matches ZSC's working approach
 
         self.client = client;
         client_owned_locally = false;
         self.connected = true;
 
-        // Setup handler and start library's read loop in new thread
-        self.handler = WsHandler{
-            .allocator = self.allocator,
-            .queue = &self.message_queue,
-        };
-
-        self.read_thread = try client.readLoopInNewThread(&self.handler.?);
+        // Start our own read loop thread (like ZSC does)
+        self.read_thread = try std.Thread.spawn(.{}, readLoop, .{self});
         std.log.info("WebSocket connected to {s}:{d}", .{ parsed.host, parsed.port });
+    }
+
+    fn readLoop(self: *WebSocketClient) void {
+        std.log.info("[WS] readLoop thread started", .{});
+
+        while (self.connected) {
+            if (self.client) |*client| {
+                const msg = client.read() catch |err| switch (err) {
+                    error.WouldBlock => {
+                        // Small sleep to avoid busy-waiting
+                        std.Thread.sleep(1 * std.time.ns_per_ms);
+                        continue;
+                    },
+                    error.Closed, error.ConnectionResetByPeer => {
+                        std.log.info("[WS] Connection closed", .{});
+                        break;
+                    },
+                    else => {
+                        std.log.err("[WS] read error: {s}", .{@errorName(err)});
+                        break;
+                    },
+                } orelse continue;
+
+                defer client.done(msg);
+
+                switch (msg.type) {
+                    .text, .binary => {
+                        std.log.info("[WS] Got message, len={d}", .{msg.data.len});
+                        const copy = self.allocator.dupe(u8, msg.data) catch continue;
+                        self.message_queue.push(copy);
+                    },
+                    .ping => {
+                        client.writePong(@constCast(msg.data)) catch {};
+                    },
+                    .close => {
+                        std.log.info("[WS] Got close frame", .{});
+                        break;
+                    },
+                    .pong => {},
+                }
+            } else {
+                break;
+            }
+        }
+
+        std.log.info("[WS] readLoop thread stopped", .{});
     }
 
     pub fn disconnect(self: *WebSocketClient) void {
@@ -168,7 +183,6 @@ pub const WebSocketClient = struct {
             self.client = null;
         }
         self.connected = false;
-        self.handler = null;
     }
 
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
@@ -201,41 +215,7 @@ pub const WebSocketClient = struct {
         }
         return error.WouldBlock;
     }
-
-    /// Manually read a message from the websocket (for Windows workaround)
-    /// This bypasses the background read thread and reads directly
-    pub fn readDirect(self: *WebSocketClient, timeout_ms: u32) !?[]u8 {
-        if (!self.connected) return error.NotConnected;
-        if (self.client) |*client| {
-            // Try to read directly from the client
-            const msg = client.readTimeout(timeout_ms) catch |err| {
-                if (err == error.WouldBlock) return null;
-                return err;
-            };
-            if (msg) |data| {
-                const copy = try self.allocator.dupe(u8, data);
-                return copy;
-            }
-            return null;
-        }
-        return error.NotConnected;
-    }
 };
-
-fn setClientSocketNonBlocking(client: *ws.Client) !void {
-    if (comptime builtin.os.tag == .windows) {
-        // On Windows, we need to use a different approach
-        // The library's readLoop may not work properly, so we'll use blocking reads
-        // in a manual polling loop instead
-        return;
-    }
-
-    const socket = client.stream.stream.handle;
-    const flags = try std.posix.fcntl(socket, std.posix.F.GETFL, 0);
-    const nonblock_mask_u32: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-    const nonblock_mask: usize = @intCast(nonblock_mask_u32);
-    _ = try std.posix.fcntl(socket, std.posix.F.SETFL, flags | nonblock_mask);
-}
 
 const ParsedUrl = struct {
     host: []u8,
