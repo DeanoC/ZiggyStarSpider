@@ -47,7 +47,11 @@ pub const ChatScreen = struct {
         else 
             tui.Style{ .fg = tui.Color.red };
         
-        ctx.screen.moveCursor(width - @as(u16, @intCast(status_text.len)) - 2, 0);
+        const status_x = if (width > status_text.len + 2) 
+            width - @as(u16, @intCast(status_text.len)) - 2 
+        else 
+            0;
+        ctx.screen.moveCursor(status_x, 0);
         ctx.screen.setStyle(status_style);
         ctx.screen.putString(status_text);
 
