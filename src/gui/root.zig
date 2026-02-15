@@ -261,10 +261,10 @@ const App = struct {
         if (self.ws_client) |*client| {
             // Use receive with timeout to check for messages
             // receive returns ?[]u8 (null on timeout), not an error union
-            const maybe_msg = client.receive(10);
+            const maybe_msg = client.receive(100);
 
             if (maybe_msg) |msg| {
-                std.log.info("Received raw: {s}", .{msg});
+                std.log.info("[ZSS] Received raw ({d} bytes): {s}", .{ msg.len, msg });
                 defer self.allocator.free(msg);
 
                 // Parse JSON response
@@ -285,7 +285,7 @@ const App = struct {
                     return;
                 }
 
-                std.log.info("Message type: {s}", .{msg_type.string});
+                std.log.info("[ZSS] Message type: {s}", .{msg_type.string});
 
                 if (std.mem.eql(u8, msg_type.string, "session.ack")) {
                     // Store session key
@@ -305,8 +305,10 @@ const App = struct {
                         return;
                     };
                     if (content == .string) {
-                        std.log.info("AI response: {s}", .{content.string});
+                        std.log.info("[ZSS] AI response: {s}", .{content.string});
+                        std.log.info("[ZSS] Calling appendMessage...", .{});
                         try self.appendMessage("assistant", content.string);
+                        std.log.info("[ZSS] appendMessage done", .{});
                     }
                 } else if (std.mem.eql(u8, msg_type.string, "error")) {
                     const err_msg = parsed.value.object.get("message") orelse {
