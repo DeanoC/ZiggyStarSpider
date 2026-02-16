@@ -1390,97 +1390,55 @@ const App = struct {
         out: *dock_graph.LayoutResult,
     ) bool {
         if (!self.isWorkspaceStateReasonable(manager)) {
-            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                std.log.warn("collectDockLayoutSafe: manager unhealthy", .{});
-            }
+            std.log.err("collectDockLayoutSafe: manager unhealthy", .{});
             return false;
         }
 
-        if (self.shouldLogDebug(240)) {
-            const dock_root = if (manager.workspace.dock_layout.root) |r|
-                @as(i64, @intCast(r))
-            else
-                -1;
-            const panel_count = self.safeWorkspaceCount(manager.workspace.panels.items.len, 4096);
-            const node_count = self.safeWorkspaceCount(manager.workspace.dock_layout.nodes.items.len, 16384);
-            std.log.info("collectDockLayoutSafe begin: panels={} root={} nodes={}", .{
-                panel_count,
-                dock_root,
-                node_count,
-            });
-        }
         out.len = 0;
         if (manager.workspace.panels.items.len > 4096 or manager.workspace.dock_layout.nodes.items.len > 16384)
         {
-            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                std.log.warn(
-                    "collectDockLayoutSafe: invalid workspace sizes (panels={} nodes={})",
-                    .{
-                        manager.workspace.panels.items.len,
-                        manager.workspace.dock_layout.nodes.items.len,
-                    },
-                );
-            }
+            std.log.err(
+                "collectDockLayoutSafe: invalid workspace sizes (panels={} nodes={})",
+                .{
+                    manager.workspace.panels.items.len,
+                    manager.workspace.dock_layout.nodes.items.len,
+                },
+            );
             return false;
         }
         if (!self.isDockLayoutGraphHeaderSane(&manager.workspace.dock_layout)) {
-            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                std.log.warn("collectDockLayoutSafe: dock graph header failed sanity check", .{});
-            }
+            std.log.err("collectDockLayoutSafe: dock graph header failed sanity check", .{});
             return false;
         }
 
         if (manager.workspace.panels.items.len == 0) {
-            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                std.log.warn("collectDockLayoutSafe: no panels available", .{});
-            }
+            std.log.err("collectDockLayoutSafe: no panels available", .{});
             return false;
         }
 
         if (self.collectDockLayout(manager, dock_area, out)) {
-            if (self.shouldLogDebug(240)) {
-                std.log.info("collectDockLayoutSafe: existing layout valid", .{});
-            }
             return true;
-        }
-        if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                std.log.warn("collectDockLayoutSafe: existing layout invalid, rebuilding", .{});
         }
 
         if (self.rebuildDockLayoutFromPanels(manager)) {
             _ = manager.workspace.syncDockLayout() catch {};
             if (self.collectDockLayout(manager, dock_area, out)) {
-                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                    std.log.info("collectDockLayoutSafe: rebuilt layout valid", .{});
-                }
                 return true;
             }
-            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                std.log.warn("collectDockLayoutSafe: rebuilt layout still invalid", .{});
-            }
+            std.log.err("collectDockLayoutSafe: rebuilt layout still invalid", .{});
         }
 
         if (self.recoverDockLayoutFromPanels(manager)) {
             if (self.collectDockLayout(manager, dock_area, out)) {
-                if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                    std.log.info("collectDockLayoutSafe: recovered layout valid", .{});
-                }
                 return true;
             }
-            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                std.log.warn("collectDockLayoutSafe: recovered layout still invalid", .{});
-            }
+            std.log.err("collectDockLayoutSafe: recovered layout still invalid", .{});
         }
 
         if (self.buildSingleTabPanelLayout(manager, dock_area, out)) {
-            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                std.log.info("collectDockLayoutSafe: single-tab fallback used", .{});
-            }
             return true;
         }
-        if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-            std.log.warn("collectDockLayoutSafe: single-tab fallback failed", .{});
-        }
+        std.log.err("collectDockLayoutSafe: single-tab fallback failed", .{});
         return false;
     }
 
