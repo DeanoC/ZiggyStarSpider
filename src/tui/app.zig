@@ -124,28 +124,26 @@ pub const AppState = struct {
 
         const client = &self.ws_client.?;
 
-        var payload = std.ArrayListUnmanaged(u8).empty;
-        defer payload.deinit(self.allocator);
-
-        try payload.appendSlice(self.allocator, "{\"type\":\"chat.send\",");
-        if (client.session_key) |key| {
-            try payload.appendSlice(self.allocator, "\"sessionKey\":\"");
-            try payload.appendSlice(self.allocator, key);
-            try payload.appendSlice(self.allocator, "\",");
-        }
-        try payload.appendSlice(self.allocator, "\"content\":\"");
+        // Build message using proper JSON serialization
+        const MessagePayload = struct {
+            type: []const u8 = "chat.send",
+            sessionKey: ?[]const u8 = null,
+            content: []const u8,
+        };
         
-        // Escape the content
-        for (content) |c| {
-            if (c == '"' or c == '\\') {
-                try payload.append(self.allocator, '\\');
-            }
-            try payload.append(self.allocator, c);
-        }
+        const payload = MessagePayload{
+            .sessionKey = client.session_key,
+            .content = content,
+        };
         
-        try payload.appendSlice(self.allocator, "\"}");
-
-        try client.send(payload.items);
+        var json_buffer = std.ArrayListUnmanaged(u8).empty;
+        defer json_buffer.deinit(self.allocator);
+        
+        // Use std.json.fmt for proper JSON escaping
+        const formatter = std.json.fmt(payload, .{});
+        try std.fmt.format(json_buffer.writer(self.allocator), "{f}", .{formatter});
+        
+        try client.send(json_buffer.items);
 
         // Add to local messages
         const msg = Message{
@@ -164,8 +162,9 @@ pub const AppState = struct {
 
         const client = &self.ws_client.?;
 
-        // Try to read any pending messages with a short timeout (1ms)
-        // This allows non-blocking polling while still checking the socket
+        // Try to read any pending messages with a short timeout
+        // Note: readTimeout sleeps in 10ms increments, so this adds slight latency
+        // A truly non-blocking read would require websocket library changes
         while (client.readTimeout(1) catch |err| {
             // Read failed - mark connection as errored
             self.connection_state = .err;

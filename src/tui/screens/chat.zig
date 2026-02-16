@@ -186,6 +186,7 @@ pub const ChatScreen = struct {
 
     pub fn handleEvent(self: *ChatScreen, event: tui.Event) tui.EventResult {
         // Poll for new messages
+        // Note: This runs on every event and may add ~10ms latency due to websocket readTimeout behavior
         self.state.pollMessages() catch {
             // Poll failed - connection may be down
             // State is already updated in pollMessages, UI will reflect on next render
