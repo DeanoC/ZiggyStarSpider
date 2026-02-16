@@ -75,27 +75,27 @@ pub const EventInjector = struct {
     pub fn init(allocator: std.mem.Allocator) EventInjector {
         return .{
             .allocator = allocator,
-            .events = std.ArrayList(Event).init(allocator),
+            .events = .empty,
         };
     }
     
     pub fn deinit(self: *EventInjector) void {
-        self.events.deinit();
+        self.events.deinit(self.allocator);
     }
     
     /// Add a key event to the queue
     pub fn addKey(self: *EventInjector, key: Key) !void {
-        try self.events.append(.{ .key = .{ .key = key } });
+        try self.events.append(self.allocator, .{ .key = .{ .key = key } });
     }
     
     /// Add a key event with modifiers
     pub fn addKeyWithModifiers(self: *EventInjector, key: Key, modifiers: Modifiers) !void {
-        try self.events.append(.{ .key = .{ .key = key, .modifiers = modifiers } });
+        try self.events.append(self.allocator, .{ .key = .{ .key = key, .modifiers = modifiers } });
     }
     
     /// Add a character key press
     pub fn addChar(self: *EventInjector, char: u8) !void {
-        try self.events.append(.{ .key = .{ .key = .{ .char = char } } });
+        try self.events.append(self.allocator, .{ .key = .{ .key = .{ .char = char } } });
     }
     
     /// Add a string as sequential character presses
@@ -107,7 +107,7 @@ pub const EventInjector = struct {
     
     /// Add Ctrl+key combination
     pub fn addCtrlKey(self: *EventInjector, key: u8) !void {
-        try self.events.append(.{ .key = .{
+        try self.events.append(self.allocator, .{ .key = .{
             .key = .{ .char = key },
             .modifiers = .{ .ctrl = true },
         } });
@@ -115,7 +115,7 @@ pub const EventInjector = struct {
     
     /// Add Alt+key combination
     pub fn addAltKey(self: *EventInjector, key: u8) !void {
-        try self.events.append(.{ .key = .{
+        try self.events.append(self.allocator, .{ .key = .{
             .key = .{ .char = key },
             .modifiers = .{ .alt = true },
         } });
@@ -175,7 +175,7 @@ pub const EventInjector = struct {
     
     /// Add mouse click event
     pub fn addMouseClick(self: *EventInjector, x: u16, y: u16) !void {
-        try self.events.append(.{ .mouse = .{
+        try self.events.append(self.allocator, .{ .mouse = .{
             .button = .left,
             .x = x,
             .y = y,
@@ -184,12 +184,12 @@ pub const EventInjector = struct {
     
     /// Add resize event
     pub fn addResize(self: *EventInjector, width: u16, height: u16) !void {
-        try self.events.append(.{ .resize = .{ .width = width, .height = height } });
+        try self.events.append(self.allocator, .{ .resize = .{ .width = width, .height = height } });
     }
     
     /// Add quit event
     pub fn addQuit(self: *EventInjector) !void {
-        try self.events.append(.quit);
+        try self.events.append(self.allocator, .quit);
     }
     
     /// Get the next event (for mock TUI to call)
@@ -218,7 +218,7 @@ pub const EventInjector = struct {
     
     /// Clear all events
     pub fn clear(self: *EventInjector) void {
-        self.events.clearRetainingCapacity();
+        self.events.clearRetainingCapacity(self.allocator);
         self.event_index = 0;
     }
     

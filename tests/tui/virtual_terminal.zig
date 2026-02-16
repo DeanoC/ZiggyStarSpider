@@ -244,6 +244,11 @@ pub const VirtualTerminal = struct {
         return try allocator.dupe(u8, result.items);
     }
     
+    /// Alias for getAllText - captures the entire screen content
+    pub fn capture(self: *VirtualTerminal, allocator: std.mem.Allocator) ![]u8 {
+        return self.getAllText(allocator);
+    }
+    
     /// Enable alternate screen buffer
     pub fn enableAlternateScreen(self: *VirtualTerminal) void {
         self.alternate_screen = true;
