@@ -11,8 +11,8 @@ pub const MessageType = enum {
 pub fn buildChatSend(allocator: std.mem.Allocator, id: []const u8, content: []const u8, context: ?[]const u8) ![]const u8 {
     if (context) |ctx| {
         return std.fmt.allocPrint(allocator,
-            "{{\"type\":\"chat.send\",\"id\":\"{s}\",\"timestamp\":{d},\"content\":\"{s}\",\"context\":\"{s}\"}}",
-            .{ id, std.time.milliTimestamp(), content, ctx },
+            "{{\"type\":\"chat.send\",\"id\":\"{s}\",\"timestamp\":{d},\"content\":\"{s}\",\"context\":\"{s}\",\"sessionKey\":\"{s}\"}}",
+            .{ id, std.time.milliTimestamp(), content, ctx, ctx },
         );
     }
 

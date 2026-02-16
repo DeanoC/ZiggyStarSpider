@@ -3235,13 +3235,14 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
             self.drawText(
                 rect.min[0] + 8.0,
                 rect.min[1] + 8.0,
-                "Chat panel unavailable: input system not ready",
-                self.theme.colors.text_secondary,
-            );
-            return;
+            "Chat panel unavailable: input system not ready",
+            self.theme.colors.text_secondary,
+        );
+        return;
         }
 
         const pad = self.theme.spacing.sm;
+        const session_key_for_panel: ?[]const u8 = if (self.current_session_key) |key| key else if (self.connection_state == .connected) "main" else null;
         const panel_rect = UiRect.fromMinSize(
             .{ rect.min[0] + pad, rect.min[1] + pad },
             .{
@@ -3256,7 +3257,7 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
             self.allocator,
             &self.chat_panel_state,
             "zss-gui",
-            self.current_session_key,
+            session_key_for_panel,
             self.activeMessages(),
             null,
             null,
