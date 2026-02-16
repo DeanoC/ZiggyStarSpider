@@ -186,7 +186,11 @@ pub const AppState = struct {
             // Handle sessionKey
             if (msg_obj.get("sessionKey")) |sk| {
                 if (sk == .string) {
-                    if (client.session_key) |old| self.allocator.free(old);
+                    if (client.session_key) |old| {
+                        self.allocator.free(old);
+                        // Clear before fallible allocation to avoid double-free on failure
+                        client.session_key = null;
+                    }
                     client.session_key = try self.allocator.dupe(u8, sk.string);
                 }
             }

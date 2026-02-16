@@ -26,6 +26,10 @@ pub const ChatScreen = struct {
         const width = ctx.bounds.width;
         const height = ctx.bounds.height;
 
+        // Poll for new messages during render (called continuously at frame rate)
+        // This ensures messages appear even without key events
+        self.state.pollMessages() catch {};
+
         // Clear background
         ctx.screen.clear();
 
@@ -185,12 +189,7 @@ pub const ChatScreen = struct {
     }
 
     pub fn handleEvent(self: *ChatScreen, event: tui.Event) tui.EventResult {
-        // Poll for new messages
-        // Note: This runs on every event and may add ~10ms latency due to websocket readTimeout behavior
-        self.state.pollMessages() catch {
-            // Poll failed - connection may be down
-            // State is already updated in pollMessages, UI will reflect on next render
-        };
+        // Note: pollMessages is now called in render() for continuous updates
 
         switch (event) {
             .key => |key_event| {
