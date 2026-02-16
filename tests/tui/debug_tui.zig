@@ -279,7 +279,7 @@ pub const MockTui = struct {
             }
         };
 
-        pub fn getScreen(self: *RenderContext) MockScreen {
+        pub fn getScreen(self: *RenderContext) Screen {
             return .{ .term = self.terminal };
         }
     };
