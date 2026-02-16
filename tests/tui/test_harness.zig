@@ -41,7 +41,7 @@ pub const TestHarness = struct {
         var injector = EventInjector.init(allocator);
         errdefer injector.deinit();
         
-        var mock_tui = try MockTui.App.initForTesting(allocator, &terminal, &injector);
+        const mock_tui = try MockTui.App.initForTesting(allocator, &terminal, &injector);
         
         return .{
             .allocator = allocator,
@@ -74,9 +74,9 @@ pub const TestHarness = struct {
         try self.results.append(result);
         
         switch (result) {
-            .passed = > std.debug.print("  ✓ PASSED\n", .{}),
-            .failed = > |f| std.debug.print("  ✗ FAILED: {s} at {s}:{d}\n", .{ f.message, f.file, f.line }),
-            .skipped = > std.debug.print("  ⊘ SKIPPED\n", .{}),
+            .passed => std.debug.print("  ✓ PASSED\n", .{}),
+            .failed => |f| std.debug.print("  ✗ FAILED: {s} at {s}:{d}\n", .{ f.message, f.file, f.line }),
+            .skipped => std.debug.print("  ⊘ SKIPPED\n", .{}),
         }
         
         self.current_test = null;
@@ -163,9 +163,9 @@ pub const TestHarness = struct {
         
         for (self.results.items) |result| {
             switch (result) {
-                .passed = > passed += 1,
-                .failed = > failed += 1,
-                .skipped = > skipped += 1,
+                .passed => passed += 1,
+                .failed => failed += 1,
+                .skipped => skipped += 1,
             }
         }
         

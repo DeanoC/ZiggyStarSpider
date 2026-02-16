@@ -26,9 +26,9 @@ pub const ScreenBuffer = struct {
     }
     
     pub fn deinit(self: *ScreenBuffer) void {
-        for (self.snapshots.items) |snapshot| {
-            self.allocator.free(snapshot.name);
-            self.allocator.free(snapshot.text);
+        for (self.snapshots.items) |snap| {
+            self.allocator.free(snap.name);
+            self.allocator.free(snap.text);
         }
         self.snapshots.deinit();
         self.terminal.deinit();
@@ -110,11 +110,11 @@ pub const ScreenBuffer = struct {
     
     /// Compare current screen with a snapshot
     pub fn compareWithSnapshot(self: *ScreenBuffer, snapshot_name: []const u8) !bool {
-        for (self.snapshots.items) |snapshot| {
-            if (std.mem.eql(u8, snapshot.name, snapshot_name)) {
+        for (self.snapshots.items) |snap| {
+            if (std.mem.eql(u8, snap.name, snapshot_name)) {
                 const current = try self.terminal.getAllText(self.allocator);
                 defer self.allocator.free(current);
-                return std.mem.eql(u8, current, snapshot.text);
+                return std.mem.eql(u8, current, snap.text);
             }
         }
         return error.SnapshotNotFound;

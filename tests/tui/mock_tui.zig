@@ -378,14 +378,4 @@ pub const App = struct {
 };
 
 /// Mock TUI module that aggregates all mock types
-pub const MockTui = struct {
-    pub const Color = Color;
-    pub const Style = Style;
-    pub const Attributes = Attributes;
-    pub const Event = Event;
-    pub const EventResult = EventResult;
-    pub const RenderContext = RenderContext;
-    pub const InputField = InputField;
-    pub const App = App;
-    pub const Theme = Theme;
-};
+pub const MockTui = @This();
