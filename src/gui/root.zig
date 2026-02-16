@@ -418,6 +418,7 @@ const App = struct {
             if (maybe_window) |window| self.destroyUiWindow(window);
         }
         self.ui_windows.deinit(self.allocator);
+        zui.ui.main_window.deinit(self.allocator);
         ui_input_router.deinit(self.allocator);
         ui_sdl_input_backend.deinit();
 
