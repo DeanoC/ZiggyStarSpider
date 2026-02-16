@@ -322,4 +322,32 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // ---------------------------------------------------------------------
+    // TUI Tests
+    // ---------------------------------------------------------------------
+    const tui_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/tui/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const tui_tests = b.addTest(.{
+        .root_module = tui_test_module,
+        .name = "tui_tests",
+    });
+
+    const run_tui_tests = b.addRunArtifact(tui_tests);
+    const test_tui_step = b.step("test-tui", "Run TUI tests (headless)");
+    test_tui_step.dependOn(&run_tui_tests.step);
+
+    // TUI test executable for debugging
+    const tui_test_exe = b.addExecutable(.{
+        .name = "zss-tui-test",
+        .root_module = tui_test_module,
+    });
+    const install_tui_test = b.addInstallArtifact(tui_test_exe, .{});
+    
+    const tui_test_build_step = b.step("build-tui-test", "Build TUI test executable");
+    tui_test_build_step.dependOn(&install_tui_test.step);
 }
