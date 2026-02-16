@@ -12,6 +12,7 @@ const event_injector = @import("event_injector.zig");
 const mock_tui = @import("mock_tui.zig");
 const test_harness = @import("test_harness.zig");
 const test_cases = @import("test_cases.zig");
+const debug_tui = @import("debug_tui.zig");
 
 pub fn main() !void {
     std.debug.print("\n========================================\n", .{});
