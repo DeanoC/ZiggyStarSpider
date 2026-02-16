@@ -284,10 +284,7 @@ pub const App = struct {
 
     pub fn run(self: *App) !void {
         // Auto-connect if configured or URL explicitly provided via CLI
-        const default_url = "ws://127.0.0.1:18790";
-        const url_explicitly_provided = !std.mem.eql(u8, self.state.options.url, default_url);
-        
-        if (url_explicitly_provided) {
+        if (self.state.options.url_explicitly_provided) {
             // CLI --url flag takes precedence
             _ = self.state.connect(self.state.options.url) catch {};
         } else if (self.state.config.auto_connect_on_launch) {

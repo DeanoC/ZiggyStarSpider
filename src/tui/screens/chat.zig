@@ -208,7 +208,11 @@ pub const ChatScreen = struct {
                     .enter => {
                         const content = self.message_input.getValue();
                         if (content.len > 0) {
-                            self.state.sendMessage(content) catch {};
+                            // Only clear input on successful send
+                            self.state.sendMessage(content) catch {
+                                // Send failed - keep the text for retry
+                                return .consumed;
+                            };
                             self.message_input.clear();
                         }
                         return .consumed;
