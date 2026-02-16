@@ -242,6 +242,69 @@ pub fn build(b: *std.Build) void {
     }
 
     // ---------------------------------------------------------------------
+    // TUI executable (opt-in via `zig build tui`)
+    // ---------------------------------------------------------------------
+    // Only fetch TUI dependency when building TUI target
+    const tui_dep = b.lazyDependency("tui", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    if (tui_dep) |dep| {
+        const tui_module = b.createModule(.{
+            .root_source_file = b.path("src/tui/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        tui_module.addImport("tui", dep.module("tui"));
+        tui_module.addImport("websocket", websocket.module("websocket"));
+        tui_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        
+        // Add CLI and client modules for TUI
+        const cli_args_module = b.createModule(.{
+            .root_source_file = b.path("src/cli/args.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        cli_args_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_module.addImport("cli_args", cli_args_module);
+        
+        const client_config_module = b.createModule(.{
+            .root_source_file = b.path("src/client/config.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        client_config_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_module.addImport("client_config", client_config_module);
+        
+        const websocket_client_module = b.createModule(.{
+            .root_source_file = b.path("src/client/websocket.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        websocket_client_module.addImport("websocket", websocket.module("websocket"));
+        websocket_client_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_module.addImport("websocket_client", websocket_client_module);
+
+        const tui_exe = b.addExecutable(.{
+            .name = "zss-tui",
+            .root_module = tui_module,
+        });
+
+        const install_tui = b.addInstallArtifact(tui_exe, .{});
+
+        const tui_step = b.step("tui", "Build the TUI executable");
+        tui_step.dependOn(&install_tui.step);
+
+        const run_tui_cmd = b.addRunArtifact(tui_exe);
+        run_tui_cmd.step.dependOn(&install_tui.step);
+        if (b.args) |args| run_tui_cmd.addArgs(args);
+
+        const run_tui_step = b.step("run-tui", "Run the TUI app");
+        run_tui_step.dependOn(&run_tui_cmd.step);
+    }
+
+    // ---------------------------------------------------------------------
     // Tests
     // ---------------------------------------------------------------------
     const test_module = b.createModule(.{

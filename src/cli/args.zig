@@ -37,8 +37,10 @@ pub const Verb = enum {
 
 pub const Options = struct {
     url: []const u8 = "ws://127.0.0.1:18790",
+    url_explicitly_provided: bool = false,
     project: ?[]const u8 = null,
     interactive: bool = false,
+    tui: bool = false,
     verbose: bool = false,
     show_help: bool = false,
     show_version: bool = false,
@@ -178,6 +180,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
             }
             // Copy the URL string since args will be freed
             options.url = try allocator.dupe(u8, args[i]);
+            options.url_explicitly_provided = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--project")) {
@@ -192,6 +195,10 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
         }
         if (std.mem.eql(u8, arg, "--interactive") or std.mem.eql(u8, arg, "-i")) {
             options.interactive = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--tui")) {
+            options.tui = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--verbose")) {

@@ -16,6 +16,6 @@ pub fn main() !void {
     };
     defer logger.deinit();
 
-    // Run CLI
+    // Run CLI (which may route to TUI based on args)
     try cli.run(allocator);
 }
