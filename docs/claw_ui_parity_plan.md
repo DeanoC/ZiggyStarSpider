@@ -68,14 +68,17 @@ while avoiding risky protocol changes outside GUI scope.
 
 1. Do not alter protocol contracts until stream/session migration is stable.
 2. Preserve single-window safety and avoid large refactors of state/client transport.
-3. Defer full multi-window docking/edge docking parity to dedicated follow-up after chat/state foundations are stable.
+3. Keep multi-window runtime added to Spider and then grow toward Claw parity in smaller increments:
+   - per-window queue/swapchain lifecycle
+   - shared vs independent window workspace state
+   - dock detach/reattach parity.
 
 ## Milestones
 
 1. M1 — Session/message foundation stabilized in Spider UI.
 2. M2 — Settings defaults + startup connect flow harmonized.
 3. M3 — Chat action + stream lifecycle hardening.
-4. M4 — Multi-window strategy design + API migration plan.
+4. M4 — Multi-window detach/reattach parity implementation.
 
 ## Implementation status (now)
 
@@ -86,11 +89,14 @@ while avoiding risky protocol changes outside GUI scope.
 5. ✅ `activeMessages` rendering now favors the current active session with deterministic fallback to first valid session.
 6. ✅ Startup/session settings parity basics are implemented (`auto_connect_on_launch`, `default_session`, `ui_theme`, `ui_profile`, `ui_theme_pack`) and persisted via config.
 7. ✅ Request-scoped stream replacement now tracks active `streaming_request_id` per session and updates stream message content on final chunk.
-8. ✅ `docs/claw_ui_parity_plan.md` is updated and current to implementation status.
-9. Remaining: full multi-window docking/detach parity, richer settings surface (`workspace`-level settings next), and broader stream lifecycle parity for out-of-band/out-of-order stream ids.
+8. ✅ Multi-window lifecycle is implemented in Spider with main-window registration, non-main close routing, and Ctrl+Y window spawning.
+9. ✅ Additional windows now use cloned panel managers from snapshots with workspace remap.
+10. ✅ Detached windows can now carry `persist_in_workspace`, and when enabled close handlers reattach their panels back to the main workspace.
+11. ✅ Dock-tab drag/drop interaction is now wired through thresholded press/drag/release handling with active-tab focus and detach fallback.
+12. ✅ Settings theme persistence is now applied at runtime: loaded theme preference is applied on init and sync/save writes immediately updates active mode.
+13. Remaining: richer settings (`workspace`-level) surface, and broader stream lifestyle parity for out-of-band/out-of-order stream ids.
 
 ## Open questions before next wave
 
-1. Should we keep Claw-incompatible multi-window parity entirely deferred, or add an intermediate “open separate chat windows” plan first?
-2. Do we want to block on protocol confirmation for `chat.history` support before implementing a dedicated request/response flow?
-3. Which settings additions should be shipped next for workspace-level parity (`workspace` profiles, window layout, theme pack browsing/watch UX)?
+1. Do we want to block on protocol confirmation for `chat.history` support before implementing a dedicated request/response flow?
+2. Which settings additions should be shipped next for workspace-level parity (`workspace` profiles, window layout, theme pack browsing/watch UX)?
