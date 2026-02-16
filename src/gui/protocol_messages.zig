@@ -11,8 +11,8 @@ pub const MessageType = enum {
 pub fn buildChatSend(allocator: std.mem.Allocator, id: []const u8, content: []const u8, context: ?[]const u8) ![]const u8 {
     if (context) |ctx| {
         return std.fmt.allocPrint(allocator,
-            "{{\"type\":\"chat.send\",\"id\":\"{s}\",\"timestamp\":{d},\"content\":\"{s}\",\"context\":\"{s}\",\"sessionKey\":\"{s}\"}}",
-            .{ id, std.time.milliTimestamp(), content, ctx, ctx },
+            "{{\"type\":\"chat.send\",\"id\":\"{s}\",\"timestamp\":{d},\"content\":\"{s}\",\"context\":\"{s}\"}}",
+            .{ id, std.time.milliTimestamp(), content, ctx },
         );
     }
 
@@ -33,7 +33,9 @@ pub fn parseMessageType(json: []const u8) ?MessageType {
 
     if (std.mem.eql(u8, type_str, "chat.send")) return .chat_send;
     if (std.mem.eql(u8, type_str, "chat.receive")) return .chat_receive;
+    if (std.mem.eql(u8, type_str, "session.receive")) return .chat_receive;
     if (std.mem.eql(u8, type_str, "chat_ack")) return .chat_ack;
+    if (std.mem.eql(u8, type_str, "session.ack")) return .chat_ack;
     if (std.mem.eql(u8, type_str, "error")) return .error_response;
     return .other;
 }

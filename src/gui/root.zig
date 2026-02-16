@@ -3526,6 +3526,7 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
 
     fn sendChatMessageText(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
+        std.log.info("[GUI] sendChatMessageText: text_len={d} connected={}", .{ text.len, self.ws_client != null });
 
         // Keep a session key for this send
         const session_key = try self.currentSessionOrDefault();
@@ -3561,6 +3562,7 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
             defer self.allocator.free(payload);
 
             client.send(payload) catch |err| {
+                std.log.err("[GUI] sendChatMessageText: websocket send failed: {s}", .{@errorName(err)});
                 const err_text = try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{@errorName(err)});
                 defer self.allocator.free(err_text);
                 try self.appendMessage("system", err_text, null);
@@ -3697,8 +3699,20 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
                 } else if (payload.get("request_id")) |value| switch (value) {
                     .string => value.string,
                     else => null,
+                } else if (root.get("id")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else if (payload.get("id")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
                 } else null;
                 const session_key = if (payload.get("session_key")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else if (payload.get("sessionKey")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else if (root.get("sessionKey")) |value| switch (value) {
                     .string => value.string,
                     else => null,
                 } else null;
@@ -3761,7 +3775,24 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
                 }
             },
             .chat_ack => {
-                // Optional: could clear pending state in the future
+                const request_id = if (root.get("request_id")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else if (root.get("id")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else null;
+
+                if (request_id) |rid| {
+                    if (self.pending_send_request_id) |pending| {
+                        if (std.mem.eql(u8, pending, rid)) {
+                            if (self.pending_send_message_id) |message_id| {
+                                self.setMessageState(message_id, null) catch {};
+                            }
+                            self.clearPendingSend();
+                        }
+                    }
+                }
             },
             .error_response => {
                 const payload = if (root.get("payload")) |payload| switch (payload) {
@@ -4135,6 +4166,7 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
 
     fn handleChatPanelAction(self: *App, action: zui.ChatPanelAction) void {
         if (action.send_message) |message| {
+            std.log.info("[GUI] handleChatPanelAction send_message len={d}", .{message.len});
             defer self.allocator.free(message);
             self.sendChatMessageText(message) catch {};
         }
