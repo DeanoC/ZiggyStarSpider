@@ -97,6 +97,8 @@ pub const AppState = struct {
             if (self.connection_error) |old_err| {
                 self.allocator.free(old_err);
             }
+            // Clear pointer before fallible allocation to avoid use-after-free on failure
+            self.connection_error = null;
             self.connection_error = try std.fmt.allocPrint(self.allocator, "{s}", .{@errorName(err)});
             return err;
         };
@@ -168,6 +170,8 @@ pub const AppState = struct {
             // Read failed - mark connection as errored
             self.connection_state = .err;
             if (self.connection_error) |old| self.allocator.free(old);
+            // Clear pointer before fallible allocation to avoid use-after-free on failure
+            self.connection_error = null;
             self.connection_error = try std.fmt.allocPrint(self.allocator, "Read error: {s}", .{@errorName(err)});
             return err;
         }) |response| {
