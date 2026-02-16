@@ -20,6 +20,16 @@ pub fn main() !void {
     };
     defer options.deinit(allocator);
 
+    // Handle help/version flags
+    if (options.show_help) {
+        cli_args.printHelp();
+        return;
+    }
+    if (options.show_version) {
+        cli_args.printVersion();
+        return;
+    }
+
     var app = try App.init(allocator, options);
     defer app.deinit();
 

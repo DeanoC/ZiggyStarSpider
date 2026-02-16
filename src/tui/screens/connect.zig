@@ -9,10 +9,16 @@ pub const ConnectScreen = struct {
     url_input: tui.InputField,
     
     pub fn init(state: *AppState) ConnectScreen {
-        const default_url = state.config.server_url;
+        // Use effective URL: CLI --url > connect_host_override > server_url
+        const effective_url = if (state.options.url_explicitly_provided)
+            state.options.url
+        else if (state.config.connect_host_override) |host|
+            host
+        else
+            state.config.server_url;
         
         var url_input = tui.InputField.init(state.allocator);
-        url_input.setValue(default_url) catch {};
+        url_input.setValue(effective_url) catch {};
         url_input.placeholder = "ws://127.0.0.1:18790";
         
         return .{
