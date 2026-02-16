@@ -216,7 +216,7 @@ pub const WebSocketClient = struct {
 
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
         if (self.client == null) return error.NotConnected;
-        std.log.info("[WS] Sending {d} bytes: {s}", .{ payload.len, payload });
+        std.log.info("[WS] Sending {d} bytes", .{ payload.len });
         if (self.client) |*client| {
             client.write(@constCast(payload)) catch |err| {
                 std.log.err("[WS] Send failed: {s}", .{@errorName(err)});

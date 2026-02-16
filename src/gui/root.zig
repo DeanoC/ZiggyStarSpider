@@ -1889,7 +1889,7 @@ fn collectDockTabGeometry(
             // Drain all available messages (non-blocking, like ZSC)
             while (client.tryReceive()) |msg| {
                 count += 1;
-                std.log.info("[ZSS] Received raw ({d} bytes): {s}", .{ msg.len, msg });
+                std.log.info("[ZSS] Received frame ({d} bytes)", .{ msg.len });
                 defer self.allocator.free(msg);
 
                 self.handleIncomingMessage(msg) catch |err| {
