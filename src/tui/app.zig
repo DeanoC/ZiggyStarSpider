@@ -164,7 +164,13 @@ pub const AppState = struct {
 
         // Try to read any pending messages with a short timeout (1ms)
         // This allows non-blocking polling while still checking the socket
-        while (try client.readTimeout(1)) |response| {
+        while (client.readTimeout(1) catch |err| {
+            // Read failed - mark connection as errored
+            self.connection_state = .err;
+            if (self.connection_error) |old| self.allocator.free(old);
+            self.connection_error = try std.fmt.allocPrint(self.allocator, "Read error: {s}", .{@errorName(err)});
+            return err;
+        }) |response| {
             defer self.allocator.free(response);
 
             // Try to parse message

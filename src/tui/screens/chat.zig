@@ -186,7 +186,10 @@ pub const ChatScreen = struct {
 
     pub fn handleEvent(self: *ChatScreen, event: tui.Event) tui.EventResult {
         // Poll for new messages
-        self.state.pollMessages() catch {};
+        self.state.pollMessages() catch {
+            // Poll failed - connection may be down
+            // State is already updated in pollMessages, UI will reflect on next render
+        };
 
         switch (event) {
             .key => |key_event| {

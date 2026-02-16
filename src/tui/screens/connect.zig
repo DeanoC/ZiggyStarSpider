@@ -125,9 +125,11 @@ pub const ConnectScreen = struct {
         };
         
         const help_x = if (width > help_text.len) @divTrunc(width - @as(u16, @intCast(help_text.len)), 2) else 0;
-        ctx.screen.moveCursor(help_x, height - 2);
-        ctx.screen.setStyle(help_style);
-        ctx.screen.putString(help_text);
+        if (height > 2) {
+            ctx.screen.moveCursor(help_x, height - 2);
+            ctx.screen.setStyle(help_style);
+            ctx.screen.putString(help_text);
+        }
     }
 
     pub fn handleEvent(self: *ConnectScreen, event: tui.Event) tui.EventResult {
