@@ -1729,8 +1729,6 @@ const App = struct {
                 );
             }
             manager.next_panel_id = &self.next_panel_id;
-            manager.trusted_next_panel_id = &self.next_panel_id;
-            manager.local_next_panel_id = self.next_panel_id;
         }
     }
 
