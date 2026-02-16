@@ -155,12 +155,14 @@ pub const ChatScreen = struct {
             
             // Render content (truncated if needed)
             const content_x = 2 + @as(u16, @intCast(msg.sender.len)) + 2;
-            const max_content_width = width - content_x - 2;
+            const max_content_width = if (width > content_x + 2) width - content_x - 2 else 0;
             
             ctx.screen.setStyle(tui.Style{ .fg = tui.Color.white });
             
-            if (msg.content.len <= max_content_width) {
-                ctx.screen.putString(msg.content);
+            if (max_content_width == 0 or msg.content.len <= max_content_width) {
+                if (max_content_width > 0) {
+                    ctx.screen.putString(msg.content);
+                }
             } else {
                 // Reserve space for ellipsis
                 const trunc_width = if (max_content_width > 3) max_content_width - 3 else 0;
