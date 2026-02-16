@@ -162,9 +162,9 @@ pub const AppState = struct {
 
         const client = &self.ws_client.?;
 
-        // Try to read any pending messages with a short timeout (non-blocking)
-        // Only process messages that are already available, don't wait
-        while (try client.readTimeout(0)) |response| {
+        // Try to read any pending messages with a short timeout (1ms)
+        // This allows non-blocking polling while still checking the socket
+        while (try client.readTimeout(1)) |response| {
             defer self.allocator.free(response);
 
             // Try to parse message

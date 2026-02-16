@@ -63,46 +63,52 @@ pub const ChatScreen = struct {
         }
 
         // Message area
-        const message_area_height = height - 4;
+        const message_area_height = if (height > 4) height - 4 else 0;
         const message_area_y = 2;
         
         // Draw message border
-        self.renderMessageArea(ctx, width, message_area_height, message_area_y);
-
-        // Input area separator
-        const input_y = height - 2;
-        ctx.screen.moveCursor(0, input_y - 1);
-        ctx.screen.setStyle(tui.Style{ .fg = tui.Color.gray });
-        for (0..width) |_| {
-            ctx.screen.putString("─");
+        if (message_area_height > 0) {
+            self.renderMessageArea(ctx, width, message_area_height, message_area_y);
         }
 
-        // Input label
-        ctx.screen.moveCursor(2, input_y);
-        ctx.screen.setStyle(tui.Style{ .fg = tui.Color.white });
-        ctx.screen.putString("> ");
+        // Input area separator
+        const input_y = if (height > 2) height - 2 else 0;
+        if (input_y > 1) {
+            ctx.screen.moveCursor(0, input_y - 1);
+            ctx.screen.setStyle(tui.Style{ .fg = tui.Color.gray });
+            for (0..width) |_| {
+                ctx.screen.putString("─");
+            }
+
+            // Input label
+            ctx.screen.moveCursor(2, input_y);
+            ctx.screen.setStyle(tui.Style{ .fg = tui.Color.white });
+            ctx.screen.putString("> ");
+        }
 
         // Input field
-        var input_ctx = tui.RenderContext{
-            .screen = ctx.screen,
-            .theme = ctx.theme,
-            .bounds = .{
-                .x = 4,
-                .y = input_y,
-                .width = width - 6,
-                .height = 1,
-            },
-            .clip = .{
-                .x = 4,
-                .y = input_y,
-                .width = width - 6,
-                .height = 1,
-            },
-            .focused_id = null,
-            .time_ns = ctx.time_ns,
-        };
-        
-        self.message_input.render(&input_ctx);
+        if (input_y > 0 and width > 6) {
+            var input_ctx = tui.RenderContext{
+                .screen = ctx.screen,
+                .theme = ctx.theme,
+                .bounds = .{
+                    .x = 4,
+                    .y = input_y,
+                    .width = width - 6,
+                    .height = 1,
+                },
+                .clip = .{
+                    .x = 4,
+                    .y = input_y,
+                    .width = width - 6,
+                    .height = 1,
+                },
+                .focused_id = null,
+                .time_ns = ctx.time_ns,
+            };
+            
+            self.message_input.render(&input_ctx);
+        }
 
         // Help text
         const help_text = "Enter: Send | Ctrl+D: Disconnect | Ctrl+C: Quit";
@@ -110,9 +116,11 @@ pub const ChatScreen = struct {
             .fg = tui.Color.gray,
         };
         
-        ctx.screen.moveCursor(2, height - 1);
-        ctx.screen.setStyle(help_style);
-        ctx.screen.putString(help_text);
+        if (height > 1) {
+            ctx.screen.moveCursor(2, height - 1);
+            ctx.screen.setStyle(help_style);
+            ctx.screen.putString(help_text);
+        }
     }
 
     fn renderMessageArea(self: *ChatScreen, ctx: *tui.RenderContext, width: u16, height: u16, y_offset: u16) void {
