@@ -897,14 +897,12 @@ const App = struct {
         const split_drag = &ui_window.ui_state.split_drag;
         var changed = false;
 
-        const hovered = findSplitterAt(splitters, queue.state.mouse_pos);
-
         for (queue.events.items) |evt| {
             switch (evt) {
                 .focus_lost => split_drag.clear(),
                 .mouse_down => |md| {
                     if (md.button != .left) continue;
-                    if (hovered) |splitter| {
+                    if (findSplitterAt(splitters, md.pos)) |splitter| {
                         split_drag.node_id = splitter.node_id;
                         split_drag.axis = splitter.axis;
                     }
@@ -958,6 +956,7 @@ const App = struct {
         const drag_state = &ui_window.ui_state.dock_drag;
         var out = DockInteractionResult{};
         var left_release = false;
+        var mouse_up_pos: ?[2]f32 = null;
 
         for (queue.events.items) |evt| {
             switch (evt) {
@@ -981,7 +980,10 @@ const App = struct {
                     }
                 },
                 .mouse_up => |mu| {
-                    if (mu.button == .left) left_release = true;
+                    if (mu.button == .left) {
+                        left_release = true;
+                        mouse_up_pos = mu.pos;
+                    }
                 },
                 else => {},
             }
@@ -1005,7 +1007,7 @@ const App = struct {
 
         if (left_release and drag_state.panel_id != null) {
             const drag_panel_id = drag_state.panel_id.?;
-            const release_pos = queue.state.mouse_pos;
+            const release_pos = mouse_up_pos orelse queue.state.mouse_pos;
             if (drag_state.dragging) {
                 if (drop_targets.findAt(release_pos)) |target| {
                     const changed = if (target.location == .center)
