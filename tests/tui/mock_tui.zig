@@ -109,12 +109,12 @@ pub const InputField = struct {
     pub fn init(allocator: std.mem.Allocator) InputField {
         return .{
             .allocator = allocator,
-            .buffer = std.ArrayList(u8).init(allocator),
+            .buffer = .empty,
         };
     }
     
     pub fn deinit(self: *InputField) void {
-        self.buffer.deinit();
+        self.buffer.deinit(self.allocator);
         if (self.placeholder) |p| {
             self.allocator.free(p);
         }
@@ -122,7 +122,7 @@ pub const InputField = struct {
     
     pub fn setValue(self: *InputField, value: []const u8) !void {
         self.buffer.clearRetainingCapacity();
-        try self.buffer.appendSlice(value);
+        try self.buffer.appendSlice(self.allocator, value);
         self.cursor_pos = value.len;
     }
     
@@ -136,7 +136,7 @@ pub const InputField = struct {
     }
     
     pub fn insertChar(self: *InputField, char: u8) !void {
-        try self.buffer.insert(self.cursor_pos, char);
+        try self.buffer.insert(self.allocator, self.cursor_pos, char);
         self.cursor_pos += 1;
     }
     

@@ -21,7 +21,7 @@ pub const ScreenBuffer = struct {
         return .{
             .allocator = allocator,
             .terminal = try VirtualTerminal.init(allocator, width, height),
-            .snapshots = std.ArrayList(Snapshot).init(allocator),
+            .snapshots = .empty,
         };
     }
     
@@ -30,7 +30,7 @@ pub const ScreenBuffer = struct {
             self.allocator.free(snap.name);
             self.allocator.free(snap.text);
         }
-        self.snapshots.deinit();
+        self.snapshots.deinit(self.allocator);
         self.terminal.deinit();
     }
     
@@ -42,7 +42,7 @@ pub const ScreenBuffer = struct {
         const name_copy = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_copy);
         
-        try self.snapshots.append(.{
+        try self.snapshots.append(self.allocator, .{
             .name = name_copy,
             .text = text,
             .timestamp = std.time.timestamp(),

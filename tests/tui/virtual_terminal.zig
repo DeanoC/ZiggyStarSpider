@@ -174,18 +174,18 @@ pub const VirtualTerminal = struct {
     pub fn getRowString(self: *VirtualTerminal, y: u16, allocator: std.mem.Allocator) ![]u8 {
         if (y >= self.height) return error.OutOfBounds;
         
-        var result = std.ArrayList(u8).init(allocator);
-        defer result.deinit();
+        var result: std.ArrayList(u8) = .empty;
+        defer result.deinit(allocator);
         
         const row_start = y * self.width;
         for (0..self.width) |x| {
             const cell = self.cells[row_start + x];
             if (cell.char <= 0x7F) {
-                try result.append(@intCast(cell.char));
+                try result.append(allocator, @intCast(cell.char));
             } else {
                 var buf: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(cell.char, &buf) catch continue;
-                try result.appendSlice(buf[0..len]);
+                try result.appendSlice(allocator, buf[0..len]);
             }
         }
         
@@ -229,15 +229,15 @@ pub const VirtualTerminal = struct {
     
     /// Get all text on screen as a single string
     pub fn getAllText(self: *VirtualTerminal, allocator: std.mem.Allocator) ![]u8 {
-        var result = std.ArrayList(u8).init(allocator);
-        defer result.deinit();
+        var result: std.ArrayList(u8) = .empty;
+        defer result.deinit(allocator);
         
         for (0..self.height) |y| {
             const row = try self.getRowString(@intCast(y), allocator);
             defer allocator.free(row);
             if (row.len > 0) {
-                if (result.items.len > 0) try result.append('\n');
-                try result.appendSlice(row);
+                if (result.items.len > 0) try result.append(allocator, '\n');
+                try result.appendSlice(allocator, row);
             }
         }
         
