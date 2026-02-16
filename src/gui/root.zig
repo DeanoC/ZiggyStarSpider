@@ -13,7 +13,6 @@ const ui_input_router = zui.ui.input.input_router;
 const ui_input_state = zui.ui.input.input_state;
 const ui_input_backend = zui.ui.input.input_backend;
 const ui_sdl_input_backend = zui.ui.input.sdl_input_backend;
-const ui_main_window = zui.ui.main_window;
 const ui_command_inbox = zui.ui.ui_command_inbox;
 const ui_command_queue = zui.ui.render.command_queue;
 const client_state = zui.client.state;
@@ -112,6 +111,12 @@ const DockTabHit = struct {
     rect: UiRect,
 };
 
+const DockDropTarget = struct {
+    node_id: dock_graph.NodeId,
+    location: dock_graph.DropLocation,
+    rect: UiRect,
+};
+
 const DockTabHitList = struct {
     items: [96]DockTabHit = undefined,
     len: usize = 0,
@@ -127,6 +132,44 @@ const DockTabHitList = struct {
     }
 };
 
+const DockDropTargetList = struct {
+    items: [96]DockDropTarget = undefined,
+    len: usize = 0,
+
+    fn append(self: *DockDropTargetList, item: DockDropTarget) void {
+        if (self.len >= self.items.len) return;
+        self.items[self.len] = item;
+        self.len += 1;
+    }
+
+    fn findAt(self: *const DockDropTargetList, pos: [2]f32) ?DockDropTarget {
+        for (self.items[0..self.len]) |tgt| {
+            if (tgt.location != .center) continue;
+            if (tgt.rect.contains(pos)) return tgt;
+        }
+        for (self.items[0..self.len]) |tgt| {
+            if (tgt.location == .center) continue;
+            if (tgt.rect.contains(pos)) return tgt;
+        }
+        return null;
+    }
+
+    fn clear(self: *DockDropTargetList) void {
+        self.len = 0;
+    }
+};
+
+const DockInteractionResult = struct {
+    focus_panel_id: ?workspace.PanelId = null,
+    changed_layout: bool = false,
+    detach_panel_id: ?workspace.PanelId = null,
+};
+
+const WindowMouseHit = struct {
+    win: *UiWindow,
+    local_pos: [2]f32,
+};
+
 fn findTabHitAt(tab_hits: *const DockTabHitList, pos: [2]f32) ?DockTabHit {
     var idx = tab_hits.len;
     while (idx > 0) {
@@ -135,6 +178,16 @@ fn findTabHitAt(tab_hits: *const DockTabHitList, pos: [2]f32) ?DockTabHit {
         if (hit.rect.contains(pos)) return hit;
     }
     return null;
+}
+
+fn dockDropTargetLabel(location: dock_graph.DropLocation) []const u8 {
+    return switch (location) {
+        .center => "Dock Center",
+        .left => "Dock Left",
+        .right => "Dock Right",
+        .top => "Dock Top",
+        .bottom => "Dock Bottom",
+    };
 }
 
 
@@ -186,6 +239,9 @@ const App = struct {
     mouse_clicked: bool = false,
     mouse_released: bool = false,
     render_input_queue: ?*ui_input_state.InputQueue = null,
+    frame_dt_seconds: f32 = 1.0 / 60.0,
+
+    pending_close_window_id: ?u32 = null,
 
     message_counter: u64 = 0,
     debug_frame_counter: u64 = 0,
@@ -473,6 +529,11 @@ const App = struct {
                 };
             }
 
+            if (self.pending_close_window_id) |window_id| {
+                self.pending_close_window_id = null;
+                self.closeUiWindowById(window_id);
+            }
+
             try self.pollWebSocket();
             self.frame_clock.endFrame();
         }
@@ -751,50 +812,166 @@ const App = struct {
             }
         }
 
-        try self.handleDockTabInput(queue, ui_window, manager);
+        var dock_area = self.dockViewportForWindow(ui_window) orelse blk: {
+            var fb_w: c_int = 0;
+            var fb_h: c_int = 0;
+            _ = c.SDL_GetWindowSizeInPixels(ui_window.window, &fb_w, &fb_h);
+            break :blk UiRect.fromMinSize(
+                .{ 0.0, 0.0 },
+                .{
+                    if (fb_w > 0) @floatFromInt(fb_w) else 1.0,
+                    if (fb_h > 0) @floatFromInt(fb_h) else 1.0,
+                },
+            );
+        };
+        const dock_area_size = dock_area.size();
+        if (dock_area_size[0] <= 1.0 or dock_area_size[1] <= 1.0) {
+            var fb_w: c_int = 0;
+            var fb_h: c_int = 0;
+            _ = c.SDL_GetWindowSizeInPixels(ui_window.window, &fb_w, &fb_h);
+            dock_area = UiRect.fromMinSize(
+                .{ 0.0, 0.0 },
+                .{
+                    if (fb_w > 0) @floatFromInt(fb_w) else 1.0,
+                    if (fb_h > 0) @floatFromInt(fb_h) else 1.0,
+                },
+            );
+        }
+
+        var tab_hits = DockTabHitList{};
+        var drop_targets = DockDropTargetList{};
+        self.collectDockInteractionGeometry(manager, dock_area, &tab_hits, &drop_targets);
+
+        const splitters = manager.workspace.dock_layout.computeSplitters(dock_area);
+        if (self.handleDockSplitInteractions(queue, ui_window, manager, &splitters)) {
+            manager.workspace.markDirty();
+        }
+
+        const dock_result = self.handleDockTabInteractions(
+            queue,
+            manager,
+            ui_window,
+            &tab_hits,
+            &drop_targets,
+            dock_area,
+        );
+        if (dock_result.changed_layout) {
+            manager.workspace.markDirty();
+        }
+        if (dock_result.focus_panel_id) |panel_id| {
+            manager.focusPanel(panel_id);
+        }
+        if (dock_result.detach_panel_id) |panel_id| {
+            self.handleDockDetachRequest(ui_window, panel_id);
+        }
     }
 
-    fn handleDockTabInput(
+    fn findSplitterAt(splitters: *const dock_graph.SplitterResult, pos: [2]f32) ?dock_graph.Splitter {
+        var idx: usize = splitters.len;
+        while (idx > 0) {
+            idx -= 1;
+            const splitter = splitters.splitters[idx];
+            if (splitter.handle_rect.contains(pos)) return splitter;
+        }
+        return null;
+    }
+
+    fn findSplitterByNode(
+        splitters: *const dock_graph.SplitterResult,
+        node_id: dock_graph.NodeId,
+    ) ?dock_graph.Splitter {
+        for (splitters.slice()) |splitter| {
+            if (splitter.node_id == node_id) return splitter;
+        }
+        return null;
+    }
+
+    fn handleDockSplitInteractions(
         self: *App,
         queue: *ui_input_state.InputQueue,
         ui_window: *UiWindow,
         manager: *panel_manager.PanelManager,
-    ) !void {
-        if (queue.events.items.len == 0) return;
+        splitters: *const dock_graph.SplitterResult,
+    ) bool {
+        _ = self;
+        const split_drag = &ui_window.ui_state.split_drag;
+        var changed = false;
 
-        const drag_threshold_sq: f32 = 16.0;
+        for (queue.events.items) |evt| {
+            switch (evt) {
+                .focus_lost => split_drag.clear(),
+                .mouse_down => |md| {
+                    if (md.button != .left) continue;
+                    if (findSplitterAt(splitters, md.pos)) |splitter| {
+                        split_drag.node_id = splitter.node_id;
+                        split_drag.axis = splitter.axis;
+                    }
+                },
+                .mouse_up => |mu| {
+                    if (mu.button == .left) split_drag.clear();
+                },
+                else => {},
+            }
+        }
 
-        var fb_w: c_int = 0;
-        var fb_h: c_int = 0;
-        _ = c.SDL_GetWindowSizeInPixels(ui_window.window, &fb_w, &fb_h);
-        const dock_area = UiRect.fromMinSize(
-            .{ 0.0, 0.0 },
-            .{
-                if (fb_w > 0) @floatFromInt(fb_w) else 1.0,
-                if (fb_h > 0) @floatFromInt(fb_h) else 1.0,
-            },
-        );
+        const dragging_node = split_drag.node_id orelse return changed;
+        const active_splitter = findSplitterByNode(splitters, dragging_node) orelse {
+            split_drag.clear();
+            return changed;
+        };
 
-        var tab_hits = DockTabHitList{};
-        self.collectDockTabGeometry(manager, dock_area, &tab_hits);
+        const container = active_splitter.container_rect;
+        const size = container.size();
+        const min_px: f32 = 120.0;
 
+        if (active_splitter.axis == .vertical and size[0] > 0.0) {
+            const min_ratio = std.math.clamp(min_px / size[0], 0.05, 0.45);
+            const max_ratio = 1.0 - min_ratio;
+            const ratio = std.math.clamp((queue.state.mouse_pos[0] - container.min[0]) / size[0], min_ratio, max_ratio);
+            if (manager.workspace.dock_layout.setSplitRatio(active_splitter.node_id, ratio)) {
+                changed = true;
+            }
+        } else if (active_splitter.axis == .horizontal and size[1] > 0.0) {
+            const min_ratio = std.math.clamp(min_px / size[1], 0.05, 0.45);
+            const max_ratio = 1.0 - min_ratio;
+            const ratio = std.math.clamp((queue.state.mouse_pos[1] - container.min[1]) / size[1], min_ratio, max_ratio);
+            if (manager.workspace.dock_layout.setSplitRatio(active_splitter.node_id, ratio)) {
+                changed = true;
+            }
+        }
+
+        if (!queue.state.mouse_down_left) split_drag.clear();
+        return changed;
+    }
+
+    fn handleDockTabInteractions(
+        self: *App,
+        queue: *ui_input_state.InputQueue,
+        manager: *panel_manager.PanelManager,
+        ui_window: *UiWindow,
+        tab_hits: *const DockTabHitList,
+        drop_targets: *const DockDropTargetList,
+        dock_rect: UiRect,
+    ) DockInteractionResult {
         const drag_state = &ui_window.ui_state.dock_drag;
+        var out = DockInteractionResult{};
         var left_release = false;
-        var release_pos = queue.state.mouse_pos;
+        var mouse_up_pos: ?[2]f32 = null;
 
         for (queue.events.items) |evt| {
             switch (evt) {
                 .focus_lost => {
                     if (drag_state.panel_id) |pid| {
                         if (drag_state.dragging) {
-                            self.detachPanelToNewWindow(ui_window, pid);
+                            out.detach_panel_id = pid;
+                            out.focus_panel_id = pid;
                         }
                     }
                     drag_state.clear();
                 },
                 .mouse_down => |md| {
                     if (md.button != .left) continue;
-                    if (findTabHitAt(&tab_hits, md.pos)) |hit| {
+                    if (findTabHitAt(tab_hits, md.pos)) |hit| {
                         drag_state.panel_id = hit.panel_id;
                         drag_state.source_node_id = hit.node_id;
                         drag_state.source_tab_index = hit.tab_index;
@@ -805,17 +982,16 @@ const App = struct {
                 .mouse_up => |mu| {
                     if (mu.button == .left) {
                         left_release = true;
-                        release_pos = mu.pos;
+                        mouse_up_pos = mu.pos;
                     }
                 },
                 else => {},
             }
         }
 
-        if (drag_state.panel_id) |pid| {
-            if (self.findPanelById(manager, pid) == null) {
+        if (drag_state.panel_id) |panel_id| {
+            if (self.findPanelById(manager, panel_id) == null) {
                 drag_state.clear();
-                return;
             }
         }
 
@@ -823,52 +999,310 @@ const App = struct {
             if (!drag_state.dragging) {
                 const dx = queue.state.mouse_pos[0] - drag_state.press_pos[0];
                 const dy = queue.state.mouse_pos[1] - drag_state.press_pos[1];
-                if (dx * dx + dy * dy >= drag_threshold_sq) {
+                if (dx * dx + dy * dy >= 16.0) {
                     drag_state.dragging = true;
                 }
             }
         }
 
-        const should_finalize = left_release or
-            (drag_state.panel_id != null and !queue.state.mouse_down_left);
-        if (!should_finalize) return;
-
-        const drag_panel_id = drag_state.panel_id orelse {
-            drag_state.clear();
-            return;
-        };
-
-        if (drag_state.dragging) {
-            const target = dock_drop.pickDropTarget(&manager.workspace.dock_layout, dock_area, release_pos);
-            if (target) |drop_target| {
-                const changed = if (drop_target.location == .center)
-                    manager.workspace.dock_layout.movePanelToTabs(drag_panel_id, drop_target.node_id, null) catch false
-                else
-                    manager.workspace.dock_layout.splitNodeWithPanel(
-                        drop_target.node_id,
-                        drag_panel_id,
-                        drop_target.location,
-                    ) catch false;
-                const repaired_layout = manager.workspace.syncDockLayout() catch false;
-                if (changed or repaired_layout) {
-                    manager.workspace.markDirty();
+        if (left_release and drag_state.panel_id != null) {
+            const drag_panel_id = drag_state.panel_id.?;
+            const release_pos = mouse_up_pos orelse queue.state.mouse_pos;
+            if (drag_state.dragging) {
+                if (drop_targets.findAt(release_pos)) |target| {
+                    const changed = if (target.location == .center)
+                        manager.workspace.dock_layout.movePanelToTabs(drag_panel_id, target.node_id, null) catch false
+                    else
+                        manager.workspace.dock_layout.splitNodeWithPanel(target.node_id, drag_panel_id, target.location) catch false;
+                    const repaired = manager.workspace.syncDockLayout() catch false;
+                    if (changed or repaired) {
+                        out.changed_layout = true;
+                        out.focus_panel_id = drag_panel_id;
+                    }
+                } else if (!dock_rect.contains(release_pos)) {
+                    out.detach_panel_id = drag_panel_id;
+                    out.focus_panel_id = drag_panel_id;
+                } else {
+                    out.focus_panel_id = drag_panel_id;
                 }
-                manager.focusPanel(drag_panel_id);
-            } else if (!dock_area.contains(release_pos)) {
-                self.detachPanelToNewWindow(ui_window, drag_panel_id);
-            } else {
-                manager.focusPanel(drag_panel_id);
+            } else if (findTabHitAt(tab_hits, release_pos)) |hit| {
+                if (hit.panel_id == drag_panel_id) {
+                    if (manager.workspace.dock_layout.setActiveTab(hit.node_id, hit.tab_index)) {
+                        out.changed_layout = true;
+                    }
+                    out.focus_panel_id = hit.panel_id;
+                }
             }
-        } else if (findTabHitAt(&tab_hits, release_pos)) |hit| {
-            if (manager.workspace.dock_layout.setActiveTab(hit.node_id, hit.tab_index)) {
-                manager.workspace.markDirty();
+            drag_state.clear();
+        } else if (!queue.state.mouse_down_left and drag_state.panel_id != null) {
+            const drag_panel_id = drag_state.panel_id.?;
+            if (drag_state.dragging) {
+                const release_pos = queue.state.mouse_pos;
+                if (drop_targets.findAt(release_pos)) |target| {
+                    const changed = if (target.location == .center)
+                        manager.workspace.dock_layout.movePanelToTabs(drag_panel_id, target.node_id, null) catch false
+                    else
+                        manager.workspace.dock_layout.splitNodeWithPanel(target.node_id, drag_panel_id, target.location) catch false;
+                    const repaired = manager.workspace.syncDockLayout() catch false;
+                    const committed = changed or repaired;
+                    if (committed) {
+                        out.changed_layout = true;
+                        out.focus_panel_id = drag_panel_id;
+                    } else if (!dock_rect.contains(release_pos)) {
+                        out.detach_panel_id = drag_panel_id;
+                        out.focus_panel_id = drag_panel_id;
+                    } else {
+                        out.focus_panel_id = drag_panel_id;
+                    }
+                } else if (!dock_rect.contains(release_pos)) {
+                    out.detach_panel_id = drag_panel_id;
+                    out.focus_panel_id = drag_panel_id;
+                } else {
+                    out.focus_panel_id = drag_panel_id;
+                }
             }
-            manager.focusPanel(hit.panel_id);
-        } else {
-            manager.focusPanel(drag_panel_id);
+            drag_state.clear();
         }
 
-        drag_state.clear();
+        return out;
+    }
+
+    fn handleDockDetachRequest(
+        self: *App,
+        source_window: *UiWindow,
+        panel_id: workspace.PanelId,
+    ) void {
+        const source_manager = self.managerForWindow(source_window);
+        const moved = source_manager.takePanel(panel_id) orelse return;
+        if (source_manager.workspace.syncDockLayout() catch false) {
+            source_manager.workspace.markDirty();
+        }
+
+        const remaining_panel = self.tryAttachPanelToOtherWindow(source_window, moved);
+        if (remaining_panel) |panel| {
+            if (!self.createDetachedWindowFromPanel(source_window, panel)) {
+                source_manager.putPanel(panel) catch {
+                    var tmp = panel;
+                    tmp.deinit(self.allocator);
+                    return;
+                };
+                source_manager.workspace.markDirty();
+                if (source_manager.workspace.syncDockLayout() catch false) {
+                    source_manager.workspace.markDirty();
+                }
+                source_manager.focusPanel(panel.id);
+            } else {
+                self.queueCloseIfNowEmptyDetachedWindow(source_window);
+            }
+        }
+    }
+
+    fn tryAttachPanelToOtherWindow(
+        self: *App,
+        source_window: *UiWindow,
+        panel: workspace.Panel,
+    ) ?workspace.Panel {
+        var target_window: ?*UiWindow = null;
+        var target_local_pos: [2]f32 = .{ 0.0, 0.0 };
+
+        if (self.focusedWindowMouseHit(source_window.id)) |hit| {
+            target_window = hit.win;
+            target_local_pos = hit.local_pos;
+        } else if (self.windowUnderGlobalMouse(source_window.id)) |hit| {
+            target_window = hit.win;
+            target_local_pos = hit.local_pos;
+        } else {
+            return panel;
+        }
+
+        const destination = target_window orelse return panel;
+        const destination_manager = self.managerForWindow(destination);
+        const drop = self.dockDropTargetForWindow(destination, target_local_pos) orelse {
+            const source_manager = self.managerForWindow(source_window);
+            source_manager.putPanel(panel) catch {
+                var tmp = panel;
+                tmp.deinit(self.allocator);
+                return null;
+            };
+            if (source_manager.workspace.syncDockLayout() catch false) {
+                source_manager.workspace.markDirty();
+            }
+            source_manager.focusPanel(panel.id);
+            return null;
+        };
+
+        destination_manager.putPanel(panel) catch {
+            const source_manager = self.managerForWindow(source_window);
+            source_manager.putPanel(panel) catch {
+                var tmp = panel;
+                tmp.deinit(self.allocator);
+                return null;
+            };
+            if (source_manager.workspace.syncDockLayout() catch false) {
+                source_manager.workspace.markDirty();
+            }
+            source_manager.focusPanel(panel.id);
+            return null;
+        };
+        destination_manager.workspace.markDirty();
+        if (destination_manager.workspace.syncDockLayout() catch false) {
+            destination_manager.workspace.markDirty();
+        }
+
+        const moved = if (drop.location == .center)
+            destination_manager.workspace.dock_layout.movePanelToTabs(panel.id, drop.node_id, null) catch false
+        else
+            destination_manager.workspace.dock_layout.splitNodeWithPanel(drop.node_id, panel.id, drop.location) catch false;
+        var moved_final = moved;
+        if (!moved_final and drop.location != .center) {
+            if (destination_manager.workspace.dock_layout.root) |root_id| {
+                moved_final = destination_manager.workspace.dock_layout.splitNodeWithPanel(root_id, panel.id, drop.location) catch false;
+            }
+        }
+
+        const panel_loc = destination_manager.workspace.dock_layout.findPanel(panel.id);
+        const is_reachable = self.panelIsReachableInWindowLayout(destination, panel.id);
+        const side_drop = drop.location != .center;
+        const center_committed = if (!side_drop and panel_loc != null)
+            panel_loc.?.node_id == drop.node_id
+        else
+            false;
+        const side_committed = if (side_drop and panel_loc != null)
+            moved_final and panel_loc.?.node_id != drop.node_id and is_reachable
+        else
+            false;
+        const attach_committed = if (side_drop)
+            side_committed
+        else
+            (moved_final or center_committed) and is_reachable;
+
+        if (attach_committed and panel_loc != null) {
+            destination_manager.focusPanel(panel.id);
+            self.queueCloseIfNowEmptyDetachedWindow(source_window);
+            return null;
+        }
+
+        const restored = destination_manager.takePanel(panel.id) orelse panel;
+        const source_manager = self.managerForWindow(source_window);
+        source_manager.putPanel(restored) catch {
+            var tmp = restored;
+            tmp.deinit(self.allocator);
+            return null;
+        };
+        if (source_manager.workspace.syncDockLayout() catch false) {
+            source_manager.workspace.markDirty();
+        }
+        source_manager.focusPanel(restored.id);
+        return null;
+    }
+
+    fn queueCloseIfNowEmptyDetachedWindow(self: *App, window: *UiWindow) void {
+        if (window.id == self.main_window_id) return;
+        const manager = self.managerForWindow(window);
+        if (manager.workspace.panels.items.len != 0) return;
+        self.pending_close_window_id = window.id;
+    }
+
+    fn dockDropTargetForWindow(
+        self: *App,
+        window: *UiWindow,
+        local_pos: [2]f32,
+    ) ?dock_drop.DropTarget {
+        const viewport = self.dockViewportForWindow(window) orelse return null;
+        if (!viewport.contains(local_pos)) return null;
+        const manager = self.managerForWindow(window);
+        return dock_drop.pickDropTarget(&manager.workspace.dock_layout, viewport, local_pos);
+    }
+
+    fn dockViewportForWindow(self: *App, window: *UiWindow) ?UiRect {
+        _ = self;
+        const viewport = window.ui_state.last_dock_content_rect;
+        const size = viewport.size();
+        if (size[0] <= 1.0 or size[1] <= 1.0) return null;
+        return viewport;
+    }
+
+    fn panelIsReachableInWindowLayout(
+        self: *App,
+        window: *UiWindow,
+        panel_id: workspace.PanelId,
+    ) bool {
+        const manager = self.managerForWindow(window);
+        const loc = manager.workspace.dock_layout.findPanel(panel_id) orelse return false;
+        const viewport = self.dockViewportForWindow(window) orelse return false;
+        const layout = manager.workspace.dock_layout.computeLayout(viewport);
+        for (layout.slice()) |group| {
+            if (group.node_id == loc.node_id) return true;
+        }
+        return false;
+    }
+
+    fn windowUnderGlobalMouse(self: *App, exclude_window_id: u32) ?WindowMouseHit {
+        var mouse_global_x: f32 = 0.0;
+        var mouse_global_y: f32 = 0.0;
+        _ = c.SDL_GetGlobalMouseState(&mouse_global_x, &mouse_global_y);
+
+        var i: usize = self.ui_windows.items.len;
+        while (i > 0) {
+            i -= 1;
+            const window = self.ui_windows.items[i];
+            if (window.id == exclude_window_id) continue;
+
+            var window_x: c_int = 0;
+            var window_y: c_int = 0;
+            _ = c.SDL_GetWindowPosition(window.window, &window_x, &window_y);
+            var border_top: c_int = 0;
+            var border_left: c_int = 0;
+            var border_bottom: c_int = 0;
+            var border_right: c_int = 0;
+            if (!c.SDL_GetWindowBordersSize(window.window, &border_top, &border_left, &border_bottom, &border_right)) {
+                border_top = 0;
+                border_left = 0;
+                border_bottom = 0;
+                border_right = 0;
+            }
+            var window_width: c_int = 0;
+            var window_height: c_int = 0;
+            _ = c.SDL_GetWindowSize(window.window, &window_width, &window_height);
+            if (window_width <= 0 or window_height <= 0) continue;
+
+            const content_x: c_int = window_x + border_left;
+            const content_y: c_int = window_y + border_top;
+            const min_x: f32 = @floatFromInt(content_x);
+            const min_y: f32 = @floatFromInt(content_y);
+            const max_x = min_x + @as(f32, @floatFromInt(window_width));
+            const max_y = min_y + @as(f32, @floatFromInt(window_height));
+            if (mouse_global_x < min_x or mouse_global_x >= max_x or mouse_global_y < min_y or mouse_global_y >= max_y) continue;
+
+            return .{
+                .win = window,
+                .local_pos = .{ mouse_global_x - min_x, mouse_global_y - min_y },
+            };
+        }
+        return null;
+    }
+
+    fn focusedWindowMouseHit(self: *App, exclude_window_id: u32) ?WindowMouseHit {
+        const mouse_focus = c.SDL_GetMouseFocus();
+        const hover_window_id: u32 = if (mouse_focus) |window| c.SDL_GetWindowID(window) else 0;
+        if (hover_window_id == 0 or hover_window_id == exclude_window_id) return null;
+
+        var target_window: ?*UiWindow = null;
+        for (self.ui_windows.items) |window| {
+            if (window.id == hover_window_id) {
+                target_window = window;
+                break;
+            }
+        }
+        if (target_window == null) return null;
+
+        var local_mouse_x: f32 = 0.0;
+        var local_mouse_y: f32 = 0.0;
+        _ = c.SDL_GetMouseState(&local_mouse_x, &local_mouse_y);
+        return .{
+            .win = target_window.?,
+            .local_pos = .{ local_mouse_x, local_mouse_y },
+        };
     }
 
     fn rebuildDockLayoutFromPanels(self: *App, manager: *panel_manager.PanelManager) bool {
@@ -1731,25 +2165,79 @@ const App = struct {
         return true;
     }
 
-fn collectDockTabGeometry(
+    fn collectDockInteractionGeometry(
         self: *App,
         manager: *panel_manager.PanelManager,
         dock_area: UiRect,
-        out: *DockTabHitList,
+        out_tabs: *DockTabHitList,
+        out_drop_targets: *DockDropTargetList,
     ) void {
+        out_tabs.len = 0;
+        out_drop_targets.clear();
+
         var layout: dock_graph.LayoutResult = .{};
         if (!self.collectDockLayoutSafe(manager, dock_area, &layout)) {
             if (self.shouldLogDebug(120)) {
-                std.log.warn("collectDockTabGeometry: no valid dock layout", .{});
+                std.log.warn("collectDockInteractionGeometry: no valid dock layout", .{});
             }
             return;
         }
+
         const pad = self.theme.spacing.sm;
         const tab_height: f32 = 28.0 * self.ui_scale;
         if (tab_height <= 0.0) return;
 
         for (layout.slice()) |group| {
             if (!self.isLayoutGroupUsable(manager, group.node_id)) continue;
+
+            const size = group.rect.size();
+            if (size[0] > 1.0 and size[1] > 1.0) {
+                const edge_ratio = dock_drop.edge_band_ratio;
+                const edge_w = @max(1.0, size[0] * edge_ratio);
+                const edge_h = @max(1.0, size[1] * edge_ratio);
+                const inner_min_x = group.rect.min[0] + edge_w;
+                const inner_max_x = group.rect.max[0] - edge_w;
+                const inner_min_y = group.rect.min[1] + edge_h;
+                const inner_max_y = group.rect.max[1] - edge_h;
+                const center_w = @max(1.0, inner_max_x - inner_min_x);
+                const center_h = @max(1.0, inner_max_y - inner_min_y);
+
+                out_drop_targets.append(.{
+                    .node_id = group.node_id,
+                    .location = .center,
+                    .rect = UiRect.fromMinSize(
+                        .{ inner_min_x, inner_min_y },
+                        .{ center_w, center_h },
+                    ),
+                });
+                out_drop_targets.append(.{
+                    .node_id = group.node_id,
+                    .location = .left,
+                    .rect = UiRect.fromMinSize(group.rect.min, .{ edge_w, size[1] }),
+                });
+                out_drop_targets.append(.{
+                    .node_id = group.node_id,
+                    .location = .right,
+                    .rect = UiRect.fromMinSize(
+                        .{ group.rect.max[0] - edge_w, group.rect.min[1] },
+                        .{ edge_w, size[1] },
+                    ),
+                });
+                out_drop_targets.append(.{
+                    .node_id = group.node_id,
+                    .location = .top,
+                    .rect = UiRect.fromMinSize(group.rect.min, .{ size[0], edge_h }),
+                });
+                out_drop_targets.append(.{
+                    .node_id = group.node_id,
+                    .location = .bottom,
+                    .rect = UiRect.fromMinSize(
+                        .{ group.rect.min[0], group.rect.max[1] - edge_h },
+                        .{ size[0], edge_h },
+                    ),
+                });
+            }
+
             const node = manager.workspace.dock_layout.getNode(group.node_id) orelse continue;
             const tabs_node = switch (node.*) {
                 .tabs => |tabs| tabs,
@@ -1770,7 +2258,7 @@ fn collectDockTabGeometry(
                     .{ tab_width, tab_height },
                 );
                 if (tab_rect.min[0] + tab_width > group.rect.max[0]) break;
-                out.append(.{
+                out_tabs.append(.{
                     .panel_id = panel_id,
                     .node_id = group.node_id,
                     .tab_index = idx,
@@ -2077,6 +2565,8 @@ fn collectDockTabGeometry(
             .{ .fill = self.theme.colors.background },
         );
 
+        ui_window.ui_state.last_dock_content_rect = viewport;
+
         var layout: dock_graph.LayoutResult = .{};
         if (!self.collectDockLayoutSafe(ui_window.manager, viewport, &layout)) {
             if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
@@ -2096,6 +2586,14 @@ fn collectDockTabGeometry(
             if (!self.isLayoutGroupUsable(ui_window.manager, group.node_id)) continue;
             self.drawDockGroup(ui_window.manager, group.node_id, group.rect);
         }
+
+        const splitters = ui_window.manager.workspace.dock_layout.computeSplitters(viewport);
+        self.drawDockSplitters(&ui_window.queue, ui_window, &splitters);
+
+        var drag_tab_hits = DockTabHitList{};
+        var drag_drop_targets = DockDropTargetList{};
+        self.collectDockInteractionGeometry(ui_window.manager, viewport, &drag_tab_hits, &drag_drop_targets);
+        self.drawDockDragOverlay(&ui_window.queue, ui_window.manager, ui_window, &drag_drop_targets, viewport);
 
         // Draw connection status overlay
         self.drawStatusOverlay(fb_width, fb_height);
@@ -2123,6 +2621,7 @@ fn collectDockTabGeometry(
             .{ 0, 0 },
             .{ @floatFromInt(fb_width), @floatFromInt(fb_height) },
         );
+        ui_window.ui_state.last_dock_content_rect = viewport;
 
         self.drawText(
             viewport.min[0] + 12.0,
@@ -2161,6 +2660,94 @@ fn collectDockTabGeometry(
             return;
         }
         self.drawTabsPanel(manager, &tabs_node, rect);
+    }
+
+    fn drawDockSplitters(
+        self: *App,
+        queue: *ui_input_state.InputQueue,
+        ui_window: *UiWindow,
+        splitters: *const dock_graph.SplitterResult,
+    ) void {
+        for (splitters.slice()) |splitter| {
+            const hovered = splitter.handle_rect.contains(queue.state.mouse_pos);
+            const active = ui_window.ui_state.split_drag.node_id != null and ui_window.ui_state.split_drag.node_id.? == splitter.node_id;
+            const fill = if (active)
+                zcolors.withAlpha(self.theme.colors.primary, 0.22)
+            else if (hovered)
+                zcolors.withAlpha(self.theme.colors.primary, 0.12)
+            else
+                zcolors.withAlpha(self.theme.colors.border, 0.08);
+            self.ui_commands.pushRect(
+                .{ .min = splitter.handle_rect.min, .max = splitter.handle_rect.max },
+                .{ .fill = fill },
+            );
+        }
+    }
+
+    fn drawDockDragOverlay(
+        self: *App,
+        queue: *ui_input_state.InputQueue,
+        manager: *panel_manager.PanelManager,
+        ui_window: *UiWindow,
+        drop_targets: *const DockDropTargetList,
+        dock_rect: UiRect,
+    ) void {
+        if (!ui_window.ui_state.dock_drag.dragging) return;
+
+        const hovered_target = drop_targets.findAt(queue.state.mouse_pos);
+        if (hovered_target) |target| {
+            for (drop_targets.items[0..drop_targets.len]) |candidate| {
+                if (candidate.node_id != target.node_id or candidate.location == target.location) continue;
+                self.drawDockDropPreview(candidate, false);
+            }
+            self.drawDockDropPreview(target, true);
+        }
+
+        const panel_id = ui_window.ui_state.dock_drag.panel_id orelse return;
+        const panel = self.findPanelById(manager, panel_id) orelse return;
+        var hint: []const u8 = "No dock target";
+        if (hovered_target) |target| {
+            hint = dockDropTargetLabel(target.location);
+        } else if (!dock_rect.contains(queue.state.mouse_pos)) {
+            hint = "Detach to new window";
+        }
+
+        var label_buf: [256]u8 = undefined;
+        const text = std.fmt.bufPrint(&label_buf, "{s} -> {s}", .{ panel.title, hint }) catch panel.title;
+        const text_w = self.measureText(text);
+        const pad = self.theme.spacing.xs;
+        const label_rect = UiRect.fromMinSize(
+            .{ queue.state.mouse_pos[0] + 14.0, queue.state.mouse_pos[1] + 14.0 },
+            .{ text_w + pad * 2.0, (18.0 * self.ui_scale) + pad * 2.0 },
+        );
+        self.ui_commands.pushRect(
+            .{ .min = label_rect.min, .max = label_rect.max },
+            .{
+                .fill = zcolors.withAlpha(self.theme.colors.background, 0.92),
+                .stroke = zcolors.withAlpha(self.theme.colors.border, 0.9),
+            },
+        );
+        self.drawText(
+            label_rect.min[0] + pad,
+            label_rect.min[1] + pad,
+            text,
+            self.theme.colors.text_primary,
+        );
+    }
+
+    fn drawDockDropPreview(self: *App, target: DockDropTarget, active: bool) void {
+        const fill = if (active)
+            zcolors.withAlpha(self.theme.colors.primary, 0.20)
+        else
+            zcolors.withAlpha(self.theme.colors.primary, 0.07);
+        const stroke = if (active)
+            zcolors.withAlpha(self.theme.colors.primary, 0.86)
+        else
+            zcolors.withAlpha(self.theme.colors.primary, 0.35);
+        self.ui_commands.pushRect(
+            .{ .min = target.rect.min, .max = target.rect.max },
+            .{ .fill = fill, .stroke = stroke },
+        );
     }
 
     fn collectDockLayout(
