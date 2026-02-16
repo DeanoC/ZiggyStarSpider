@@ -436,33 +436,6 @@ const App = struct {
         while (self.running) {
             self.bindMainWindowManager();
             self.debug_frame_counter += 1;
-            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
-                const windows = self.ui_windows.items.len;
-                var panels: usize = 0;
-                var dock_nodes: usize = 0;
-                var dock_root: i64 = -1;
-                if (windows > 0) {
-                    const main_manager = self.managerForWindow(self.ui_windows.items[0]);
-                    panels = self.safeWorkspaceCount(main_manager.workspace.panels.items.len, 4096);
-                    dock_nodes = self.safeWorkspaceCount(main_manager.workspace.dock_layout.nodes.items.len, 16384);
-                    if (main_manager.workspace.dock_layout.root) |root| {
-                        dock_root = @intCast(root);
-                    }
-                }
-                std.log.info("frame={} windows={} panels={} dock_nodes={} dock_root={} sessions={} ws_msgs={} connection={s} status={s}",
-                    .{
-                        self.debug_frame_counter,
-                        windows,
-                        panels,
-                        dock_nodes,
-                        dock_root,
-                        self.chat_sessions.items.len,
-                        self.message_counter,
-                        @tagName(self.connection_state),
-                        self.status_text,
-                    },
-                );
-            }
             _ = self.frame_clock.beginFrame();
             const polled = zapp.sdl_app.pollEventsToInput();
             _ = ui_input_router.beginFrame(self.allocator);

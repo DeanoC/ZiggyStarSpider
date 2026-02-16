@@ -139,12 +139,7 @@ pub const WebSocketClient = struct {
     fn readLoop(self: *WebSocketClient) void {
         std.log.info("[WS] readLoop thread started", .{});
 
-        var loop_count: u64 = 0;
         while (!self.should_stop.load(.acquire)) {
-            loop_count += 1;
-            if (loop_count % 1000 == 0) {
-                std.log.debug("[WS] readLoop still running, iteration {d}", .{loop_count});
-            }
             if (self.client) |*client| {
                 const msg = client.read() catch |err| switch (err) {
                     error.WouldBlock => {
