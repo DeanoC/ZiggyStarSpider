@@ -162,8 +162,9 @@ pub const AppState = struct {
 
         const client = &self.ws_client.?;
 
-        // Try to read any pending messages
-        while (try client.read()) |response| {
+        // Try to read any pending messages with a short timeout (non-blocking)
+        // Only process messages that are already available, don't wait
+        while (try client.readTimeout(0)) |response| {
             defer self.allocator.free(response);
 
             // Try to parse message

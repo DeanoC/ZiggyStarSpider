@@ -154,7 +154,11 @@ pub const ChatScreen = struct {
             if (msg.content.len <= max_content_width) {
                 ctx.screen.putString(msg.content);
             } else {
-                ctx.screen.putString(msg.content[0..max_content_width]);
+                // Reserve space for ellipsis
+                const trunc_width = if (max_content_width > 3) max_content_width - 3 else 0;
+                if (trunc_width > 0) {
+                    ctx.screen.putString(msg.content[0..trunc_width]);
+                }
                 ctx.screen.putString("...");
             }
         }
