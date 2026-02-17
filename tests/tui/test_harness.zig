@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const VirtualTerminal = @import("virtual_terminal.zig").VirtualTerminal;
-const ScreenBuffer = @import("screen_buffer.zig").ScreenBuffer;
 const EventInjector = @import("event_injector.zig").EventInjector;
 const Event = @import("event_injector.zig").Event;
 const MockTui = @import("mock_tui.zig").MockTui;

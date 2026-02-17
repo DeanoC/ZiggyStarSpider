@@ -489,9 +489,8 @@ test "Screen buffer snapshot" {
     harness.getTerminal().clear();
     connect_screen.render(harness.getTerminal());
     
-    // Compare with snapshot - should be different
-    const matches = try harness.getScreen().compareWithSnapshot("initial");
-    try std.testing.expect(!matches);
+    // The terminal should now show connected state
+    try harness.expectText("Connected to Spiderweb");
 }
 
 test "Screen assertions - row content" {
@@ -504,9 +503,10 @@ test "Screen assertions - row content" {
     var connect_screen = MockConnectScreen.init();
     connect_screen.render(harness.getTerminal());
     
-    // Check specific row
-    const assertions = @import("screen_buffer.zig").ScreenAssertions.init(harness.getScreen());
-    try assertions.rowContains(2, "ZiggyStarSpider TUI");
+    // Check specific row content using terminal's row accessor
+    const row_text = try harness.getTerminal().getRowString(2, std.testing.allocator);
+    defer std.testing.allocator.free(row_text);
+    try std.testing.expect(std.mem.containsAtLeast(u8, row_text, 1, "ZiggyStarSpider TUI"));
 }
 
 test "Multiple messages in chat" {
