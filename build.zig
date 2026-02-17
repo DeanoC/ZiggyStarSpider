@@ -322,4 +322,162 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // ---------------------------------------------------------------------
+    // TUI Tests
+    // ---------------------------------------------------------------------
+    const tui_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/tui/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Add TUI dependency to test module if available
+    if (tui_dep) |dep| {
+        tui_test_module.addImport("tui", dep.module("tui"));
+        tui_test_module.addImport("websocket", websocket.module("websocket"));
+        tui_test_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        
+        // Add CLI and client modules for TUI tests
+        const cli_args_module_test = b.createModule(.{
+            .root_source_file = b.path("src/cli/args.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        cli_args_module_test.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_test_module.addImport("cli_args", cli_args_module_test);
+        
+        const client_config_module_test = b.createModule(.{
+            .root_source_file = b.path("src/client/config.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        client_config_module_test.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_test_module.addImport("client_config", client_config_module_test);
+        
+        const websocket_client_module_test = b.createModule(.{
+            .root_source_file = b.path("src/client/websocket.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        websocket_client_module_test.addImport("websocket", websocket.module("websocket"));
+        websocket_client_module_test.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_test_module.addImport("websocket_client", websocket_client_module_test);
+    }
+
+    const tui_tests = b.addTest(.{
+        .root_module = tui_test_module,
+        .name = "tui_tests",
+    });
+
+    const run_tui_tests = b.addRunArtifact(tui_tests);
+    const test_tui_step = b.step("test-tui", "Run TUI tests (headless)");
+    test_tui_step.dependOn(&run_tui_tests.step);
+
+    // TUI test executable for debugging
+    const tui_test_exe = b.addExecutable(.{
+        .name = "zss-tui-test",
+        .root_module = tui_test_module,
+    });
+    const install_tui_test = b.addInstallArtifact(tui_test_exe, .{});
+    
+    const tui_test_build_step = b.step("build-tui-test", "Build TUI test executable");
+    tui_test_build_step.dependOn(&install_tui_test.step);
+
+    // ---------------------------------------------------------------------
+    // TUI Diagnostic Tool
+    // ---------------------------------------------------------------------
+    const tui_diagnostic_module = b.createModule(.{
+        .root_source_file = b.path("src/tui_diagnostic.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Add dependencies for diagnostic tool
+    tui_diagnostic_module.addImport("websocket", websocket.module("websocket"));
+    tui_diagnostic_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    
+    const cli_args_module_diag = b.createModule(.{
+        .root_source_file = b.path("src/cli/args.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_args_module_diag.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    tui_diagnostic_module.addImport("cli_args", cli_args_module_diag);
+    
+    const client_config_module_diag = b.createModule(.{
+        .root_source_file = b.path("src/client/config.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    client_config_module_diag.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    tui_diagnostic_module.addImport("client_config", client_config_module_diag);
+    
+    const websocket_client_module_diag = b.createModule(.{
+        .root_source_file = b.path("src/client/websocket.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    websocket_client_module_diag.addImport("websocket", websocket.module("websocket"));
+    websocket_client_module_diag.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    tui_diagnostic_module.addImport("websocket_client", websocket_client_module_diag);
+    
+    // Add TUI testing framework module
+    const tui_testing_module = b.createModule(.{
+        .root_source_file = b.path("tests/tui/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Add same imports to tui_testing_module as tui_test_module
+    if (tui_dep) |dep| {
+        tui_testing_module.addImport("tui", dep.module("tui"));
+        tui_testing_module.addImport("websocket", websocket.module("websocket"));
+        tui_testing_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        
+        const cli_args_module_testing = b.createModule(.{
+            .root_source_file = b.path("src/cli/args.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        cli_args_module_testing.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_testing_module.addImport("cli_args", cli_args_module_testing);
+        
+        const client_config_module_testing = b.createModule(.{
+            .root_source_file = b.path("src/client/config.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        client_config_module_testing.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_testing_module.addImport("client_config", client_config_module_testing);
+        
+        const websocket_client_module_testing = b.createModule(.{
+            .root_source_file = b.path("src/client/websocket.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        websocket_client_module_testing.addImport("websocket", websocket.module("websocket"));
+        websocket_client_module_testing.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_testing_module.addImport("websocket_client", websocket_client_module_testing);
+    }
+    
+    tui_diagnostic_module.addImport("tui_testing", tui_testing_module);
+    
+    // Add TUI dependency if available (for real TUI types)
+    if (tui_dep) |dep| {
+        tui_diagnostic_module.addImport("tui", dep.module("tui"));
+    }
+
+    const tui_diagnostic_exe = b.addExecutable(.{
+        .name = "zss-tui-diagnostic",
+        .root_module = tui_diagnostic_module,
+    });
+    
+    const install_tui_diagnostic = b.addInstallArtifact(tui_diagnostic_exe, .{});
+
+    const run_tui_diagnostic_cmd = b.addRunArtifact(tui_diagnostic_exe);
+    run_tui_diagnostic_cmd.step.dependOn(&install_tui_diagnostic.step);
+
+    const tui_diagnostic_step = b.step("tui-diagnostic", "Run TUI diagnostic tool (tests components for hang issues)");
+    tui_diagnostic_step.dependOn(&run_tui_diagnostic_cmd.step);
 }
