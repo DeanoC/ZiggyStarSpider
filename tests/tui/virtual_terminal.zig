@@ -323,7 +323,6 @@ pub const VirtualTerminal = struct {
     
     /// Take a snapshot of current screen state (for debugging/comparison)
     pub fn snapshot(self: *VirtualTerminal, name: []const u8) !void {
-        _ = name;
         // For now, just print the snapshot
         std.debug.print("\n=== SNAPSHOT: {s} ===\n", .{name});
         self.debugPrint();
