@@ -393,7 +393,7 @@ test "Event injection - type URL and connect" {
     
     // Verify events were added
     try std.testing.expect(harness.getInjector().hasMoreEvents());
-    try std.testing.expectEqual(@as(usize, 22), harness.getInjector().remainingCount()); // 20 chars + Enter
+    try std.testing.expectEqual(@as(usize, 20), harness.getInjector().remainingCount()); // 19 chars + Enter
 }
 
 test "Event injection - send chat message" {

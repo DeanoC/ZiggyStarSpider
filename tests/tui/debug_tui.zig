@@ -330,8 +330,8 @@ pub const MockTui = struct {
         }
 
         pub fn render(self: *InputField, ctx: *RenderContext) void {
-            const s = ctx.screen();
-            const width = ctx.bounds.width;
+            const s = ctx.getScreen();
+            const width = s.getWidth();
 
             // Draw background
             s.setStyle(.{ .fg = .white, .bg = .default });
@@ -416,7 +416,8 @@ pub const DiagnosticConnectScreen = struct {
         std.debug.print("[DIAG] Creating InputField...\n", .{});
         var url_input = MockTui.InputField.init(state.allocator);
         url_input.setValue(effective_url) catch {};
-        url_input.placeholder = "ws://127.0.0.1:18790";
+        // Allocate placeholder on heap so deinit can free it
+        url_input.placeholder = state.allocator.dupe(u8, "ws://127.0.0.1:18790") catch null;
 
         std.debug.print("[DIAG] ConnectScreen.init() completed\n", .{});
         return .{
