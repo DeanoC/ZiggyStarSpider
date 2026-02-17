@@ -284,6 +284,57 @@ pub const VirtualTerminal = struct {
         
         try writer.print("+{s}+\n", .{"-" ** self.width});
     }
+    
+    // ============================================================================
+    // Assertion helpers for testing
+    // ============================================================================
+    
+    /// Assert that text exists on screen
+    pub fn expectText(self: *VirtualTerminal, expected: []const u8) !void {
+        if (!self.hasText(expected)) {
+            std.debug.print("Expected text not found: '{s}'\n", .{expected});
+            std.debug.print("Screen content:\n", .{});
+            self.debugPrint();
+            return error.TextNotFound;
+        }
+    }
+    
+    /// Assert that text does NOT exist on screen
+    pub fn expectNoText(self: *VirtualTerminal, unexpected: []const u8) !void {
+        if (self.hasText(unexpected)) {
+            std.debug.print("Unexpected text found: '{s}'\n", .{unexpected});
+            std.debug.print("Screen content:\n", .{});
+            self.debugPrint();
+            return error.UnexpectedTextFound;
+        }
+    }
+    
+    /// Assert that terminal contains a pattern (substring match)
+    pub fn expectPattern(self: *VirtualTerminal, pattern: []const u8) !void {
+        const all_text = try self.getAllText(std.testing.allocator);
+        defer std.testing.allocator.free(all_text);
+        
+        if (std.mem.indexOf(u8, all_text, pattern) == null) {
+            std.debug.print("Pattern not found: '{s}'\n", .{pattern});
+            std.debug.print("Screen content:\n{s}\n", .{all_text});
+            return error.PatternNotFound;
+        }
+    }
+    
+    /// Take a snapshot of current screen state (for debugging/comparison)
+    pub fn snapshot(self: *VirtualTerminal, name: []const u8) !void {
+        _ = name;
+        // For now, just print the snapshot
+        std.debug.print("\n=== SNAPSHOT: {s} ===\n", .{name});
+        self.debugPrint();
+        std.debug.print("=== END SNAPSHOT ===\n\n", .{});
+    }
+    
+    /// Print current screen for debugging
+    pub fn debugPrint(self: *VirtualTerminal) void {
+        const stdout = std.io.getStdOut().writer();
+        self.dump(stdout) catch {};
+    }
 };
 
 // ============================================================================

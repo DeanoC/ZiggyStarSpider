@@ -428,6 +428,39 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    
+    // Add same imports to tui_testing_module as tui_test_module
+    if (tui_dep) |dep| {
+        tui_testing_module.addImport("tui", dep.module("tui"));
+        tui_testing_module.addImport("websocket", websocket.module("websocket"));
+        tui_testing_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        
+        const cli_args_module_testing = b.createModule(.{
+            .root_source_file = b.path("src/cli/args.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        cli_args_module_testing.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_testing_module.addImport("cli_args", cli_args_module_testing);
+        
+        const client_config_module_testing = b.createModule(.{
+            .root_source_file = b.path("src/client/config.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        client_config_module_testing.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_testing_module.addImport("client_config", client_config_module_testing);
+        
+        const websocket_client_module_testing = b.createModule(.{
+            .root_source_file = b.path("src/client/websocket.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        websocket_client_module_testing.addImport("websocket", websocket.module("websocket"));
+        websocket_client_module_testing.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_testing_module.addImport("websocket_client", websocket_client_module_testing);
+    }
+    
     tui_diagnostic_module.addImport("tui_testing", tui_testing_module);
     
     // Add TUI dependency if available (for real TUI types)

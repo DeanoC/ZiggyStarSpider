@@ -22,9 +22,9 @@ pub const TestResult = union(enum) {
 
 pub const TestHarness = struct {
     allocator: std.mem.Allocator,
-    terminal: VirtualTerminal,
-    screen: ScreenBuffer,
-    injector: EventInjector,
+    // Heap-allocated to avoid dangling pointers when passed to MockTui.App
+    terminal_ptr: *VirtualTerminal,
+    injector_ptr: *EventInjector,
     mock_tui: MockTui.App,
     
     // Test state
@@ -32,22 +32,25 @@ pub const TestHarness = struct {
     results: std.ArrayList(TestResult),
     
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !TestHarness {
-        var terminal = try VirtualTerminal.init(allocator, width, height);
-        errdefer terminal.deinit();
+        // Allocate terminal on heap to avoid dangling pointers
+        const terminal_ptr = try allocator.create(VirtualTerminal);
+        errdefer allocator.destroy(terminal_ptr);
+        terminal_ptr.* = try VirtualTerminal.init(allocator, width, height);
+        errdefer terminal_ptr.deinit();
         
-        var screen = try ScreenBuffer.init(allocator, width, height);
-        errdefer screen.deinit();
+        // Allocate injector on heap to avoid dangling pointers
+        const injector_ptr = try allocator.create(EventInjector);
+        errdefer allocator.destroy(injector_ptr);
+        injector_ptr.* = EventInjector.init(allocator);
+        errdefer injector_ptr.deinit();
         
-        var injector = EventInjector.init(allocator);
-        errdefer injector.deinit();
-        
-        const mock_tui = try MockTui.App.initForTesting(allocator, &terminal, &injector);
+        // Now safe to pass pointers to initForTesting - they remain valid
+        const mock_tui = try MockTui.App.initForTesting(allocator, terminal_ptr, injector_ptr);
         
         return .{
             .allocator = allocator,
-            .terminal = terminal,
-            .screen = screen,
-            .injector = injector,
+            .terminal_ptr = terminal_ptr,
+            .injector_ptr = injector_ptr,
             .mock_tui = mock_tui,
             .results = std.ArrayList(TestResult).init(allocator),
         };
@@ -56,16 +59,17 @@ pub const TestHarness = struct {
     pub fn deinit(self: *TestHarness) void {
         self.results.deinit();
         self.mock_tui.deinit();
-        self.injector.deinit();
-        self.screen.deinit();
-        self.terminal.deinit();
+        self.injector_ptr.deinit();
+        self.allocator.destroy(self.injector_ptr);
+        self.terminal_ptr.deinit();
+        self.allocator.destroy(self.terminal_ptr);
     }
     
     /// Start a new test case
     pub fn beginTest(self: *TestHarness, name: []const u8) void {
         self.current_test = name;
-        self.injector.clear();
-        self.terminal.clear();
+        self.injector_ptr.clear();
+        self.terminal_ptr.clear();
         std.debug.print("\n[TEST] {s}\n", .{name});
     }
     
@@ -84,17 +88,12 @@ pub const TestHarness = struct {
     
     /// Get the event injector for setting up input
     pub fn getInjector(self: *TestHarness) *EventInjector {
-        return &self.injector;
+        return self.injector_ptr;
     }
     
-    /// Get the screen buffer for assertions
-    pub fn getScreen(self: *TestHarness) *ScreenBuffer {
-        return &self.screen;
-    }
-    
-    /// Get the virtual terminal
+    /// Get the virtual terminal for assertions (renders happen here)
     pub fn getTerminal(self: *TestHarness) *VirtualTerminal {
-        return &self.terminal;
+        return self.terminal_ptr;
     }
     
     /// Get the mock TUI app
@@ -115,44 +114,44 @@ pub const TestHarness = struct {
     /// Run for a specific number of event processing cycles
     pub fn runCycles(self: *TestHarness, cycles: usize) !void {
         for (0..cycles) |_| {
-            if (!self.injector.hasMoreEvents()) break;
+            if (!self.injector_ptr.hasMoreEvents()) break;
             
-            if (self.injector.nextEvent()) |event| {
+            if (self.injector_ptr.nextEvent()) |event| {
                 // Process event through widget if set
                 _ = event;
             }
         }
     }
     
-    /// Take a snapshot of current screen
+    /// Take a snapshot of current terminal state
     pub fn snapshot(self: *TestHarness, name: []const u8) !void {
-        try self.screen.snapshot(name);
+        try self.terminal_ptr.snapshot(name);
     }
     
-    /// Assert that text exists on screen
+    /// Assert that text exists on terminal (where rendering happens)
     pub fn expectText(self: *TestHarness, expected: []const u8) !void {
-        try self.screen.expectText(expected);
+        try self.terminal_ptr.expectText(expected);
     }
     
-    /// Assert that text does NOT exist on screen
+    /// Assert that text does NOT exist on terminal
     pub fn expectNoText(self: *TestHarness, unexpected: []const u8) !void {
-        try self.screen.expectNoText(unexpected);
+        try self.terminal_ptr.expectNoText(unexpected);
     }
     
-    /// Assert that screen contains a pattern
+    /// Assert that terminal contains a pattern
     pub fn expectPattern(self: *TestHarness, pattern: []const u8) !void {
-        try self.screen.expectPattern(pattern);
+        try self.terminal_ptr.expectPattern(pattern);
     }
     
-    /// Assert screen has specific dimensions
+    /// Assert terminal has specific dimensions
     pub fn expectDimensions(self: *TestHarness, width: u16, height: u16) !void {
-        const assertions = @import("screen_buffer.zig").ScreenAssertions.init(&self.screen);
-        try assertions.dimensions(width, height);
+        try std.testing.expectEqual(width, self.terminal_ptr.width);
+        try std.testing.expectEqual(height, self.terminal_ptr.height);
     }
     
-    /// Print current screen for debugging
+    /// Print current terminal for debugging
     pub fn debugPrint(self: *TestHarness) void {
-        self.screen.debugPrint();
+        self.terminal_ptr.debugPrint();
     }
     
     /// Get test summary
