@@ -311,8 +311,9 @@ pub const App = struct {
                 defer ctx.mutex.unlock();
 
                 ctx.event_queue.push(event) catch |err| {
-                    std.log.err("Failed to push event: {s}", .{@errorName(err)});
-                    return;
+                    std.log.err("Failed to push event: {s}, dropping event", .{@errorName(err)});
+                    // Drop the event and continue - don't exit the thread
+                    continue;
                 };
 
                 ctx.has_event.* = true;

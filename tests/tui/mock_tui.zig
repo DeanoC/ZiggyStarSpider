@@ -325,6 +325,8 @@ pub const App = struct {
         
         while (self.running and !self.should_quit) {
             // Process events
+            var needs_render = false;
+            
             if (self.injector.nextEvent()) |event| {
                 switch (event) {
                     .quit => {
@@ -334,7 +336,9 @@ pub const App = struct {
                     else => {
                         if (self.event_fn) |handler| {
                             const result = handler(self.root_widget.?, event);
-                            if (result == .consumed) continue;
+                            if (result == .consumed) {
+                                needs_render = true;
+                            }
                         }
                     },
                 }
@@ -343,27 +347,29 @@ pub const App = struct {
                 break;
             }
             
-            // Render
-            if (self.render_fn) |renderer| {
-                var ctx = RenderContext{
-                    .terminal = self.terminal,
-                    .theme = self.theme,
-                    .bounds = .{
-                        .x = 0,
-                        .y = 0,
-                        .width = self.terminal.width,
-                        .height = self.terminal.height,
-                    },
-                    .clip = .{
-                        .x = 0,
-                        .y = 0,
-                        .width = self.terminal.width,
-                        .height = self.terminal.height,
-                    },
-                    .focused_id = null,
-                    .time_ns = std.time.nanoTimestamp(),
-                };
-                renderer(self.root_widget.?, &ctx);
+            // Render if needed (after handling events)
+            if (needs_render or self.render_fn != null) {
+                if (self.render_fn) |renderer| {
+                    var ctx = RenderContext{
+                        .terminal = self.terminal,
+                        .theme = self.theme,
+                        .bounds = .{
+                            .x = 0,
+                            .y = 0,
+                            .width = self.terminal.width,
+                            .height = self.terminal.height,
+                        },
+                        .clip = .{
+                            .x = 0,
+                            .y = 0,
+                            .width = self.terminal.width,
+                            .height = self.terminal.height,
+                        },
+                        .focused_id = null,
+                        .time_ns = std.time.nanoTimestamp(),
+                    };
+                    renderer(self.root_widget.?, &ctx);
+                }
             }
         }
     }
