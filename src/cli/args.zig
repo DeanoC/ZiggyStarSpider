@@ -211,6 +211,12 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
         // Noun-verb commands
         const noun = parseNoun(arg);
         if (noun) |n| {
+            if (options.command != null) {
+                logger.err("Multiple commands provided; only one command is supported", .{});
+                std.process.argsFree(allocator, args);
+                return error.InvalidArguments;
+            }
+
             if (n == .help) {
                 options.show_help = true;
                 std.process.argsFree(allocator, args);
@@ -248,8 +254,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
 
                     // Skip consumed args
                     i = arg_end - 1;
-                    std.process.argsFree(allocator, args);
-                    return options;
+                    continue;
                 }
             }
 
@@ -260,8 +265,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
                     .verb = .none,
                     .args = &[_][]const u8{},
                 };
-                std.process.argsFree(allocator, args);
-                return options;
+                continue;
             }
 
             logger.err("Unknown verb for noun '{s}'", .{arg});
