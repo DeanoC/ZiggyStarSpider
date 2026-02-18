@@ -4,6 +4,9 @@
 
 Connect to Spiderweb server.
 
+Note: On first connect to a newly bootstrapped agent, the server may send
+an immediate `session.receive` bootstrap message right after `connect.ack`.
+
 **Options:**
 - `--url <url>` - Server URL (required if not configured)
 
