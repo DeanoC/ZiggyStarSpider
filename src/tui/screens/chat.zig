@@ -7,11 +7,11 @@ pub const ChatScreen = struct {
     state: *AppState,
     message_input: tui.InputField,
     scroll_offset: usize = 0,
-    
+
     pub fn init(state: *AppState) ChatScreen {
         var message_input = tui.InputField.init(state.allocator);
         message_input.placeholder = "Type a message...";
-        
+
         return .{
             .state = state,
             .message_input = message_input,
@@ -26,10 +26,6 @@ pub const ChatScreen = struct {
         const width = ctx.bounds.width;
         const height = ctx.bounds.height;
 
-        // Poll for new messages during render (called continuously at frame rate)
-        // This ensures messages appear even without key events
-        self.state.pollMessages() catch {};
-
         // Clear background
         ctx.screen.clear();
 
@@ -39,21 +35,21 @@ pub const ChatScreen = struct {
             .fg = tui.Color.cyan,
             .attrs = .{ .bold = true },
         };
-        
+
         ctx.screen.moveCursor(2, 0);
         ctx.screen.setStyle(header_style);
         ctx.screen.putString(header);
 
         // Status
         const status_text = if (self.state.connection_state == .connected) "● Connected" else "● Disconnected";
-        const status_style = if (self.state.connection_state == .connected) 
-            tui.Style{ .fg = tui.Color.green } 
-        else 
+        const status_style = if (self.state.connection_state == .connected)
+            tui.Style{ .fg = tui.Color.green }
+        else
             tui.Style{ .fg = tui.Color.red };
-        
-        const status_x = if (width > status_text.len + 2) 
-            width - @as(u16, @intCast(status_text.len)) - 2 
-        else 
+
+        const status_x = if (width > status_text.len + 2)
+            width - @as(u16, @intCast(status_text.len)) - 2
+        else
             0;
         ctx.screen.moveCursor(status_x, 0);
         ctx.screen.setStyle(status_style);
@@ -69,7 +65,7 @@ pub const ChatScreen = struct {
         // Message area
         const message_area_height = if (height > 4) height - 4 else 0;
         const message_area_y = 2;
-        
+
         // Draw message border
         if (message_area_height > 0) {
             self.renderMessageArea(ctx, width, message_area_height, message_area_y);
@@ -110,7 +106,7 @@ pub const ChatScreen = struct {
                 .focused_id = null,
                 .time_ns = ctx.time_ns,
             };
-            
+
             self.message_input.render(&input_ctx);
         }
 
@@ -119,50 +115,53 @@ pub const ChatScreen = struct {
         const help_style = tui.Style{
             .fg = tui.Color.gray,
         };
-        
+
         if (height > 1) {
             ctx.screen.moveCursor(2, height - 1);
             ctx.screen.setStyle(help_style);
             ctx.screen.putString(help_text);
         }
+
+        // Poll after drawing so inbound traffic cannot block first paint.
+        self.state.pollMessages() catch {};
     }
 
     fn renderMessageArea(self: *ChatScreen, ctx: *tui.RenderContext, width: u16, height: u16, y_offset: u16) void {
         const messages = self.state.messages.items;
-        
+
         // Calculate visible messages
         const visible_count = @min(messages.len, height);
         const start_idx = if (messages.len > height) messages.len - height else 0;
-        
+
         for (0..visible_count) |i| {
             const msg_idx = start_idx + i;
             const msg = messages[msg_idx];
             const row = y_offset + @as(u16, @intCast(i));
-            
+
             // Clear line
             ctx.screen.moveCursor(0, row);
             ctx.screen.setStyle(tui.Style{});
             for (0..width) |_| {
                 ctx.screen.putString(" ");
             }
-            
+
             // Render sender
-            const sender_style = if (msg.is_user) 
+            const sender_style = if (msg.is_user)
                 tui.Style{ .fg = tui.Color.green, .attrs = .{ .bold = true } }
-            else 
+            else
                 tui.Style{ .fg = tui.Color.cyan, .attrs = .{ .bold = true } };
-            
+
             ctx.screen.moveCursor(2, row);
             ctx.screen.setStyle(sender_style);
             ctx.screen.putString(msg.sender);
             ctx.screen.putString(": ");
-            
+
             // Render content (truncated if needed)
             const content_x = 2 + @as(u16, @intCast(msg.sender.len)) + 2;
             const max_content_width = if (width > content_x + 2) width - content_x - 2 else 0;
-            
+
             ctx.screen.setStyle(tui.Style{ .fg = tui.Color.white });
-            
+
             if (max_content_width == 0 or msg.content.len <= max_content_width) {
                 if (max_content_width > 0) {
                     ctx.screen.putString(msg.content);
@@ -176,7 +175,7 @@ pub const ChatScreen = struct {
                 ctx.screen.putString("...");
             }
         }
-        
+
         // Fill remaining lines
         for (visible_count..height) |i| {
             const row = y_offset + @as(u16, @intCast(i));
@@ -205,7 +204,7 @@ pub const ChatScreen = struct {
                         else => {},
                     }
                 }
-                
+
                 // Check for Enter to send message
                 switch (key_event.key) {
                     .enter => {
@@ -228,7 +227,7 @@ pub const ChatScreen = struct {
             },
             else => {},
         }
-        
+
         return .ignored;
     }
 };

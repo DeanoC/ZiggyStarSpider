@@ -145,19 +145,19 @@ pub const AppState = struct {
         }
 
         const client = &self.ws_client.?;
+        var processed: usize = 0;
+        const max_messages_per_poll: usize = 16;
 
-        // Try to read any pending messages with a short timeout
-        // Note: readTimeout sleeps in 10ms increments, so this adds slight latency
-        // A truly non-blocking read would require websocket library changes
-        while (client.readTimeout(1) catch |err| {
-            // Read failed - mark connection as errored
-            self.connection_state = .err;
-            if (self.connection_error) |old| self.allocator.free(old);
-            // Clear pointer before fallible allocation to avoid use-after-free on failure
-            self.connection_error = null;
-            self.connection_error = try std.fmt.allocPrint(self.allocator, "Read error: {s}", .{@errorName(err)});
-            return err;
-        }) |response| {
+        while (processed < max_messages_per_poll) : (processed += 1) {
+            const response = client.read() catch |err| {
+                // Read failed - mark connection as errored
+                self.connection_state = .err;
+                if (self.connection_error) |old| self.allocator.free(old);
+                // Clear pointer before fallible allocation to avoid use-after-free on failure
+                self.connection_error = null;
+                self.connection_error = try std.fmt.allocPrint(self.allocator, "Read error: {s}", .{@errorName(err)});
+                return err;
+            } orelse break;
             defer self.allocator.free(response);
 
             // Try to parse message
