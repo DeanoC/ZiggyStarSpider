@@ -201,51 +201,18 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // ---------------------------------------------------------------------
-    // GUI executables (only when 'gui' step is requested)
+    // GUI executable (host target only)
     // ---------------------------------------------------------------------
-    const gui_step = b.step("gui", "Build Linux and Windows GUI executables");
-
-    // Create GUI artifacts lazily when gui_step is evaluated
-    const host_arch = target.result.cpu.arch;
-    const linux_arch: std.Target.Cpu.Arch = switch (host_arch) {
-        .aarch64 => .aarch64,
-        else => .x86_64,
-    };
-    const linux_target = if (target.result.os.tag == .linux)
-        target
-    else
-        b.resolveTargetQuery(.{
-            .cpu_arch = linux_arch,
-            .os_tag = .linux,
-            .abi = .gnu,
-        });
-    const windows_target = b.resolveTargetQuery(.{
-        .cpu_arch = .x86_64,
-        .os_tag = .windows,
-        .abi = .gnu,
-    });
-
-    const linux_gui = addGuiArtifact(b, linux_target, optimize) orelse unreachable;
-    const windows_gui = addGuiArtifact(b, windows_target, optimize) orelse unreachable;
-
-    gui_step.dependOn(&linux_gui.install.step);
-    gui_step.dependOn(&windows_gui.install.step);
-
+    const gui_step = b.step("gui", "Build GUI executable for host target");
     const run_gui_step = b.step("run-gui", "Run the GUI app");
-    switch (target.result.os.tag) {
-        .linux => {
-            const run_gui_cmd = b.addRunArtifact(linux_gui.exe);
-            run_gui_cmd.step.dependOn(&linux_gui.install.step);
-            if (b.args) |args| run_gui_cmd.addArgs(args);
-            run_gui_step.dependOn(&run_gui_cmd.step);
-        },
-        .windows => {
-            const run_gui_cmd = b.addRunArtifact(windows_gui.exe);
-            run_gui_cmd.step.dependOn(&windows_gui.install.step);
-            if (b.args) |args| run_gui_cmd.addArgs(args);
-            run_gui_step.dependOn(&run_gui_cmd.step);
-        },
-        else => {},
+
+    if (addGuiArtifact(b, target, optimize)) |host_gui| {
+        gui_step.dependOn(&host_gui.install.step);
+
+        const run_gui_cmd = b.addRunArtifact(host_gui.exe);
+        run_gui_cmd.step.dependOn(&host_gui.install.step);
+        if (b.args) |args| run_gui_cmd.addArgs(args);
+        run_gui_step.dependOn(&run_gui_cmd.step);
     }
 
     // ---------------------------------------------------------------------
