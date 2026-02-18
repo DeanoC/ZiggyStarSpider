@@ -46,8 +46,8 @@
             .lazy = true,
         },
         .tui = .{
-            .url = "git+https://github.com/DeanoC/tui.zig.git#fc8d842706fee5dab4f3f2ef1014c6d26d7cee3a",
-            .hash = "tui-0.0.1-TMwxp6NjBgB86yJ_q_xqtNd25w3JfSHdEagLayv0Wimn",
+            .url = "git+https://github.com/DeanoC/tui.zig.git#2c50ae516dac408d1337e9dda25d3b2f011e77b1",
+            .hash = "tui-0.0.1-TMwxpxxnBgBq0_JbXe2rs_wuv5I1iGnSnUzM7CSZurIV",
             .lazy = true,
         },
     },
