@@ -4,7 +4,7 @@ const tui = @import("tui");
 const cli_args = @import("cli_args");
 const WebSocketClient = @import("websocket_client").WebSocketClient;
 const Config = @import("client_config").Config;
-const session_protocol = @import("../client/session_protocol.zig");
+const session_protocol = @import("session_protocol");
 
 const ConnectScreen = @import("screens/connect.zig").ConnectScreen;
 const ChatScreen = @import("screens/chat.zig").ChatScreen;

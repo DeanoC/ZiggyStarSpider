@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Dependencies
-    const ziggy_core = b.dependency("ziggy-core", .{
+    const ziggy_core = b.dependency("ziggy_core", .{
         .target = target,
         .optimize = optimize,
     });
@@ -31,8 +31,14 @@ pub fn build(b: *std.Build) !void {
     });
     client_config_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
 
+    const session_protocol_module = b.createModule(.{
+        .root_source_file = b.path("src/client/session_protocol.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const cli_module = b.createModule(.{
-        .root_source_file = b.path("src/main_cli.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -45,16 +51,17 @@ pub fn build(b: *std.Build) !void {
         .name = "zss",
         .root_module = cli_module,
     });
-    
+
     // Install CLI as default step
     b.installArtifact(cli_exe);
-    
+
     // Also add explicit 'cli' step
     const install_cli = b.addInstallArtifact(cli_exe, .{});
     const cli_step = b.step("cli", "Build the CLI executable (default)");
     cli_step.dependOn(&install_cli.step);
 
     const run_cli = b.addRunArtifact(cli_exe);
+    if (b.args) |args| run_cli.addArgs(args);
     const run_step = b.step("run", "Run the CLI app");
     run_step.dependOn(&run_cli.step);
 
@@ -67,8 +74,16 @@ pub fn build(b: *std.Build) !void {
     });
 
     if (tui_dep) |dep| {
+        const websocket_client_module = b.createModule(.{
+            .root_source_file = b.path("src/client/websocket.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        websocket_client_module.addImport("websocket", websocket.module("websocket"));
+        websocket_client_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+
         const tui_module = b.createModule(.{
-            .root_source_file = b.path("src/main_tui.zig"),
+            .root_source_file = b.path("src/tui/main.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -77,6 +92,8 @@ pub fn build(b: *std.Build) !void {
         tui_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
         tui_module.addImport("cli_args", cli_args_module);
         tui_module.addImport("client_config", client_config_module);
+        tui_module.addImport("websocket_client", websocket_client_module);
+        tui_module.addImport("session_protocol", session_protocol_module);
 
         const tui_exe = b.addExecutable(.{
             .name = "zss-tui",
@@ -88,6 +105,7 @@ pub fn build(b: *std.Build) !void {
         tui_step.dependOn(&install_tui.step);
 
         const run_tui = b.addRunArtifact(tui_exe);
+        if (b.args) |args| run_tui.addArgs(args);
         const run_tui_step = b.step("run-tui", "Run the TUI app");
         run_tui_step.dependOn(&run_tui.step);
     }
@@ -97,7 +115,7 @@ pub fn build(b: *std.Build) !void {
     // ---------------------------------------------------------------------
     const os_tag = target.result.os.tag;
     const desktop_target = os_tag == .linux or os_tag == .windows or os_tag == .macos;
-    
+
     if (desktop_target) {
         const ziggy_ui = b.dependency("ziggy_ui", .{
             .target = target,
@@ -179,6 +197,7 @@ pub fn build(b: *std.Build) !void {
         gui_step.dependOn(&install_gui.step);
 
         const run_gui = b.addRunArtifact(gui_exe);
+        if (b.args) |args| run_gui.addArgs(args);
         const run_gui_step = b.step("run-gui", "Run the GUI app");
         run_gui_step.dependOn(&run_gui.step);
     }
