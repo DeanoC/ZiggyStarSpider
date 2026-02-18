@@ -66,6 +66,11 @@ pub const WebSocketClient = struct {
             .headers = headers,
         });
 
+        // Keep reads non-blocking for UI threads that poll client.read().
+        // Without a short socket read timeout, some platforms can block
+        // indefinitely in read(), freezing the render loop.
+        try client.readTimeout(1);
+
         self.client = client;
         self.is_connected = true;
 
