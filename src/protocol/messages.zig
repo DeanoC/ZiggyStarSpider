@@ -94,11 +94,11 @@ pub const MessageType = enum {
     pub fn toString(self: MessageType) []const u8 {
         return switch (self) {
             .connect => "connect",
-            .connect_ack => "connect_ack",
-            .chat_ack => "chat_ack",
+            .connect_ack => "connect.ack",
+            .chat_ack => "connect.ack",
             .disconnect => "disconnect",
-            .chat_send => "chat.send",
-            .chat_receive => "chat.receive",
+            .chat_send => "session.send",
+            .chat_receive => "session.receive",
             .project_create => "project.create",
             .project_create_response => "project.create_response",
             .project_list => "project.list",
@@ -154,11 +154,15 @@ pub const MessageType = enum {
         // Connection
         if (std.mem.eql(u8, s, "connect")) return .connect;
         if (std.mem.eql(u8, s, "connect_ack")) return .connect_ack;
+        if (std.mem.eql(u8, s, "connect.ack")) return .connect_ack;
         if (std.mem.eql(u8, s, "chat_ack")) return .chat_ack;
+        if (std.mem.eql(u8, s, "session.ack")) return .chat_ack;
         if (std.mem.eql(u8, s, "disconnect")) return .disconnect;
 
         // Chat
+        if (std.mem.eql(u8, s, "session.send")) return .chat_send;
         if (std.mem.eql(u8, s, "chat.send")) return .chat_send;
+        if (std.mem.eql(u8, s, "session.receive")) return .chat_receive;
         if (std.mem.eql(u8, s, "chat.receive")) return .chat_receive;
 
         // Project
@@ -513,79 +517,49 @@ pub const ErrorResponse = struct {
 
 /// Build a request message envelope
 pub fn buildRequest(allocator: std.mem.Allocator, msg_type: MessageType, id: []const u8, payload: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
-        "{{\"type\":\"{s}\",\"id\":\"{s}\",\"timestamp\":{d},\"payload\":{s}}}",
-        .{ msg_type.toString(), id, std.time.milliTimestamp(), payload }
-    );
+    return std.fmt.allocPrint(allocator, "{{\"type\":\"{s}\",\"id\":\"{s}\",\"timestamp\":{d},\"payload\":{s}}}", .{ msg_type.toString(), id, std.time.milliTimestamp(), payload });
 }
 
 /// Build a simple response message
 pub fn buildResponse(allocator: std.mem.Allocator, msg_type: MessageType, request_id: []const u8, payload: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
-        "{{\"type\":\"{s}\",\"request_id\":\"{s}\",\"timestamp\":{d},\"payload\":{s}}}",
-        .{ msg_type.toString(), request_id, std.time.milliTimestamp(), payload }
-    );
+    return std.fmt.allocPrint(allocator, "{{\"type\":\"{s}\",\"request_id\":\"{s}\",\"timestamp\":{d},\"payload\":{s}}}", .{ msg_type.toString(), request_id, std.time.milliTimestamp(), payload });
 }
 
 /// Build an error response
 pub fn buildError(allocator: std.mem.Allocator, request_id: []const u8, code: []const u8, message: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
-        "{{\"type\":\"error\",\"request_id\":\"{s}\",\"timestamp\":{d},\"payload\":{{\"code\":\"{s}\",\"message\":\"{s}\"}}}}",
-        .{ request_id, std.time.milliTimestamp(), code, message }
-    );
+    return std.fmt.allocPrint(allocator, "{{\"type\":\"error\",\"request_id\":\"{s}\",\"timestamp\":{d},\"payload\":{{\"code\":\"{s}\",\"message\":\"{s}\"}}}}", .{ request_id, std.time.milliTimestamp(), code, message });
 }
 
 /// Build a ping message
 pub fn buildPing(allocator: std.mem.Allocator) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
-        "{{\"type\":\"ping\",\"timestamp\":{d}}}",
-        .{std.time.milliTimestamp()}
-    );
+    return std.fmt.allocPrint(allocator, "{{\"type\":\"ping\",\"timestamp\":{d}}}", .{std.time.milliTimestamp()});
 }
 
 /// Build a pong message
 pub fn buildPong(allocator: std.mem.Allocator, ping_timestamp: i64) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
-        "{{\"type\":\"pong\",\"ping_timestamp\":{d},\"timestamp\":{d}}}",
-        .{ ping_timestamp, std.time.milliTimestamp() }
-    );
+    return std.fmt.allocPrint(allocator, "{{\"type\":\"pong\",\"ping_timestamp\":{d},\"timestamp\":{d}}}", .{ ping_timestamp, std.time.milliTimestamp() });
 }
 
-/// Build a chat.send message
+/// Build a session.send message
 pub fn buildChatSend(allocator: std.mem.Allocator, id: []const u8, content: []const u8, context: ?[]const u8) ![]const u8 {
     if (context) |ctx| {
-        return std.fmt.allocPrint(allocator,
-            "{{\"type\":\"chat.send\",\"id\":\"{s}\",\"timestamp\":{d},\"content\":\"{s}\",\"context\":\"{s}\"}}",
-            .{ id, std.time.milliTimestamp(), content, ctx }
-        );
+        return std.fmt.allocPrint(allocator, "{{\"type\":\"session.send\",\"id\":\"{s}\",\"timestamp\":{d},\"content\":\"{s}\",\"session_key\":\"{s}\"}}", .{ id, std.time.milliTimestamp(), content, ctx });
     } else {
-        return std.fmt.allocPrint(allocator,
-            "{{\"type\":\"chat.send\",\"id\":\"{s}\",\"timestamp\":{d},\"content\":\"{s}\"}}",
-            .{ id, std.time.milliTimestamp(), content }
-        );
+        return std.fmt.allocPrint(allocator, "{{\"type\":\"session.send\",\"id\":\"{s}\",\"timestamp\":{d},\"content\":\"{s}\"}}", .{ id, std.time.milliTimestamp(), content });
     }
 }
 
-/// Build a chat.receive message
+/// Build a session.receive message
 pub fn buildChatReceive(allocator: std.mem.Allocator, request_id: []const u8, content: []const u8, role: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(allocator,
-        "{{\"type\":\"chat.receive\",\"request_id\":\"{s}\",\"timestamp\":{d},\"content\":\"{s}\",\"role\":\"{s}\"}}",
-        .{ request_id, std.time.milliTimestamp(), content, role }
-    );
+    return std.fmt.allocPrint(allocator, "{{\"type\":\"session.receive\",\"request\":\"{s}\",\"timestamp\":{d},\"content\":\"{s}\",\"role\":\"{s}\"}}", .{ request_id, std.time.milliTimestamp(), content, role });
 }
 
 /// Build a worker.progress message
 pub fn buildWorkerProgress(allocator: std.mem.Allocator, worker_id: []const u8, task_id: []const u8, percent: u8, message: ?[]const u8) ![]const u8 {
     if (message) |msg| {
-        return std.fmt.allocPrint(allocator,
-            "{{\"type\":\"worker.progress\",\"timestamp\":{d},\"worker_id\":\"{s}\",\"task_id\":\"{s}\",\"percent\":{d},\"message\":\"{s}\"}}",
-            .{ std.time.milliTimestamp(), worker_id, task_id, percent, msg }
-        );
+        return std.fmt.allocPrint(allocator, "{{\"type\":\"worker.progress\",\"timestamp\":{d},\"worker_id\":\"{s}\",\"task_id\":\"{s}\",\"percent\":{d},\"message\":\"{s}\"}}", .{ std.time.milliTimestamp(), worker_id, task_id, percent, msg });
     } else {
-        return std.fmt.allocPrint(allocator,
-            "{{\"type\":\"worker.progress\",\"timestamp\":{d},\"worker_id\":\"{s}\",\"task_id\":\"{s}\",\"percent\":{d}}}",
-            .{ std.time.milliTimestamp(), worker_id, task_id, percent }
-        );
+        return std.fmt.allocPrint(allocator, "{{\"type\":\"worker.progress\",\"timestamp\":{d},\"worker_id\":\"{s}\",\"task_id\":\"{s}\",\"percent\":{d}}}", .{ std.time.milliTimestamp(), worker_id, task_id, percent });
     }
 }
 

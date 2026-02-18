@@ -4,6 +4,8 @@ const logger = @import("ziggy-core").utils.logger;
 // CLI argument parsing for ZiggyStarSpider
 // Uses simple iteration like ZSC - no ArrayList complexity for basic parsing
 
+const default_server_url = "ws://127.0.0.1:18790/v1/agents/default/stream";
+
 pub const Command = struct {
     noun: Noun,
     verb: Verb,
@@ -36,7 +38,7 @@ pub const Verb = enum {
 };
 
 pub const Options = struct {
-    url: []const u8 = "ws://127.0.0.1:18790",
+    url: []const u8 = default_server_url,
     url_explicitly_provided: bool = false,
     project: ?[]const u8 = null,
     interactive: bool = false,
@@ -45,18 +47,18 @@ pub const Options = struct {
     show_help: bool = false,
     show_version: bool = false,
     command: ?Command = null,
-    
+
     pub fn deinit(self: *Options, allocator: std.mem.Allocator) void {
         // Free copied URL if it's not the default
-        if (self.url.ptr != "ws://127.0.0.1:18790".ptr) {
+        if (self.url.ptr != default_server_url.ptr) {
             allocator.free(self.url);
         }
-        
+
         // Free project name
         if (self.project) |p| {
             allocator.free(p);
         }
-        
+
         // Free command args
         if (self.command) |cmd| {
             for (cmd.args) |arg| {
@@ -146,21 +148,21 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
 
 pub fn parseArgs(allocator: std.mem.Allocator) !Options {
     var options = Options{};
-    
+
     const args = try std.process.argsAlloc(allocator);
     // NOTE: We don't free args here - the returned Options may reference slices from it
     // The caller is responsible for the allocator lifetime
-    
+
     if (args.len <= 1) {
         options.interactive = true;
         std.process.argsFree(allocator, args);
         return options;
     }
-    
+
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        
+
         // Global flags
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             options.show_help = true;
@@ -205,7 +207,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
             options.verbose = true;
             continue;
         }
-        
+
         // Noun-verb commands
         const noun = parseNoun(arg);
         if (noun) |n| {
@@ -214,20 +216,20 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
                 std.process.argsFree(allocator, args);
                 return options;
             }
-            
+
             // Check if next arg is a verb
             if (i + 1 < args.len) {
                 const verb = parseVerb(n, args[i + 1]);
                 if (verb) |v| {
                     i += 1;
-                    
+
                     // Find where command args end (next flag or end)
                     const arg_start = i + 1;
                     var arg_end = arg_start;
                     while (arg_end < args.len and !std.mem.startsWith(u8, args[arg_end], "--")) {
                         arg_end += 1;
                     }
-                    
+
                     // Copy args since args array will be freed
                     const cmd_args_count = arg_end - arg_start;
                     const cmd_args = if (cmd_args_count > 0) blk: {
@@ -237,20 +239,20 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
                         }
                         break :blk copied;
                     } else &[_][]const u8{};
-                    
+
                     options.command = .{
                         .noun = n,
                         .verb = v,
                         .args = cmd_args,
                     };
-                    
+
                     // Skip consumed args
                     i = arg_end - 1;
                     std.process.argsFree(allocator, args);
                     return options;
                 }
             }
-            
+
             // Noun without verb
             if (n == .connect or n == .disconnect or n == .status) {
                 options.command = .{
@@ -261,17 +263,17 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
                 std.process.argsFree(allocator, args);
                 return options;
             }
-            
+
             logger.err("Unknown verb for noun '{s}'", .{arg});
             std.process.argsFree(allocator, args);
             return error.InvalidArguments;
         }
-        
+
         logger.err("Unknown argument: {s}", .{arg});
         std.process.argsFree(allocator, args);
         return error.InvalidArguments;
     }
-    
+
     std.process.argsFree(allocator, args);
     return options;
 }
@@ -279,7 +281,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
 pub fn formatCommand(allocator: std.mem.Allocator, cmd: Command) ![]u8 {
     var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(allocator);
-    
+
     try parts.append(allocator, @tagName(cmd.noun));
     if (cmd.verb != .none) {
         try parts.append(allocator, @tagName(cmd.verb));
@@ -287,6 +289,6 @@ pub fn formatCommand(allocator: std.mem.Allocator, cmd: Command) ![]u8 {
     for (cmd.args) |arg| {
         try parts.append(allocator, arg);
     }
-    
+
     return std.mem.join(allocator, " ", parts.items);
 }
