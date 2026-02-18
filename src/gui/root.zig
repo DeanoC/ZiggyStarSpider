@@ -3459,6 +3459,18 @@ const App = struct {
             return;
         };
 
+        if (self.ws_client) |*client| {
+            const connect_id = try self.nextMessageId("connect");
+            defer self.allocator.free(connect_id);
+            const connect_payload = protocol_messages.buildConnect(self.allocator, connect_id) catch null;
+            if (connect_payload) |payload| {
+                defer self.allocator.free(payload);
+                client.send(payload) catch |err| {
+                    std.log.warn("[GUI] failed sending connect envelope: {s}", .{@errorName(err)});
+                };
+            }
+        }
+
         self.setConnectionState(.connected, "Connected");
         self.settings_panel.focused_field = .none;
 
