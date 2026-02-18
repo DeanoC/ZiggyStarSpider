@@ -187,7 +187,7 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installArtifact(cli_exe);
-    
+
     // Add explicit 'cli' step for building just the CLI
     const cli_install = b.addInstallArtifact(cli_exe, .{});
     const cli_step = b.step("cli", "Build the CLI executable");
@@ -204,7 +204,7 @@ pub fn build(b: *std.Build) void {
     // GUI executables (only when 'gui' step is requested)
     // ---------------------------------------------------------------------
     const gui_step = b.step("gui", "Build Linux and Windows GUI executables");
-    
+
     // Create GUI artifacts lazily when gui_step is evaluated
     const host_arch = target.result.cpu.arch;
     const linux_arch: std.Target.Cpu.Arch = switch (host_arch) {
@@ -256,7 +256,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    
+
     if (tui_dep) |dep| {
         const tui_module = b.createModule(.{
             .root_source_file = b.path("src/tui/main.zig"),
@@ -266,7 +266,7 @@ pub fn build(b: *std.Build) void {
         tui_module.addImport("tui", dep.module("tui"));
         tui_module.addImport("websocket", websocket.module("websocket"));
         tui_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
-        
+
         // Add CLI and client modules for TUI
         const cli_args_module = b.createModule(.{
             .root_source_file = b.path("src/cli/args.zig"),
@@ -275,7 +275,7 @@ pub fn build(b: *std.Build) void {
         });
         cli_args_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
         tui_module.addImport("cli_args", cli_args_module);
-        
+
         const client_config_module = b.createModule(.{
             .root_source_file = b.path("src/client/config.zig"),
             .target = target,
@@ -283,7 +283,14 @@ pub fn build(b: *std.Build) void {
         });
         client_config_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
         tui_module.addImport("client_config", client_config_module);
-        
+
+        const session_protocol_module = b.createModule(.{
+            .root_source_file = b.path("src/client/session_protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        tui_module.addImport("session_protocol", session_protocol_module);
+
         const websocket_client_module = b.createModule(.{
             .root_source_file = b.path("src/client/websocket.zig"),
             .target = target,
@@ -338,13 +345,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    
+
     // Add TUI dependency to test module if available
     if (tui_dep) |dep| {
         tui_test_module.addImport("tui", dep.module("tui"));
         tui_test_module.addImport("websocket", websocket.module("websocket"));
         tui_test_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
-        
+
         // Add CLI and client modules for TUI tests
         const cli_args_module_test = b.createModule(.{
             .root_source_file = b.path("src/cli/args.zig"),
@@ -353,7 +360,7 @@ pub fn build(b: *std.Build) void {
         });
         cli_args_module_test.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
         tui_test_module.addImport("cli_args", cli_args_module_test);
-        
+
         const client_config_module_test = b.createModule(.{
             .root_source_file = b.path("src/client/config.zig"),
             .target = target,
@@ -361,7 +368,7 @@ pub fn build(b: *std.Build) void {
         });
         client_config_module_test.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
         tui_test_module.addImport("client_config", client_config_module_test);
-        
+
         const websocket_client_module_test = b.createModule(.{
             .root_source_file = b.path("src/client/websocket.zig"),
             .target = target,
@@ -387,7 +394,7 @@ pub fn build(b: *std.Build) void {
         .root_module = tui_test_module,
     });
     const install_tui_test = b.addInstallArtifact(tui_test_exe, .{});
-    
+
     const tui_test_build_step = b.step("build-tui-test", "Build TUI test executable");
     tui_test_build_step.dependOn(&install_tui_test.step);
 
@@ -399,11 +406,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    
+
     // Add dependencies for diagnostic tool
     tui_diagnostic_module.addImport("websocket", websocket.module("websocket"));
     tui_diagnostic_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
-    
+
     const cli_args_module_diag = b.createModule(.{
         .root_source_file = b.path("src/cli/args.zig"),
         .target = target,
@@ -411,7 +418,7 @@ pub fn build(b: *std.Build) void {
     });
     cli_args_module_diag.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     tui_diagnostic_module.addImport("cli_args", cli_args_module_diag);
-    
+
     const client_config_module_diag = b.createModule(.{
         .root_source_file = b.path("src/client/config.zig"),
         .target = target,
@@ -419,7 +426,7 @@ pub fn build(b: *std.Build) void {
     });
     client_config_module_diag.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     tui_diagnostic_module.addImport("client_config", client_config_module_diag);
-    
+
     const websocket_client_module_diag = b.createModule(.{
         .root_source_file = b.path("src/client/websocket.zig"),
         .target = target,
@@ -428,20 +435,20 @@ pub fn build(b: *std.Build) void {
     websocket_client_module_diag.addImport("websocket", websocket.module("websocket"));
     websocket_client_module_diag.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     tui_diagnostic_module.addImport("websocket_client", websocket_client_module_diag);
-    
+
     // Add TUI testing framework module
     const tui_testing_module = b.createModule(.{
         .root_source_file = b.path("tests/tui/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    
+
     // Add same imports to tui_testing_module as tui_test_module
     if (tui_dep) |dep| {
         tui_testing_module.addImport("tui", dep.module("tui"));
         tui_testing_module.addImport("websocket", websocket.module("websocket"));
         tui_testing_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
-        
+
         const cli_args_module_testing = b.createModule(.{
             .root_source_file = b.path("src/cli/args.zig"),
             .target = target,
@@ -449,7 +456,7 @@ pub fn build(b: *std.Build) void {
         });
         cli_args_module_testing.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
         tui_testing_module.addImport("cli_args", cli_args_module_testing);
-        
+
         const client_config_module_testing = b.createModule(.{
             .root_source_file = b.path("src/client/config.zig"),
             .target = target,
@@ -457,7 +464,7 @@ pub fn build(b: *std.Build) void {
         });
         client_config_module_testing.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
         tui_testing_module.addImport("client_config", client_config_module_testing);
-        
+
         const websocket_client_module_testing = b.createModule(.{
             .root_source_file = b.path("src/client/websocket.zig"),
             .target = target,
@@ -467,9 +474,9 @@ pub fn build(b: *std.Build) void {
         websocket_client_module_testing.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
         tui_testing_module.addImport("websocket_client", websocket_client_module_testing);
     }
-    
+
     tui_diagnostic_module.addImport("tui_testing", tui_testing_module);
-    
+
     // Add TUI dependency if available (for real TUI types)
     if (tui_dep) |dep| {
         tui_diagnostic_module.addImport("tui", dep.module("tui"));
@@ -479,7 +486,7 @@ pub fn build(b: *std.Build) void {
         .name = "zss-tui-diagnostic",
         .root_module = tui_diagnostic_module,
     });
-    
+
     const install_tui_diagnostic = b.addInstallArtifact(tui_diagnostic_exe, .{});
 
     const run_tui_diagnostic_cmd = b.addRunArtifact(tui_diagnostic_exe);
