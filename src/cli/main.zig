@@ -2,6 +2,7 @@ const std = @import("std");
 const args = @import("args.zig");
 const logger = @import("ziggy-core").utils.logger;
 const WebSocketClient = @import("../client/websocket.zig").WebSocketClient;
+const session_protocol = @import("../client/session_protocol.zig");
 
 // Main CLI entry point for ZiggyStarSpider
 
@@ -18,7 +19,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         return err;
     };
     defer options.deinit(allocator);
-    
+
     // Handle help/version
     if (options.show_help) {
         args.printHelp();
@@ -28,12 +29,12 @@ pub fn run(allocator: std.mem.Allocator) !void {
         args.printVersion();
         return;
     }
-    
+
     // Set log level based on verbose flag
     if (options.verbose) {
         logger.setLevel(.debug);
     }
-    
+
     // Route to TUI mode if requested
     if (options.tui) {
         // TUI mode is only available when built with the TUI target
@@ -41,13 +42,13 @@ pub fn run(allocator: std.mem.Allocator) !void {
         std.log.err("TUI mode must be built with 'zig build tui' or run with 'zig build run-tui'", .{});
         return error.TuiNotAvailable;
     }
-    
+
     logger.info("ZiggyStarSpider v0.1.0", .{});
     logger.info("Server: {s}", .{options.url});
     if (options.project) |p| {
         logger.info("Project: {s}", .{p});
     }
-    
+
     // Handle commands or interactive mode
     if (options.command) |cmd| {
         // Execute single command
@@ -59,7 +60,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         // No command and not interactive - show help
         args.printHelp();
     }
-    
+
     // Cleanup global client if exists
     if (g_client) |*client| {
         client.deinit();
@@ -79,7 +80,7 @@ fn getOrCreateClient(allocator: std.mem.Allocator, url: []const u8) !*WebSocketC
 
 fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    
+
     switch (cmd.noun) {
         .chat => {
             switch (cmd.verb) {
@@ -90,42 +91,36 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                     }
                     const message = try std.mem.join(allocator, " ", cmd.args);
                     defer allocator.free(message);
-                    
+
                     // Connect and send
                     const client = try getOrCreateClient(allocator, options.url);
-                    
-                    var payload = std.ArrayListUnmanaged(u8).empty;
-                    defer payload.deinit(allocator);
-                    
-                    try payload.appendSlice(allocator, "{\"type\":\"chat.send\",");
-                    if (client.session_key) |key| {
-                        try payload.appendSlice(allocator, "\"sessionKey\":\"");
-                        try payload.appendSlice(allocator, key);
-                        try payload.appendSlice(allocator, "\",");
-                    }
-                    try payload.appendSlice(allocator, "\"content\":\"");
-                    try payload.appendSlice(allocator, message);
-                    try payload.appendSlice(allocator, "\"}");
-                    
-                    try client.send(payload.items);
+
+                    const payload = try session_protocol.buildSessionSendJson(allocator, client.session_key, message);
+                    defer allocator.free(payload);
+                    try client.send(payload);
                     try stdout.print("Sent: \"{s}\"\n", .{message});
-                    
+
                     // Wait for response(s)
                     const start_time = std.time.milliTimestamp();
                     var got_content = false;
                     while (std.time.milliTimestamp() - start_time < 15_000) {
                         if (try client.readTimeout(5_000)) |response| {
                             defer allocator.free(response);
-                            
+
                             // Try to parse message
                             const parsed = std.json.parseFromSlice(std.json.Value, allocator, response, .{}) catch null;
                             if (parsed) |p| {
                                 defer p.deinit();
                                 if (p.value == .object) {
                                     const msg_obj = p.value.object;
-                                    
+
                                     // Handle sessionKey
                                     if (msg_obj.get("sessionKey")) |sk| {
+                                        if (sk == .string) {
+                                            if (client.session_key) |old| allocator.free(old);
+                                            client.session_key = try allocator.dupe(u8, sk.string);
+                                        }
+                                    } else if (msg_obj.get("session_key")) |sk| {
                                         if (sk == .string) {
                                             if (client.session_key) |old| allocator.free(old);
                                             client.session_key = try allocator.dupe(u8, sk.string);
@@ -151,9 +146,8 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                                                     }
                                                 }
                                                 break;
-                                            } else if (std.mem.eql(u8, mt.string, "session.ack")) {
-                                                // Already handled sessionKey above, just log it if verbose
-                                                logger.debug("Received session.ack", .{});
+                                            } else if (std.mem.eql(u8, mt.string, "connect.ack")) {
+                                                logger.debug("Received connect.ack", .{});
                                             } else {
                                                 logger.debug("Received other message type: {s}", .{mt.string});
                                             }
@@ -277,7 +271,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 try stdout.print("Already connected to {s}\n", .{options.url});
                 return;
             }
-            
+
             const client = try getOrCreateClient(allocator, options.url);
             _ = client;
             try stdout.print("Connected to {s}\n", .{options.url});
@@ -287,7 +281,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 try stdout.print("Not connected\n", .{});
                 return;
             }
-            
+
             if (g_client) |*client| {
                 client.disconnect();
                 client.deinit();
@@ -314,12 +308,12 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
 fn runInteractive(allocator: std.mem.Allocator, options: args.Options) !void {
     _ = allocator;
     _ = options;
-    
+
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    
+
     try stdout.print("\nZiggyStarSpider Interactive Mode\n", .{});
     try stdout.print("Type 'help' for commands, 'quit' to exit.\n\n", .{});
-    
+
     // TODO: Implement actual interactive REPL with connection
     try stdout.print("Interactive mode not yet implemented.\n", .{});
     try stdout.print("Use command mode for now: ziggystarspider chat send \"hello\"\n", .{});

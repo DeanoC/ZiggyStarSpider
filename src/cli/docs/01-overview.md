@@ -23,7 +23,7 @@ ziggystarspider --help
 
 ## Global Options
 
-- `--url <url>` - Spiderweb server URL (default: ws://127.0.0.1:18790)
+- `--url <url>` - Spiderweb server URL (default: ws://127.0.0.1:18790/v1/agents/default/stream)
 - `--project <name>` - Set current project
 - `--interactive` - Start interactive REPL mode
 - `--verbose` - Enable verbose logging
@@ -35,7 +35,7 @@ ziggystarspider --help
 Run without commands to enter interactive mode:
 
 ```
-ziggystarspider --url ws://100.101.192.123:18790
+ziggystarspider --url ws://100.101.192.123:18790/v1/agents/default/stream
 
 ZiggyStarSpider> help
 ZiggyStarSpider> project list

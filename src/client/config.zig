@@ -25,8 +25,10 @@ pub const Config = struct {
     ui_theme_pack_recent: ?[]const []const u8 = null,
     ui_profile: ?[]const u8 = null,
 
+    pub const default_server_url = "ws://127.0.0.1:18790/v1/agents/default/stream";
+
     pub fn init(allocator: std.mem.Allocator) !Config {
-        const server_url = try allocator.dupe(u8, "ws://127.0.0.1:18790");
+        const server_url = try allocator.dupe(u8, default_server_url);
         errdefer allocator.free(server_url);
         const auth_token = try allocator.dupe(u8, "");
         errdefer allocator.free(auth_token);
@@ -197,7 +199,7 @@ pub const Config = struct {
         return .{
             .allocator = allocator,
             .server_url = try duplicateOptionalString(allocator, json.server_url) orelse
-                try allocator.dupe(u8, "ws://127.0.0.1:18790"),
+                try allocator.dupe(u8, default_server_url),
             .auth_token = try allocator.dupe(u8, auth_token),
             .token = try allocator.dupe(u8, token),
             .insecure_tls = json.insecure_tls orelse false,

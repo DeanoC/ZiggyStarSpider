@@ -10,7 +10,7 @@ Connect to Spiderweb server.
 **Examples:**
 ```bash
 ziggystarspider connect
-ziggystarspider connect --url ws://100.101.192.123:18790
+ziggystarspider connect --url ws://100.101.192.123:18790/v1/agents/default/stream
 ```
 
 ## disconnect
@@ -34,7 +34,7 @@ ziggystarspider status
 **Output:**
 ```
 Connected: Yes
-Server: ws://100.101.192.123:18790
+Server: ws://100.101.192.123:18790/v1/agents/default/stream
 Project: spiderweb
 Uptime: 45 minutes
 ```

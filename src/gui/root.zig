@@ -71,7 +71,7 @@ const SettingsPanel = struct {
 
     pub fn init(allocator: std.mem.Allocator) SettingsPanel {
         var panel = SettingsPanel{};
-        panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790") catch {};
+        panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790/v1/agents/default/stream") catch {};
         panel.default_session.appendSlice(allocator, "main") catch {};
         return panel;
     }
@@ -189,7 +189,6 @@ fn dockDropTargetLabel(location: dock_graph.DropLocation) []const u8 {
         .bottom => "Dock Bottom",
     };
 }
-
 
 const App = struct {
     allocator: std.mem.Allocator,
@@ -1369,8 +1368,7 @@ const App = struct {
         }
 
         out.len = 0;
-        if (manager.workspace.panels.items.len > 4096 or manager.workspace.dock_layout.nodes.items.len > 16384)
-        {
+        if (manager.workspace.panels.items.len > 4096 or manager.workspace.dock_layout.nodes.items.len > 16384) {
             std.log.err(
                 "collectDockLayoutSafe: invalid workspace sizes (panels={} nodes={})",
                 .{
@@ -1491,10 +1489,9 @@ const App = struct {
                 if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
                     std.log.info("ensureWindowManagerHealthy: trying snapshot restore during recovery", .{});
                 }
-                if (
-                    self.debug_frame_counter >= self.workspace_snapshot_restore_cooldown_until and
-                    self.restoreWorkspaceFromSnapshot(manager)
-                ) {
+                if (self.debug_frame_counter >= self.workspace_snapshot_restore_cooldown_until and
+                    self.restoreWorkspaceFromSnapshot(manager))
+                {
                     self.workspace_snapshot_stale = false;
                     self.workspace_snapshot_restore_attempted = false;
                     self.workspace_recovery_failures = 0;
@@ -2307,7 +2304,7 @@ const App = struct {
             // Drain all available messages (non-blocking, like ZSC)
             while (client.tryReceive()) |msg| {
                 count += 1;
-                std.log.info("[ZSS] Received frame ({d} bytes)", .{ msg.len });
+                std.log.info("[ZSS] Received frame ({d} bytes)", .{msg.len});
                 defer self.allocator.free(msg);
 
                 self.handleIncomingMessage(msg) catch |err| {
@@ -2729,28 +2726,28 @@ const App = struct {
         return true;
     }
 
-fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { first: UiRect, second: UiRect } {
-    const size = rect.size();
-    const clamped_ratio = std.math.clamp(ratio, 0.1, 0.9);
-    const gap: f32 = 6.0;
-    if (axis == .vertical) {
-        const avail = @max(0.0, size[0] - gap);
-        const first_w = avail * clamped_ratio;
-        const second_w = avail - first_w;
-        const first_rect = UiRect.fromMinSize(rect.min, .{ first_w, size[1] });
-        const second_min = .{ rect.min[0] + first_w + gap, rect.min[1] };
-        const second_rect = UiRect.fromMinSize(second_min, .{ second_w, size[1] });
+    fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { first: UiRect, second: UiRect } {
+        const size = rect.size();
+        const clamped_ratio = std.math.clamp(ratio, 0.1, 0.9);
+        const gap: f32 = 6.0;
+        if (axis == .vertical) {
+            const avail = @max(0.0, size[0] - gap);
+            const first_w = avail * clamped_ratio;
+            const second_w = avail - first_w;
+            const first_rect = UiRect.fromMinSize(rect.min, .{ first_w, size[1] });
+            const second_min = .{ rect.min[0] + first_w + gap, rect.min[1] };
+            const second_rect = UiRect.fromMinSize(second_min, .{ second_w, size[1] });
+            return .{ .first = first_rect, .second = second_rect };
+        }
+
+        const avail = @max(0.0, size[1] - gap);
+        const first_h = avail * clamped_ratio;
+        const second_h = avail - first_h;
+        const first_rect = UiRect.fromMinSize(rect.min, .{ size[0], first_h });
+        const second_min = .{ rect.min[0], rect.min[1] + first_h + gap };
+        const second_rect = UiRect.fromMinSize(second_min, .{ size[0], second_h });
         return .{ .first = first_rect, .second = second_rect };
     }
-
-    const avail = @max(0.0, size[1] - gap);
-    const first_h = avail * clamped_ratio;
-    const second_h = avail - first_h;
-    const first_rect = UiRect.fromMinSize(rect.min, .{ size[0], first_h });
-    const second_min = .{ rect.min[0], rect.min[1] + first_h + gap };
-    const second_rect = UiRect.fromMinSize(second_min, .{ size[0], second_h });
-    return .{ .first = first_rect, .second = second_rect };
-}
 
     fn repairDockLayout(self: *App, manager: *panel_manager.PanelManager) bool {
         _ = self;
@@ -2880,9 +2877,9 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
             }
         }
 
-            // Draw each tab
-            for (tabs.tabs.items) |panel_id| {
-                const panel = self.findPanelById(manager, panel_id) orelse continue;
+        // Draw each tab
+        for (tabs.tabs.items) |panel_id| {
+            const panel = self.findPanelById(manager, panel_id) orelse continue;
             const is_active = panel_id == active_tab_id;
 
             const tab_width = self.measureText(panel.title) + pad * 2.0;
@@ -3018,7 +3015,7 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
             input_rect,
             self.settings_panel.server_url.items,
             self.settings_panel.focused_field == .server_url,
-            .{ .placeholder = "ws://127.0.0.1:18790" },
+            .{ .placeholder = "ws://127.0.0.1:18790/v1/agents/default/stream" },
         );
         if (url_focused) self.settings_panel.focused_field = .server_url;
 
@@ -3233,10 +3230,10 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
             self.drawText(
                 rect.min[0] + 8.0,
                 rect.min[1] + 8.0,
-            "Chat panel unavailable: input system not ready",
-            self.theme.colors.text_secondary,
-        );
-        return;
+                "Chat panel unavailable: input system not ready",
+                self.theme.colors.text_secondary,
+            );
+            return;
         }
 
         const pad = self.theme.spacing.sm;
@@ -3547,7 +3544,7 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
         self.awaiting_reply = true;
 
         if (self.ws_client) |*client| {
-            const payload = protocol_messages.buildChatSend(
+            const payload = protocol_messages.buildSessionSend(
                 self.allocator,
                 request_id,
                 text,
@@ -3685,7 +3682,7 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
 
         const mt = protocol_messages.parseMessageType(msg) orelse return;
         switch (mt) {
-            .chat_receive => {
+            .session_receive => {
                 const payload = if (root.get("payload")) |payload| switch (payload) {
                     .object => payload.object,
                     else => root,
@@ -3697,6 +3694,12 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
                 } else if (payload.get("request_id")) |value| switch (value) {
                     .string => value.string,
                     else => null,
+                } else if (root.get("request")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else if (payload.get("request")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
                 } else if (root.get("id")) |value| switch (value) {
                     .string => value.string,
                     else => null,
@@ -3705,6 +3708,9 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
                     else => null,
                 } else null;
                 const session_key = if (payload.get("session_key")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else if (root.get("session_key")) |value| switch (value) {
                     .string => value.string,
                     else => null,
                 } else if (payload.get("sessionKey")) |value| switch (value) {
@@ -3772,8 +3778,11 @@ fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { fi
                     }
                 }
             },
-            .chat_ack => {
+            .connect_ack => {
                 const request_id = if (root.get("request_id")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else if (root.get("request")) |value| switch (value) {
                     .string => value.string,
                     else => null,
                 } else if (root.get("id")) |value| switch (value) {

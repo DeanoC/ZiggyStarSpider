@@ -4,6 +4,7 @@ const tui = @import("tui");
 const cli_args = @import("cli_args");
 const WebSocketClient = @import("websocket_client").WebSocketClient;
 const Config = @import("client_config").Config;
+const session_protocol = @import("../client/session_protocol.zig");
 
 const ConnectScreen = @import("screens/connect.zig").ConnectScreen;
 const ChatScreen = @import("screens/chat.zig").ChatScreen;
@@ -70,13 +71,13 @@ pub const AppState = struct {
         if (self.connection_error) |err| {
             self.allocator.free(err);
         }
-        
+
         for (self.messages.items) |msg| {
             self.allocator.free(msg.sender);
             self.allocator.free(msg.content);
         }
         self.messages.deinit(self.allocator);
-        
+
         self.config.deinit();
     }
 
@@ -124,26 +125,9 @@ pub const AppState = struct {
 
         const client = &self.ws_client.?;
 
-        // Build message using proper JSON serialization
-        const MessagePayload = struct {
-            type: []const u8 = "chat.send",
-            sessionKey: ?[]const u8 = null,
-            content: []const u8,
-        };
-        
-        const payload = MessagePayload{
-            .sessionKey = client.session_key,
-            .content = content,
-        };
-        
-        var json_buffer = std.ArrayListUnmanaged(u8).empty;
-        defer json_buffer.deinit(self.allocator);
-        
-        // Use std.json.fmt for proper JSON escaping
-        const formatter = std.json.fmt(payload, .{});
-        try std.fmt.format(json_buffer.writer(self.allocator), "{f}", .{formatter});
-        
-        try client.send(json_buffer.items);
+        const payload = try session_protocol.buildSessionSendJson(self.allocator, client.session_key, content);
+        defer self.allocator.free(payload);
+        try client.send(payload);
 
         // Add to local messages
         const msg = Message{
@@ -193,14 +177,23 @@ pub const AppState = struct {
                     }
                     client.session_key = try self.allocator.dupe(u8, sk.string);
                 }
+            } else if (msg_obj.get("session_key")) |sk| {
+                if (sk == .string) {
+                    if (client.session_key) |old| {
+                        self.allocator.free(old);
+                        client.session_key = null;
+                    }
+                    client.session_key = try self.allocator.dupe(u8, sk.string);
+                }
             }
 
             // Handle content
             const msg_type = msg_obj.get("type");
             if (msg_type) |mt| {
                 if (mt == .string) {
-                    if (std.mem.eql(u8, mt.string, "chat.receive") or 
-                        std.mem.eql(u8, mt.string, "session.receive")) {
+                    if (std.mem.eql(u8, mt.string, "chat.receive") or
+                        std.mem.eql(u8, mt.string, "session.receive"))
+                    {
                         if (msg_obj.get("content")) |content| {
                             if (content == .string) {
                                 const msg = Message{
@@ -256,7 +249,7 @@ pub const RootWidget = struct {
 pub const App = struct {
     allocator: std.mem.Allocator,
     state: *AppState,
-    
+
     // TUI App
     tui_app: tui.App,
 
@@ -266,7 +259,7 @@ pub const App = struct {
     pub fn init(allocator: std.mem.Allocator, options: cli_args.Options) !App {
         const state = try allocator.create(AppState);
         errdefer allocator.destroy(state);
-        
+
         state.* = try AppState.init(allocator, options);
         errdefer state.deinit();
 

@@ -7,7 +7,7 @@ const ConnectionState = @import("../app.zig").ConnectionState;
 pub const ConnectScreen = struct {
     state: *AppState,
     url_input: tui.InputField,
-    
+
     pub fn init(state: *AppState) ConnectScreen {
         // Use effective URL: CLI --url > connect_host_override > server_url
         const effective_url = if (state.options.url_explicitly_provided)
@@ -16,11 +16,11 @@ pub const ConnectScreen = struct {
             host
         else
             state.config.server_url;
-        
+
         var url_input = tui.InputField.init(state.allocator);
         url_input.setValue(effective_url) catch {};
-        url_input.placeholder = "ws://127.0.0.1:18790";
-        
+        url_input.placeholder = "ws://127.0.0.1:18790/v1/agents/default/stream";
+
         return .{
             .state = state,
             .url_input = url_input,
@@ -44,7 +44,7 @@ pub const ConnectScreen = struct {
             .fg = tui.Color.cyan,
             .attrs = .{ .bold = true },
         };
-        
+
         const title_x = if (width > title.len) @divTrunc(width - @as(u16, @intCast(title.len)), 2) else 0;
         ctx.screen.moveCursor(title_x, 2);
         ctx.screen.setStyle(title_style);
@@ -55,7 +55,7 @@ pub const ConnectScreen = struct {
         const subtitle_style = tui.Style{
             .fg = tui.Color.white,
         };
-        
+
         const subtitle_x = if (width > subtitle.len) @divTrunc(width - @as(u16, @intCast(subtitle.len)), 2) else 0;
         ctx.screen.moveCursor(subtitle_x, 4);
         ctx.screen.setStyle(subtitle_style);
@@ -71,7 +71,7 @@ pub const ConnectScreen = struct {
         // URL input field
         const input_x = if (width > 50) @divTrunc(width - 50, 2) else 2;
         const input_y = 8;
-        
+
         var input_ctx = tui.RenderContext{
             .screen = ctx.screen,
             .theme = ctx.theme,
@@ -90,7 +90,7 @@ pub const ConnectScreen = struct {
             .focused_id = null,
             .time_ns = ctx.time_ns,
         };
-        
+
         self.url_input.render(&input_ctx);
 
         // Connect button hint
@@ -98,7 +98,7 @@ pub const ConnectScreen = struct {
         const button_style = tui.Style{
             .fg = tui.Color.green,
         };
-        
+
         const button_x = if (width > button_text.len) @divTrunc(width - @as(u16, @intCast(button_text.len)), 2) else 0;
         ctx.screen.moveCursor(button_x, 10);
         ctx.screen.setStyle(button_style);
@@ -118,7 +118,7 @@ pub const ConnectScreen = struct {
             .connected => tui.Style{ .fg = tui.Color.green },
             .err => tui.Style{ .fg = tui.Color.red },
         };
-        
+
         const status_x = if (width > status_text.len) @divTrunc(width - @as(u16, @intCast(status_text.len)), 2) else 0;
         ctx.screen.moveCursor(status_x, 13);
         ctx.screen.setStyle(status_style);
@@ -129,7 +129,7 @@ pub const ConnectScreen = struct {
         const help_style = tui.Style{
             .fg = tui.Color.gray,
         };
-        
+
         const help_x = if (width > help_text.len) @divTrunc(width - @as(u16, @intCast(help_text.len)), 2) else 0;
         if (height > 2) {
             ctx.screen.moveCursor(help_x, height - 2);
@@ -150,11 +150,7 @@ pub const ConnectScreen = struct {
                                 if (self.state.connection_error) |old_err| {
                                     self.state.allocator.free(old_err);
                                 }
-                                self.state.connection_error = std.fmt.allocPrint(
-                                    self.state.allocator, 
-                                    "{s}", 
-                                    .{@errorName(err)}
-                                ) catch null;
+                                self.state.connection_error = std.fmt.allocPrint(self.state.allocator, "{s}", .{@errorName(err)}) catch null;
                             };
                         }
                         return .consumed;
@@ -167,7 +163,7 @@ pub const ConnectScreen = struct {
             },
             else => {},
         }
-        
+
         return .ignored;
     }
 };
