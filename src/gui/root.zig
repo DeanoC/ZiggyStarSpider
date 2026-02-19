@@ -3193,12 +3193,12 @@ const App = struct {
             self.settings_panel.focused_field = .none;
         }
 
-        // Connect button
+        // Action buttons
         const button_width: f32 = 120.0 * self.ui_scale;
-        const button_y = y + button_height * 1.6;
+        const action_row_y = y + pad;
         const button_rect = Rect.fromXYWH(
             rect.min[0] + pad,
-            button_y,
+            action_row_y,
             button_width,
             button_height,
         );
@@ -3216,7 +3216,7 @@ const App = struct {
         const save_button_x = button_rect.max[0] + pad;
         const save_button_rect = Rect.fromXYWH(
             save_button_x,
-            button_y,
+            action_row_y,
             button_width,
             button_height,
         );
@@ -3232,10 +3232,18 @@ const App = struct {
             };
         }
 
+        const debug_button_width = button_width * 1.35;
+        const action_max_x = rect.min[0] + rect_width - pad;
+        var debug_button_x = save_button_rect.max[0] + pad;
+        var debug_button_y = action_row_y;
+        if (debug_button_x + debug_button_width > action_max_x) {
+            debug_button_x = rect.min[0] + pad;
+            debug_button_y = action_row_y + button_height + pad;
+        }
         const debug_button_rect = Rect.fromXYWH(
-            save_button_rect.max[0] + pad,
-            button_y,
-            button_width * 1.35,
+            debug_button_x,
+            debug_button_y,
+            debug_button_width,
             button_height,
         );
         const open_debug_clicked = self.drawButtonWidget(
@@ -3249,7 +3257,8 @@ const App = struct {
             };
         }
 
-        y += button_height + pad * 2.0;
+        const actions_bottom = @max(action_row_y + button_height, debug_button_y + button_height);
+        y = actions_bottom + pad;
 
         // Status row
         const status_height: f32 = 32.0 * self.ui_scale;
