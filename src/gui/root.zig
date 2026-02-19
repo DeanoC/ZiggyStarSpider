@@ -2656,6 +2656,8 @@ const App = struct {
         var drag_drop_targets = DockDropTargetList{};
         self.collectDockInteractionGeometry(ui_window.manager, viewport, &drag_tab_hits, &drag_drop_targets);
         self.drawDockDragOverlay(&ui_window.queue, ui_window.manager, ui_window, &drag_drop_targets, viewport);
+
+        self.drawStatusOverlay(fb_width, fb_height);
     }
 
     fn drawUnavailableWorkspaceFrame(self: *App, ui_window: *UiWindow, message: []const u8) void {
@@ -2695,6 +2697,8 @@ const App = struct {
             "Please wait; layout is being restored.",
             self.theme.colors.text_secondary,
         );
+
+        self.drawStatusOverlay(fb_width, fb_height);
 
         ui_window.swapchain.beginFrame(&self.gpu, fb_width, fb_height);
         self.gpu.ui_renderer.beginFrame(fb_width, fb_height);
@@ -4616,14 +4620,17 @@ const App = struct {
         final: bool,
         timestamp: i64,
     ) !void {
-        // Best-effort: unescape common JSON escapes for display if server double-encoded
+        // Best-effort: unescape common JSON escapes for display ONLY if chunk starts and ends with quotes,
+        // which strongly suggests it's a JSON-encoded string literal.
         var use = chunk;
         var owned = false;
-        if (looksLikeEscaped(chunk)) {
-            if (self.unescapeJsonStringAlloc(chunk)) |tmp| {
-                use = tmp;
-                owned = true;
-            } else |_| {}
+        if (chunk.len >= 2 and chunk[0] == '"' and chunk[chunk.len - 1] == '"') {
+            if (looksLikeEscaped(chunk)) {
+                if (self.unescapeJsonStringAlloc(chunk)) |tmp| {
+                    use = tmp;
+                    owned = true;
+                } else |_| {}
+            }
         }
         defer if (owned) self.allocator.free(use);
 
