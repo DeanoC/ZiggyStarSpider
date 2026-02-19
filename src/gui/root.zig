@@ -3928,13 +3928,15 @@ const App = struct {
         defer self.allocator.free(payload_json);
 
         if (std.mem.eql(u8, category, "control.subscription")) {
-            const request_id = extractRequestId(root, null);
-            if (root.get("payload")) |payload| {
-                if (payload == .object) {
-                    if (payload.object.get("enabled")) |enabled_value| {
-                        if (enabled_value == .bool) {
-                            self.debug_stream_enabled = enabled_value.bool;
-                        }
+            const payload_obj = if (root.get("payload")) |payload| switch (payload) {
+                .object => payload.object,
+                else => null,
+            } else null;
+            const request_id = extractRequestId(root, payload_obj);
+            if (payload_obj) |obj| {
+                if (obj.get("enabled")) |enabled_value| {
+                    if (enabled_value == .bool) {
+                        self.debug_stream_enabled = enabled_value.bool;
                     }
                 }
             }
