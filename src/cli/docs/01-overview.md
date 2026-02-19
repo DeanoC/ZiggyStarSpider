@@ -3,8 +3,8 @@
 ## Usage
 
 ```text
-ziggystarspider <noun> <verb> [args] [options]
-ziggystarspider --help
+zss <noun> <verb> [args] [options]
+zss --help
 ```
 
 ## Noun-Verb Commands
@@ -26,6 +26,7 @@ ziggystarspider --help
 - `--url <url>` - Spiderweb server URL (default: ws://127.0.0.1:18790/v1/agents/default/stream)
 - `--project <name>` - Set current project
 - `--interactive` - Start interactive REPL mode
+- `--tui` - Launch the Terminal User Interface
 - `--verbose` - Enable verbose logging
 - `--help` - Show this help
 - `--version` - Show version
@@ -34,12 +35,15 @@ ziggystarspider --help
 
 Run without commands to enter interactive mode:
 
+```bash
+zss --url ws://127.0.0.1:18790/v1/agents/default/stream
 ```
-ziggystarspider --url ws://100.101.192.123:18790/v1/agents/default/stream
 
-ZiggyStarSpider> help
-ZiggyStarSpider> project list
-ZiggyStarSpider> chat send "Hello!"
+Within interactive mode:
+```text
+ZSS> help
+ZSS> project list
+ZSS> chat send "Hello!"
 ```
 
 ## Design Philosophy

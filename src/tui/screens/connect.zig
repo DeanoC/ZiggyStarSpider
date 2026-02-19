@@ -125,7 +125,7 @@ pub const ConnectScreen = struct {
         ctx.screen.putString(status_text);
 
         // Help text
-        const help_text = "Press Ctrl+C to quit";
+        const help_text = "F1/?: Help | Ctrl+C: Quit";
         const help_style = tui.Style{
             .fg = tui.Color.gray,
         };
@@ -141,6 +141,23 @@ pub const ConnectScreen = struct {
     pub fn handleEvent(self: *ConnectScreen, event: tui.Event) tui.EventResult {
         switch (event) {
             .key => |key_event| {
+                // Check for F1 or ? to show help
+                switch (key_event.key) {
+                    .f => |n| {
+                        if (n == 1) {
+                            self.state.current_screen = .help;
+                            return .consumed;
+                        }
+                    },
+                    .char => |c| {
+                        if (c == '?') {
+                            self.state.current_screen = .help;
+                            return .consumed;
+                        }
+                    },
+                    else => {},
+                }
+
                 // Check for Enter to connect
                 switch (key_event.key) {
                     .enter => {

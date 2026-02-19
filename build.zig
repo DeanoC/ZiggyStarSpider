@@ -171,6 +171,17 @@ pub fn build(b: *std.Build) void {
     ziggy_ui_module.addImport("zsc", zsc_bridge_module);
 
     // ---------------------------------------------------------------------
+    // Versioning
+    // ---------------------------------------------------------------------
+    const version_str = std.mem.trim(u8, b.build_root.handle.readFileAlloc(b.allocator, "VERSION", 1024) catch "0.1.0", " \n\r\t");
+    const git_rev = b.run(&[_][]const u8{ "git", "rev-parse", "--short", "HEAD" });
+    const full_version = b.fmt("{s} rev:{s}", .{ version_str, std.mem.trim(u8, git_rev, " \n\r\t") });
+
+    const version_options = b.addOptions();
+    version_options.addOption([]const u8, "version", full_version);
+    const version_module = version_options.createModule();
+
+    // ---------------------------------------------------------------------
     // CLI executable (default build)
     // ---------------------------------------------------------------------
     const cli_module = b.createModule(.{
@@ -180,6 +191,7 @@ pub fn build(b: *std.Build) void {
     });
     cli_module.addImport("websocket", websocket.module("websocket"));
     cli_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    cli_module.addImport("build_options", version_module);
 
     const cli_exe = b.addExecutable(.{
         .name = "zss",
@@ -207,6 +219,7 @@ pub fn build(b: *std.Build) void {
     const run_gui_step = b.step("run-gui", "Run the GUI app");
 
     if (addGuiArtifact(b, target, optimize)) |host_gui| {
+        host_gui.exe.root_module.addImport("build_options", version_module);
         gui_step.dependOn(&host_gui.install.step);
 
         const run_gui_cmd = b.addRunArtifact(host_gui.exe);
@@ -233,6 +246,7 @@ pub fn build(b: *std.Build) void {
         tui_module.addImport("tui", dep.module("tui"));
         tui_module.addImport("websocket", websocket.module("websocket"));
         tui_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_module.addImport("build_options", version_module);
 
         // Add CLI and client modules for TUI
         const cli_args_module = b.createModule(.{
@@ -241,6 +255,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         cli_args_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        cli_args_module.addImport("build_options", version_module);
         tui_module.addImport("cli_args", cli_args_module);
 
         const client_config_module = b.createModule(.{
@@ -355,6 +370,7 @@ pub fn build(b: *std.Build) void {
     const test_tui_step = b.step("test-tui", "Run TUI tests (headless)");
     test_tui_step.dependOn(&run_tui_tests.step);
 
+    // ---------------------------------------------------------------------
     // TUI test executable for debugging
     const tui_test_exe = b.addExecutable(.{
         .name = "zss-tui-test",

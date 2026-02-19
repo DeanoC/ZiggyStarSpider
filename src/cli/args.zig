@@ -1,5 +1,6 @@
 const std = @import("std");
 const logger = @import("ziggy-core").utils.logger;
+const build_options = @import("build_options");
 
 // CLI argument parsing for ZiggyStarSpider
 // Uses simple iteration like ZSC - no ArrayList complexity for basic parsing
@@ -78,10 +79,16 @@ const help_goal = @embedFile("docs/12-goal.md");
 const help_task = @embedFile("docs/13-task.md");
 const help_worker = @embedFile("docs/14-worker.md");
 const help_connection = @embedFile("docs/15-connection.md");
+pub const help_tui = @embedFile("docs/tui-help.md");
 
 pub fn printHelp() void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     stdout.print("{s}\n\n{s}\n", .{ help_overview, help_options }) catch {};
+}
+
+pub fn printTuiHelp() void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    stdout.print("{s}\n", .{help_tui}) catch {};
 }
 
 pub fn printHelpForNoun(noun: Noun) void {
@@ -100,7 +107,7 @@ pub fn printHelpForNoun(noun: Noun) void {
 
 pub fn printVersion() void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    stdout.print("ZiggyStarSpider v0.1.0\n", .{}) catch {};
+    stdout.print("ZSS v{s}\n", .{build_options.version}) catch {};
 }
 
 fn parseNoun(arg: []const u8) ?Noun {

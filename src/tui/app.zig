@@ -8,6 +8,7 @@ const session_protocol = @import("session_protocol");
 
 const ConnectScreen = @import("screens/connect.zig").ConnectScreen;
 const ChatScreen = @import("screens/chat.zig").ChatScreen;
+const HelpScreen = @import("screens/help.zig").HelpScreen;
 
 pub const ConnectionState = enum {
     disconnected,
@@ -19,6 +20,7 @@ pub const ConnectionState = enum {
 pub const Screen = enum {
     connect,
     chat,
+    help,
 };
 
 pub const AppState = struct {
@@ -217,24 +219,28 @@ pub const RootWidget = struct {
     state: *AppState,
     connect_screen: ConnectScreen,
     chat_screen: ChatScreen,
+    help_screen: HelpScreen,
 
     pub fn init(state: *AppState) RootWidget {
         return .{
             .state = state,
             .connect_screen = ConnectScreen.init(state),
             .chat_screen = ChatScreen.init(state),
+            .help_screen = HelpScreen.init(state),
         };
     }
 
     pub fn deinit(self: *RootWidget) void {
         self.connect_screen.deinit();
         self.chat_screen.deinit();
+        self.help_screen.deinit();
     }
 
     pub fn render(self: *RootWidget, ctx: *tui.RenderContext) void {
         switch (self.state.current_screen) {
             .connect => self.connect_screen.render(ctx),
             .chat => self.chat_screen.render(ctx),
+            .help => self.help_screen.render(ctx),
         }
     }
 
@@ -242,6 +248,7 @@ pub const RootWidget = struct {
         switch (self.state.current_screen) {
             .connect => return self.connect_screen.handleEvent(event),
             .chat => return self.chat_screen.handleEvent(event),
+            .help => return self.help_screen.handleEvent(event),
         }
     }
 };

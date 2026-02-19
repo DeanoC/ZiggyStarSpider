@@ -9,7 +9,7 @@ Spiderweb server WebSocket URL.
 
 **Examples:**
 ```bash
-ziggystarspider --url ws://100.101.192.123:18790/v1/agents/default/stream chat send "Hello"
+ziggystarspider --url ws://127.0.0.1:18790/v1/agents/default/stream chat send "Hello"
 ziggystarspider --url ws://localhost:18790/v1/agents/default/stream project list
 ```
 

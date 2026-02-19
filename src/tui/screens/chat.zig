@@ -111,7 +111,7 @@ pub const ChatScreen = struct {
         }
 
         // Help text
-        const help_text = "Enter: Send | Ctrl+D: Disconnect | Ctrl+C: Quit";
+        const help_text = "Enter: Send | F1/?: Help | Ctrl+D: Disconnect | Ctrl+C: Quit";
         const help_style = tui.Style{
             .fg = tui.Color.gray,
         };
@@ -192,6 +192,23 @@ pub const ChatScreen = struct {
 
         switch (event) {
             .key => |key_event| {
+                // Check for F1 or ? to show help
+                switch (key_event.key) {
+                    .f => |n| {
+                        if (n == 1) {
+                            self.state.current_screen = .help;
+                            return .consumed;
+                        }
+                    },
+                    .char => |c| {
+                        if (c == '?') {
+                            self.state.current_screen = .help;
+                            return .consumed;
+                        }
+                    },
+                    else => {},
+                }
+
                 // Check for Ctrl+D to disconnect
                 if (key_event.modifiers.ctrl) {
                     switch (key_event.key) {

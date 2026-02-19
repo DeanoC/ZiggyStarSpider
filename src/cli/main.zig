@@ -1,6 +1,7 @@
 const std = @import("std");
 const args = @import("args.zig");
 const logger = @import("ziggy-core").utils.logger;
+const build_options = @import("build_options");
 const WebSocketClient = @import("../client/websocket.zig").WebSocketClient;
 const session_protocol = @import("../client/session_protocol.zig");
 
@@ -43,7 +44,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
         return error.TuiNotAvailable;
     }
 
-    logger.info("ZiggyStarSpider v0.1.0", .{});
+    logger.info("ZSS v{s}", .{build_options.version});
     logger.info("Server: {s}", .{options.url});
     if (options.project) |p| {
         logger.info("Project: {s}", .{p});
@@ -311,10 +312,10 @@ fn runInteractive(allocator: std.mem.Allocator, options: args.Options) !void {
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
 
-    try stdout.print("\nZiggyStarSpider Interactive Mode\n", .{});
+    try stdout.print("\nZSS Interactive Mode\n", .{});
     try stdout.print("Type 'help' for commands, 'quit' to exit.\n\n", .{});
 
     // TODO: Implement actual interactive REPL with connection
     try stdout.print("Interactive mode not yet implemented.\n", .{});
-    try stdout.print("Use command mode for now: ziggystarspider chat send \"hello\"\n", .{});
+    try stdout.print("Use command mode for now: zss chat send \"hello\"\n", .{});
 }
