@@ -4425,8 +4425,10 @@ const App = struct {
         } else "unknown";
 
         // Prettify the payload before stringifying
-        const payload_value = if (root.get("payload")) |p| p else std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
-        const prettified = self.prettifyValue(payload_value) catch try self.cloneJsonValue(payload_value);
+        const prettified = if (root.get("payload")) |p|
+            self.prettifyValue(p) catch try self.cloneJsonValue(p)
+        else
+            std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
         defer self.freePrettifiedValue(prettified);
 
         const payload_json = try std.json.Stringify.valueAlloc(self.allocator, prettified, .{ .whitespace = .indent_4 });
