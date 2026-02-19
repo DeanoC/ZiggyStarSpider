@@ -4301,10 +4301,10 @@ const App = struct {
                         const line_trimmed = std.mem.trimRight(u8, line, "\r");
                         // We must dupe the line because prettifyValue may transform/clone; we own and must free our duplicate
                         const duped_line = try self.allocator.dupe(u8, line_trimmed);
-                        errdefer self.allocator.free(duped_line);
+                        defer self.allocator.free(duped_line);
                         const v = try self.prettifyValue(.{ .string = duped_line });
-                        // prettifyValue clones or rebuilds; free our local duplicate to avoid leaks
-                        self.allocator.free(duped_line);
+                        // v is now owned. If append fails, we must free v.
+                        errdefer self.freePrettifiedValue(v);
                         try new_arr.append(v);
                     }
                     return std.json.Value{ .array = new_arr };
