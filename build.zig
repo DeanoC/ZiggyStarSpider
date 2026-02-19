@@ -174,8 +174,12 @@ pub fn build(b: *std.Build) void {
     // Versioning
     // ---------------------------------------------------------------------
     const version_str = std.mem.trim(u8, b.build_root.handle.readFileAlloc(b.allocator, "VERSION", 1024) catch "0.1.0", " \n\r\t");
-    const git_rev = b.run(&[_][]const u8{ "git", "rev-parse", "--short", "HEAD" });
-    const full_version = b.fmt("{s} rev:{s}", .{ version_str, std.mem.trim(u8, git_rev, " \n\r\t") });
+    var git_code: u8 = undefined;
+    const git_rev = if (b.runAllowFail(&[_][]const u8{ "git", "rev-parse", "--short", "HEAD" }, &git_code, .Ignore)) |output|
+        std.mem.trim(u8, output, " \n\r\t")
+    else |_|
+        "unknown";
+    const full_version = b.fmt("{s} rev:{s}", .{ version_str, git_rev });
 
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", full_version);
