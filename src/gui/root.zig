@@ -24,6 +24,7 @@ const workspace = zui.ui.workspace;
 const panel_manager = zui.ui.panel_manager;
 const dock_graph = zui.ui.layout.dock_graph;
 const dock_drop = zui.ui.layout.dock_drop;
+const text_buffer = zui.ui.text_buffer;
 
 const Rect = zui.core.Rect;
 const UiRect = ui_draw_context.Rect;
@@ -42,6 +43,7 @@ const MAX_REASONABLE_NEXT_PANEL_ID: workspace.PanelId = 4097;
 const WORKSPACE_RECOVERY_COOLDOWN_FRAMES: u64 = 60;
 const WORKSPACE_RECOVERY_SUSPEND_FRAMES: u64 = 9000;
 const WORKSPACE_RECOVERY_ATTEMPTS_BEFORE_SUSPEND: u8 = 1;
+const MAX_DEBUG_EVENTS: usize = 500;
 
 const ChatAttachment = zui.protocol.types.ChatAttachment;
 const ChatMessage = zui.protocol.types.ChatMessage;
@@ -102,6 +104,17 @@ const SessionMessageState = struct {
     key: []const u8,
     messages: std.ArrayList(ChatMessage) = .empty,
     streaming_request_id: ?[]const u8 = null,
+};
+
+const DebugEventEntry = struct {
+    timestamp_ms: i64,
+    category: []u8,
+    payload_json: []u8,
+
+    fn deinit(self: *DebugEventEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.category);
+        allocator.free(self.payload_json);
+    }
 };
 
 const DockTabHit = struct {
@@ -216,6 +229,11 @@ const App = struct {
     pending_send_message_id: ?[]const u8 = null,
     pending_send_session_key: ?[]const u8 = null,
     awaiting_reply: bool = false,
+    debug_stream_enabled: bool = false,
+    debug_stream_pending: bool = false,
+    pending_debug_request_id: ?[]u8 = null,
+    debug_panel_id: ?workspace.PanelId = null,
+    debug_events: std.ArrayList(DebugEventEntry) = .empty,
     ui_commands: zui.ui.render.command_list.CommandList,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
@@ -398,6 +416,8 @@ const App = struct {
         self.clearSessions();
         self.chat_sessions.deinit(self.allocator);
         self.session_messages.deinit(self.allocator);
+        self.clearDebugEvents();
+        self.debug_events.deinit(self.allocator);
         self.invalidateWorkspaceSnapshot();
         if (self.pending_send_request_id) |request_id| self.allocator.free(request_id);
         if (self.pending_send_message_id) |message_id| self.allocator.free(message_id);
@@ -2967,6 +2987,18 @@ const App = struct {
             .Settings, .Control => {
                 self.drawSettingsPanel(manager, rect);
             },
+            .ToolOutput => {
+                if (self.debug_panel_id != null and self.debug_panel_id.? == panel.id) {
+                    self.drawDebugPanel(manager, rect);
+                } else {
+                    self.drawText(
+                        rect.min[0] + 20,
+                        rect.min[1] + 20,
+                        panel.title,
+                        self.theme.colors.text_primary,
+                    );
+                }
+            },
             else => {
                 // Draw placeholder for other panel types
                 self.drawText(
@@ -3163,12 +3195,12 @@ const App = struct {
             self.settings_panel.focused_field = .none;
         }
 
-        // Connect button
+        // Action buttons
         const button_width: f32 = 120.0 * self.ui_scale;
-        const button_y = y + button_height * 1.6;
+        const action_row_y = y + pad;
         const button_rect = Rect.fromXYWH(
             rect.min[0] + pad,
-            button_y,
+            action_row_y,
             button_width,
             button_height,
         );
@@ -3186,7 +3218,7 @@ const App = struct {
         const save_button_x = button_rect.max[0] + pad;
         const save_button_rect = Rect.fromXYWH(
             save_button_x,
-            button_y,
+            action_row_y,
             button_width,
             button_height,
         );
@@ -3202,7 +3234,33 @@ const App = struct {
             };
         }
 
-        y += button_height + pad * 2.0;
+        const debug_button_width = button_width * 1.35;
+        const action_max_x = rect.min[0] + rect_width - pad;
+        var debug_button_x = save_button_rect.max[0] + pad;
+        var debug_button_y = action_row_y;
+        if (debug_button_x + debug_button_width > action_max_x) {
+            debug_button_x = rect.min[0] + pad;
+            debug_button_y = action_row_y + button_height + pad;
+        }
+        const debug_button_rect = Rect.fromXYWH(
+            debug_button_x,
+            debug_button_y,
+            debug_button_width,
+            button_height,
+        );
+        const open_debug_clicked = self.drawButtonWidget(
+            debug_button_rect,
+            "Open Debug Panel",
+            .{ .variant = .secondary },
+        );
+        if (open_debug_clicked) {
+            _ = self.ensureDebugPanel(manager) catch |err| {
+                std.log.err("Failed to open debug panel: {s}", .{@errorName(err)});
+            };
+        }
+
+        const actions_bottom = @max(action_row_y + button_height, debug_button_y + button_height);
+        y = actions_bottom + pad;
 
         // Status row
         const status_height: f32 = 32.0 * self.ui_scale;
@@ -3223,6 +3281,91 @@ const App = struct {
             "Tip: Enter URL, press Connect, then chat.",
             self.theme.colors.text_secondary,
         );
+    }
+
+    fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        _ = manager;
+
+        const pad = self.theme.spacing.md;
+        const line_height: f32 = 16.0 * self.ui_scale;
+        const row_height: f32 = 32.0 * self.ui_scale;
+        var y = rect.min[1] + pad;
+        const width = rect.max[0] - rect.min[0];
+
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "SpiderWeb Debug Stream",
+            self.theme.colors.text_primary,
+        );
+        y += 28.0 * self.ui_scale;
+
+        const status_text = if (self.debug_stream_pending)
+            "Status: updating subscription..."
+        else if (self.debug_stream_enabled)
+            "Status: subscribed"
+        else
+            "Status: unsubscribed";
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            status_text,
+            self.theme.colors.text_secondary,
+        );
+        y += 24.0 * self.ui_scale;
+
+        const toggle_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, width * 0.34),
+            row_height,
+        );
+        const toggle_label = if (self.debug_stream_enabled) "Stop Debug Stream" else "Start Debug Stream";
+        const toggle_clicked = self.drawButtonWidget(
+            toggle_rect,
+            toggle_label,
+            .{ .variant = .primary, .disabled = self.debug_stream_pending },
+        );
+        if (toggle_clicked) {
+            self.requestDebugSubscription(!self.debug_stream_enabled) catch |err| {
+                std.log.err("Failed to send debug subscription request: {s}", .{@errorName(err)});
+            };
+        }
+
+        y += row_height + pad;
+        const output_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(240.0, width - pad * 2.0),
+            @max(120.0, rect.max[1] - y - pad),
+        );
+        self.drawSurfacePanel(output_rect);
+
+        const usable_height = @max(0.0, output_rect.height() - 12.0);
+        const max_lines = @as(usize, @intFromFloat(@floor(usable_height / line_height)));
+        if (max_lines == 0) return;
+
+        const total = self.debug_events.items.len;
+        const start_idx = if (total > max_lines) total - max_lines else 0;
+        var line_y = output_rect.min[1] + 6.0;
+        var idx = start_idx;
+        while (idx < total) : (idx += 1) {
+            const entry = self.debug_events.items[idx];
+            const line = std.fmt.allocPrint(
+                self.allocator,
+                "{d} {s} {s}",
+                .{ entry.timestamp_ms, entry.category, entry.payload_json },
+            ) catch break;
+            defer self.allocator.free(line);
+            self.drawTextTrimmed(
+                output_rect.min[0] + 8.0,
+                line_y,
+                output_rect.width() - 16.0,
+                line,
+                self.theme.colors.text_primary,
+            );
+            line_y += line_height;
+        }
     }
 
     fn drawChatPanel(self: *App, rect: UiRect) void {
@@ -3532,6 +3675,9 @@ const App = struct {
         }
         self.clearPendingSend();
         self.clearSessions();
+        self.debug_stream_enabled = false;
+        self.debug_stream_pending = false;
+        self.clearPendingDebugRequest();
     }
 
     fn saveConfig(self: *App) !void {
@@ -3539,6 +3685,29 @@ const App = struct {
             try self.settings_panel.default_session.appendSlice(self.allocator, "main");
         }
         try self.syncSettingsToConfig();
+    }
+
+    fn requestDebugSubscription(self: *App, enable: bool) !void {
+        if (self.debug_stream_pending) return;
+        if (self.debug_stream_enabled == enable) return;
+
+        if (self.ws_client) |*client| {
+            const request_id = try self.nextMessageId("debug");
+            defer self.allocator.free(request_id);
+            const action = if (enable) "debug.subscribe" else "debug.unsubscribe";
+            const payload = try protocol_messages.buildAgentControl(self.allocator, request_id, action, null);
+            defer self.allocator.free(payload);
+            try self.setPendingDebugRequest(request_id);
+            self.debug_stream_pending = true;
+            client.send(payload) catch |err| {
+                self.debug_stream_pending = false;
+                self.clearPendingDebugRequest();
+                return err;
+            };
+            return;
+        }
+
+        try self.appendMessage("system", "Debug stream requires an active websocket connection", null);
     }
 
     fn sendChatMessageText(self: *App, text: []const u8) !void {
@@ -3644,6 +3813,25 @@ const App = struct {
         self.awaiting_reply = false;
     }
 
+    fn setPendingDebugRequest(self: *App, request_id: []const u8) !void {
+        self.clearPendingDebugRequest();
+        self.pending_debug_request_id = try self.allocator.dupe(u8, request_id);
+    }
+
+    fn clearPendingDebugRequest(self: *App) void {
+        if (self.pending_debug_request_id) |request_id| {
+            self.allocator.free(request_id);
+            self.pending_debug_request_id = null;
+        }
+    }
+
+    fn isPendingDebugRequest(self: *App, request_id: []const u8) bool {
+        if (self.pending_debug_request_id) |pending| {
+            return std.mem.eql(u8, pending, request_id);
+        }
+        return false;
+    }
+
     fn currentSessionOrDefault(self: *App) ![]const u8 {
         self.sanitizeCurrentSessionSelection();
 
@@ -3694,6 +3882,73 @@ const App = struct {
                 }
             }
         }
+    }
+
+    fn extractRequestId(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) ?[]const u8 {
+        if (root.get("request_id")) |value| {
+            if (value == .string) return value.string;
+        }
+        if (payload) |obj| {
+            if (obj.get("request_id")) |value| {
+                if (value == .string) return value.string;
+            }
+        }
+        if (root.get("request")) |value| {
+            if (value == .string) return value.string;
+        }
+        if (payload) |obj| {
+            if (obj.get("request")) |value| {
+                if (value == .string) return value.string;
+            }
+        }
+        if (root.get("id")) |value| {
+            if (value == .string) return value.string;
+        }
+        if (payload) |obj| {
+            if (obj.get("id")) |value| {
+                if (value == .string) return value.string;
+            }
+        }
+        return null;
+    }
+
+    fn handleDebugEventMessage(self: *App, root: std.json.ObjectMap) !void {
+        const timestamp = if (root.get("timestamp")) |value| switch (value) {
+            .integer => value.integer,
+            else => std.time.milliTimestamp(),
+        } else std.time.milliTimestamp();
+        const category = if (root.get("category")) |value| switch (value) {
+            .string => value.string,
+            else => "unknown",
+        } else "unknown";
+        const payload_json = if (root.get("payload")) |value|
+            try std.json.Stringify.valueAlloc(self.allocator, value, .{})
+        else
+            try self.allocator.dupe(u8, "{}");
+        defer self.allocator.free(payload_json);
+
+        if (std.mem.eql(u8, category, "control.subscription")) {
+            const payload_obj = if (root.get("payload")) |payload| switch (payload) {
+                .object => payload.object,
+                else => null,
+            } else null;
+            const request_id = extractRequestId(root, payload_obj);
+            if (payload_obj) |obj| {
+                if (obj.get("enabled")) |enabled_value| {
+                    if (enabled_value == .bool) {
+                        self.debug_stream_enabled = enabled_value.bool;
+                    }
+                }
+            }
+            if (request_id) |rid| {
+                if (self.isPendingDebugRequest(rid)) {
+                    self.debug_stream_pending = false;
+                    self.clearPendingDebugRequest();
+                }
+            }
+        }
+
+        try self.appendDebugEvent(timestamp, category, payload_json);
     }
 
     fn handleIncomingMessage(self: *App, msg: []const u8) !void {
@@ -3832,7 +4087,16 @@ const App = struct {
                     .string => value.string,
                     else => "Unknown error",
                 } else "Unknown error";
+                if (extractRequestId(root, payload)) |request_id| {
+                    if (self.isPendingDebugRequest(request_id)) {
+                        self.debug_stream_pending = false;
+                        self.clearPendingDebugRequest();
+                    }
+                }
                 try self.appendMessage("system", err_message, null);
+            },
+            .debug_event => {
+                try self.handleDebugEventMessage(root);
             },
             else => {
                 if (self.connection_state == .connected) {
@@ -4108,6 +4372,68 @@ const App = struct {
             self.allocator.free(state.key);
         }
         self.session_messages.clearRetainingCapacity();
+    }
+
+    fn clearDebugEvents(self: *App) void {
+        for (self.debug_events.items) |*entry| {
+            entry.deinit(self.allocator);
+        }
+        self.debug_events.clearRetainingCapacity();
+    }
+
+    fn appendDebugEvent(self: *App, timestamp_ms: i64, category: []const u8, payload_json: []const u8) !void {
+        while (self.debug_events.items.len >= MAX_DEBUG_EVENTS) {
+            var removed = self.debug_events.orderedRemove(0);
+            removed.deinit(self.allocator);
+        }
+
+        const category_copy = try self.allocator.dupe(u8, category);
+        errdefer self.allocator.free(category_copy);
+        const payload_copy = try self.allocator.dupe(u8, payload_json);
+        errdefer self.allocator.free(payload_copy);
+        try self.debug_events.append(self.allocator, .{
+            .timestamp_ms = timestamp_ms,
+            .category = category_copy,
+            .payload_json = payload_copy,
+        });
+    }
+
+    fn ensureDebugPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        if (self.debug_panel_id) |panel_id| {
+            if (self.findPanelById(manager, panel_id) != null) {
+                manager.focusPanel(panel_id);
+                return panel_id;
+            }
+            self.debug_panel_id = null;
+        }
+
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Debug Stream")) {
+                self.debug_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
+        }
+
+        const tool_name = try self.allocator.dupe(u8, "SpiderWeb Debug");
+        errdefer self.allocator.free(tool_name);
+        var stdout_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stdout_buf.deinit(self.allocator);
+        var stderr_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stderr_buf.deinit(self.allocator);
+        const panel_data = workspace.PanelData{ .ToolOutput = .{
+            .tool_name = tool_name,
+            .stdout = stdout_buf,
+            .stderr = stderr_buf,
+            .exit_code = 0,
+        } };
+        const panel_id = try manager.openPanel(.ToolOutput, "Debug Stream", panel_data);
+        self.debug_panel_id = panel_id;
+        if (manager.workspace.syncDockLayout() catch false) {
+            manager.workspace.markDirty();
+        }
+        manager.focusPanel(panel_id);
+        return panel_id;
     }
 
     fn addSession(self: *App, key: []const u8, display_name: []const u8) !void {
