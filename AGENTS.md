@@ -20,6 +20,7 @@ This repository is a Zig project with a clear source/test split:
 - `zig build run-gui` — build and run GUI.
 - `zig build test` — compile and run the Zig test suite.
 - `zig build run -- [args]` — run CLI with arguments from source build step.
+- If source code changes, you must run `zig build` and `zig build test` and confirm both pass before pushing to any remote.
 
 ## Coding Style & Naming Conventions
 - Follow Zig style (`zig fmt`) and standard indentation.
