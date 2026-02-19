@@ -231,6 +231,7 @@ const App = struct {
     awaiting_reply: bool = false,
     debug_stream_enabled: bool = false,
     debug_stream_pending: bool = false,
+    pending_debug_request_id: ?[]u8 = null,
     debug_panel_id: ?workspace.PanelId = null,
     debug_events: std.ArrayList(DebugEventEntry) = .empty,
     ui_commands: zui.ui.render.command_list.CommandList,
@@ -416,6 +417,7 @@ const App = struct {
         self.chat_sessions.deinit(self.allocator);
         self.session_messages.deinit(self.allocator);
         self.clearDebugEvents();
+        self.debug_events.deinit(self.allocator);
         self.invalidateWorkspaceSnapshot();
         if (self.pending_send_request_id) |request_id| self.allocator.free(request_id);
         if (self.pending_send_message_id) |message_id| self.allocator.free(message_id);
@@ -3675,6 +3677,7 @@ const App = struct {
         self.clearSessions();
         self.debug_stream_enabled = false;
         self.debug_stream_pending = false;
+        self.clearPendingDebugRequest();
     }
 
     fn saveConfig(self: *App) !void {
@@ -3694,8 +3697,13 @@ const App = struct {
             const action = if (enable) "debug.subscribe" else "debug.unsubscribe";
             const payload = try protocol_messages.buildAgentControl(self.allocator, request_id, action, null);
             defer self.allocator.free(payload);
-            try client.send(payload);
+            try self.setPendingDebugRequest(request_id);
             self.debug_stream_pending = true;
+            client.send(payload) catch |err| {
+                self.debug_stream_pending = false;
+                self.clearPendingDebugRequest();
+                return err;
+            };
             return;
         }
 
@@ -3805,6 +3813,25 @@ const App = struct {
         self.awaiting_reply = false;
     }
 
+    fn setPendingDebugRequest(self: *App, request_id: []const u8) !void {
+        self.clearPendingDebugRequest();
+        self.pending_debug_request_id = try self.allocator.dupe(u8, request_id);
+    }
+
+    fn clearPendingDebugRequest(self: *App) void {
+        if (self.pending_debug_request_id) |request_id| {
+            self.allocator.free(request_id);
+            self.pending_debug_request_id = null;
+        }
+    }
+
+    fn isPendingDebugRequest(self: *App, request_id: []const u8) bool {
+        if (self.pending_debug_request_id) |pending| {
+            return std.mem.eql(u8, pending, request_id);
+        }
+        return false;
+    }
+
     fn currentSessionOrDefault(self: *App) ![]const u8 {
         self.sanitizeCurrentSessionSelection();
 
@@ -3857,6 +3884,34 @@ const App = struct {
         }
     }
 
+    fn extractRequestId(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) ?[]const u8 {
+        if (root.get("request_id")) |value| {
+            if (value == .string) return value.string;
+        }
+        if (payload) |obj| {
+            if (obj.get("request_id")) |value| {
+                if (value == .string) return value.string;
+            }
+        }
+        if (root.get("request")) |value| {
+            if (value == .string) return value.string;
+        }
+        if (payload) |obj| {
+            if (obj.get("request")) |value| {
+                if (value == .string) return value.string;
+            }
+        }
+        if (root.get("id")) |value| {
+            if (value == .string) return value.string;
+        }
+        if (payload) |obj| {
+            if (obj.get("id")) |value| {
+                if (value == .string) return value.string;
+            }
+        }
+        return null;
+    }
+
     fn handleDebugEventMessage(self: *App, root: std.json.ObjectMap) !void {
         const timestamp = if (root.get("timestamp")) |value| switch (value) {
             .integer => value.integer,
@@ -3873,6 +3928,7 @@ const App = struct {
         defer self.allocator.free(payload_json);
 
         if (std.mem.eql(u8, category, "control.subscription")) {
+            const request_id = extractRequestId(root, null);
             if (root.get("payload")) |payload| {
                 if (payload == .object) {
                     if (payload.object.get("enabled")) |enabled_value| {
@@ -3882,7 +3938,12 @@ const App = struct {
                     }
                 }
             }
-            self.debug_stream_pending = false;
+            if (request_id) |rid| {
+                if (self.isPendingDebugRequest(rid)) {
+                    self.debug_stream_pending = false;
+                    self.clearPendingDebugRequest();
+                }
+            }
         }
 
         try self.appendDebugEvent(timestamp, category, payload_json);
@@ -4024,7 +4085,12 @@ const App = struct {
                     .string => value.string,
                     else => "Unknown error",
                 } else "Unknown error";
-                self.debug_stream_pending = false;
+                if (extractRequestId(root, payload)) |request_id| {
+                    if (self.isPendingDebugRequest(request_id)) {
+                        self.debug_stream_pending = false;
+                        self.clearPendingDebugRequest();
+                    }
+                }
                 try self.appendMessage("system", err_message, null);
             },
             .debug_event => {
