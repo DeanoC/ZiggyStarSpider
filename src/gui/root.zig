@@ -3244,7 +3244,7 @@ const App = struct {
             .{ .variant = .secondary },
         );
         if (open_debug_clicked) {
-            self.ensureDebugPanel(manager) catch |err| {
+            _ = self.ensureDebugPanel(manager) catch |err| {
                 std.log.err("Failed to open debug panel: {s}", .{@errorName(err)});
             };
         }
