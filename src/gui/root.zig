@@ -3442,13 +3442,13 @@ const App = struct {
 
         const effective_url = self.settings_panel.server_url.items;
         const connect_token = if (self.config.token.len > 0) self.config.token else self.config.auth_token;
-        const client = ws_client_mod.WebSocketClient.init(self.allocator, effective_url, connect_token) catch |err| {
+        const ws_client = ws_client_mod.WebSocketClient.init(self.allocator, effective_url, connect_token) catch |err| {
             const msg = try std.fmt.allocPrint(self.allocator, "Client init failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
             self.setConnectionState(.error_state, msg);
             return;
         };
-        self.ws_client = client;
+        self.ws_client = ws_client;
 
         self.ws_client.?.connect() catch |err| {
             self.ws_client.?.deinit();
