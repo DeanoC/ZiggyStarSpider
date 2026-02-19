@@ -70,6 +70,8 @@ const SettingsPanel = struct {
     watch_theme_pack: bool = false,
     auto_connect_on_launch: bool = true,
     focused_field: SettingsFocusField = .server_url,
+    // Vertical scroll offset for settings content
+    scroll_y: f32 = 0.0,
 
     pub fn init(allocator: std.mem.Allocator) SettingsPanel {
         var panel = SettingsPanel{};
@@ -234,6 +236,12 @@ const App = struct {
     pending_debug_request_id: ?[]u8 = null,
     debug_panel_id: ?workspace.PanelId = null,
     debug_events: std.ArrayList(DebugEventEntry) = .empty,
+    debug_scroll_y: f32 = 0.0,
+    debug_selected_index: ?usize = null,
+    debug_output_rect: Rect = Rect.fromXYWH(0, 0, 0, 0),
+    debug_scrollbar_dragging: bool = false,
+    debug_scrollbar_drag_start_y: f32 = 0.0,
+    debug_scrollbar_drag_start_scroll_y: f32 = 0.0,
     ui_commands: zui.ui.render.command_list.CommandList,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
@@ -800,6 +808,16 @@ const App = struct {
                 },
                 .text_input => |txt| {
                     try self.handleTextInput(txt.text);
+                },
+                .mouse_wheel => |mw| {
+                    if (self.debug_panel_id) |panel_id| {
+                        if (self.isPanelFocused(manager, panel_id)) {
+                            self.debug_scroll_y -= mw.delta[1] * 40.0 * self.ui_scale;
+                        }
+                    }
+                    if (self.settings_panel.focused_field != .none) {
+                        self.settings_panel.scroll_y -= mw.delta[1] * 40.0 * self.ui_scale;
+                    }
                 },
                 else => {},
             }
@@ -2339,6 +2357,10 @@ const App = struct {
         }
     }
 
+    fn isPanelFocused(_: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId) bool {
+        return manager.workspace.focused_panel_id != null and manager.workspace.focused_panel_id.? == panel_id;
+    }
+
     fn handleKeyDownEvent(self: *App, key_evt: anytype, request_spawn_window: *bool, manager: *panel_manager.PanelManager) !void {
         switch (key_evt.key) {
             .escape => {
@@ -2369,6 +2391,46 @@ const App = struct {
                         }
                     }
                 }
+                // Also allow copying selected debug line with Ctrl+C when debug panel is focused
+                if (key_evt.mods.ctrl and !key_evt.repeat and self.debug_panel_id != null and self.isPanelFocused(manager, self.debug_panel_id.?)) {
+                    // Ctrl+V handled above; we also treat Ctrl+C here
+                }
+            },
+            .c => {
+                if (key_evt.mods.ctrl and !key_evt.repeat and self.debug_selected_index != null) {
+                    var allow_copy = false;
+                    if (self.debug_panel_id != null and self.isPanelFocused(manager, self.debug_panel_id.?)) {
+                        allow_copy = true;
+                    }
+                    // Also allow Ctrl+C when mouse is over the debug output area
+                    if (self.debug_output_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+                        allow_copy = true;
+                    }
+                    if (allow_copy) {
+                        if (self.debug_selected_index) |sel_idx| {
+                            if (sel_idx < self.debug_events.items.len) {
+                                const entry = self.debug_events.items[sel_idx];
+                                const to_copy = std.fmt.allocPrint(
+                                    self.allocator,
+                                    "{d} {s} {s}",
+                                    .{ entry.timestamp_ms, entry.category, entry.payload_json },
+                                ) catch "";
+                                if (to_copy.len > 0) {
+                                    const buf = self.allocator.alloc(u8, to_copy.len + 1) catch {
+                                        self.allocator.free(to_copy);
+                                        return;
+                                    };
+                                    @memcpy(buf[0..to_copy.len], to_copy);
+                                    buf[to_copy.len] = 0;
+                                    const zslice: [:0]const u8 = buf[0..to_copy.len :0];
+                                    zapp.clipboard.setTextZ(zslice);
+                                    self.allocator.free(buf);
+                                    self.allocator.free(to_copy);
+                                }
+                            }
+                        }
+                    }
+                }
             },
             .back_space => {
                 if (self.settings_panel.focused_field == .server_url and self.settings_panel.server_url.items.len > 0) {
@@ -2395,6 +2457,60 @@ const App = struct {
                 } else if (self.settings_panel.focused_field == .ui_theme_pack and self.settings_panel.ui_theme_pack.items.len > 0) {
                     _ = self.settings_panel.ui_theme_pack.pop();
                 }
+            },
+            .page_up => {
+                if (self.debug_panel_id) |panel_id| {
+                    if (self.isPanelFocused(manager, panel_id)) {
+                        self.debug_scroll_y -= 200.0 * self.ui_scale;
+                        if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
+                    }
+                }
+                self.settings_panel.scroll_y -= 200.0 * self.ui_scale;
+                if (self.settings_panel.scroll_y < 0.0) self.settings_panel.scroll_y = 0.0;
+            },
+            .page_down => {
+                if (self.debug_panel_id) |panel_id| {
+                    if (self.isPanelFocused(manager, panel_id)) {
+                        self.debug_scroll_y += 200.0 * self.ui_scale;
+                    }
+                }
+                self.settings_panel.scroll_y += 200.0 * self.ui_scale;
+            },
+            .home => {
+                if (self.debug_panel_id) |panel_id| {
+                    if (self.isPanelFocused(manager, panel_id)) {
+                        self.debug_scroll_y = 0.0;
+                    }
+                }
+                self.settings_panel.scroll_y = 0.0;
+            },
+            .end => {
+                if (self.debug_panel_id) |panel_id| {
+                    if (self.isPanelFocused(manager, panel_id)) {
+                        // Move far down; clamped during render
+                        self.debug_scroll_y += 1_000_000.0;
+                    }
+                }
+                // Move far down; clamped during render
+                self.settings_panel.scroll_y += 1_000_000.0;
+            },
+            .up_arrow => {
+                if (self.debug_panel_id) |panel_id| {
+                    if (self.isPanelFocused(manager, panel_id)) {
+                        self.debug_scroll_y -= 40.0 * self.ui_scale;
+                        if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
+                    }
+                }
+                self.settings_panel.scroll_y -= 40.0 * self.ui_scale;
+                if (self.settings_panel.scroll_y < 0.0) self.settings_panel.scroll_y = 0.0;
+            },
+            .down_arrow => {
+                if (self.debug_panel_id) |panel_id| {
+                    if (self.isPanelFocused(manager, panel_id)) {
+                        self.debug_scroll_y += 40.0 * self.ui_scale;
+                    }
+                }
+                self.settings_panel.scroll_y += 40.0 * self.ui_scale;
             },
             else => {},
         }
@@ -2525,7 +2641,6 @@ const App = struct {
                 "Unable to recover dock layout; no panels available.",
                 self.theme.colors.text_secondary,
             );
-            self.drawStatusOverlay(fb_width, fb_height);
             return;
         }
         // Draw each dock group
@@ -2542,7 +2657,6 @@ const App = struct {
         self.collectDockInteractionGeometry(ui_window.manager, viewport, &drag_tab_hits, &drag_drop_targets);
         self.drawDockDragOverlay(&ui_window.queue, ui_window.manager, ui_window, &drag_drop_targets, viewport);
 
-        // Draw connection status overlay
         self.drawStatusOverlay(fb_width, fb_height);
     }
 
@@ -3013,7 +3127,8 @@ const App = struct {
 
     fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         const pad = self.theme.spacing.md;
-        var y = rect.min[1] + pad;
+        // Apply vertical scroll offset
+        var y = rect.min[1] + pad - self.settings_panel.scroll_y;
         const rect_width = rect.max[0] - rect.min[0];
 
         // Title
@@ -3197,7 +3312,7 @@ const App = struct {
 
         // Action buttons
         const button_width: f32 = 120.0 * self.ui_scale;
-        const action_row_y = y + pad;
+        const action_row_y = y + button_height + pad;
         const button_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             action_row_y,
@@ -3281,6 +3396,15 @@ const App = struct {
             "Tip: Enter URL, press Connect, then chat.",
             self.theme.colors.text_secondary,
         );
+
+        // Update scroll bounds based on total content height
+        const content_bottom_scrolled = y;
+        const content_bottom = content_bottom_scrolled + self.settings_panel.scroll_y;
+        const total_height = content_bottom - (rect.min[1] + pad);
+        const viewport_h = @max(0.0, rect.max[1] - rect.min[1] - pad * 2.0);
+        const max_scroll = if (total_height > viewport_h) total_height - viewport_h else 0.0;
+        if (self.settings_panel.scroll_y < 0.0) self.settings_panel.scroll_y = 0.0;
+        if (self.settings_panel.scroll_y > max_scroll) self.settings_panel.scroll_y = max_scroll;
     }
 
     fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
@@ -3339,32 +3463,188 @@ const App = struct {
             @max(240.0, width - pad * 2.0),
             @max(120.0, rect.max[1] - y - pad),
         );
+        // Save for keyboard handling (Ctrl+C allowed when mouse is over output area)
+        self.debug_output_rect = output_rect;
         self.drawSurfacePanel(output_rect);
 
         const usable_height = @max(0.0, output_rect.height() - 12.0);
-        const max_lines = @as(usize, @intFromFloat(@floor(usable_height / line_height)));
-        if (max_lines == 0) return;
+        if (usable_height <= 0) return;
 
-        const total = self.debug_events.items.len;
-        const start_idx = if (total > max_lines) total - max_lines else 0;
-        var line_y = output_rect.min[1] + 6.0;
-        var idx = start_idx;
-        while (idx < total) : (idx += 1) {
-            const entry = self.debug_events.items[idx];
+        const max_text_width = output_rect.width() - 16.0;
+
+        // Push clip rect for the log stream area
+        self.ui_commands.pushClip(.{ .min = output_rect.min, .max = output_rect.max });
+        defer self.ui_commands.popClip();
+
+        // If a selection exists, compute the Copy button rect early so selection hit-test can ignore it
+        var have_copy_rect = false;
+        var copy_btn_rect: Rect = Rect.fromXYWH(0, 0, 0, 0);
+        if (self.debug_selected_index) |_| {
+            const copy_btn_w: f32 = 80.0 * self.ui_scale;
+            const copy_btn_h: f32 = 24.0 * self.ui_scale;
+            copy_btn_rect = Rect.fromXYWH(
+                output_rect.max[0] - copy_btn_w - 4.0,
+                output_rect.min[1] + 4.0,
+                copy_btn_w,
+                copy_btn_h,
+            );
+            have_copy_rect = true;
+        }
+
+        // Precompute total wrapped content height for scrolling
+        var total_wrapped_height: f32 = 0.0;
+        for (self.debug_events.items) |entry| {
+            const line = std.fmt.allocPrint(
+                self.allocator,
+                "{d} {s} {s}",
+                .{ entry.timestamp_ms, entry.category, entry.payload_json },
+            ) catch "";
+            if (line.len == 0) {
+                total_wrapped_height += line_height;
+            } else {
+                total_wrapped_height += self.measureTextWrappedHeight(max_text_width, line);
+                self.allocator.free(line);
+            }
+        }
+
+        // Apply scroll offset
+        var cur_y = output_rect.min[1] + 6.0 - self.debug_scroll_y;
+
+        for (self.debug_events.items, 0..) |entry, idx| {
             const line = std.fmt.allocPrint(
                 self.allocator,
                 "{d} {s} {s}",
                 .{ entry.timestamp_ms, entry.category, entry.payload_json },
             ) catch break;
             defer self.allocator.free(line);
-            self.drawTextTrimmed(
+
+            const entry_h = self.measureTextWrappedHeight(max_text_width, line);
+
+            // Skip entries above the visible area
+            if (cur_y + entry_h < output_rect.min[1]) {
+                cur_y += entry_h;
+                continue;
+            }
+            // Stop if we're below the visible area
+            if (cur_y > output_rect.max[1]) break;
+
+            const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
+            const entry_rect = Rect.fromXYWH(output_rect.min[0], cur_y, output_rect.width(), entry_h);
+
+            // Handle selection; ignore click if it was on top of the Copy button
+            if (self.mouse_clicked and entry_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+                if (!(have_copy_rect and copy_btn_rect.contains(.{ self.mouse_x, self.mouse_y }))) {
+                    self.debug_selected_index = idx;
+                }
+            }
+
+            if (is_selected) {
+                const select_color = zcolors.withAlpha(self.theme.colors.primary, 0.25);
+                self.drawFilledRect(entry_rect, select_color);
+            }
+
+            _ = self.drawTextWrapped(
                 output_rect.min[0] + 8.0,
-                line_y,
-                output_rect.width() - 16.0,
+                cur_y,
+                max_text_width,
                 line,
                 self.theme.colors.text_primary,
             );
-            line_y += line_height;
+            cur_y += entry_h;
+        }
+
+        // Handle scroll wheel if mouse is over output_rect
+        // Note: we don't have direct access to mouse wheel here easily without changing processInputEvents,
+        // but we can add keyboard support in handleKeyDownEvent.
+
+        // Calculate total content height for scrolling (based on wrapped lines)
+        const total_content_height = total_wrapped_height + 12.0;
+        const max_scroll = @max(0.0, total_content_height - output_rect.height());
+
+        // Update scroll bounds
+        if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
+        if (self.debug_scroll_y > max_scroll) self.debug_scroll_y = max_scroll;
+
+        // Draw scrollbar
+        if (max_scroll > 0) {
+            const sb_width: f32 = 8.0 * self.ui_scale;
+            const sb_track_rect = Rect.fromXYWH(
+                output_rect.max[0] - sb_width - 2.0,
+                output_rect.min[1] + 2.0,
+                sb_width,
+                output_rect.height() - 4.0,
+            );
+
+            const thumb_height = @max(20.0, sb_track_rect.height() * (output_rect.height() / total_content_height));
+            const thumb_y_ratio = self.debug_scroll_y / max_scroll;
+            const thumb_y = sb_track_rect.min[1] + thumb_y_ratio * (sb_track_rect.height() - thumb_height);
+            const thumb_rect = Rect.fromXYWH(
+                sb_track_rect.min[0],
+                thumb_y,
+                sb_width,
+                thumb_height,
+            );
+
+            // Draw track
+            self.drawFilledRect(sb_track_rect, zcolors.withAlpha(self.theme.colors.border, 0.3));
+
+            // Draw thumb
+            const is_hovered = thumb_rect.contains(.{ self.mouse_x, self.mouse_y });
+            const thumb_color = if (self.debug_scrollbar_dragging)
+                self.theme.colors.primary
+            else if (is_hovered)
+                zcolors.blend(self.theme.colors.border, self.theme.colors.primary, 0.5)
+            else
+                self.theme.colors.border;
+
+            self.drawFilledRect(thumb_rect, thumb_color);
+
+            // Handle scrollbar dragging
+            if (self.mouse_clicked and is_hovered) {
+                self.debug_scrollbar_dragging = true;
+                self.debug_scrollbar_drag_start_y = self.mouse_y;
+                self.debug_scrollbar_drag_start_scroll_y = self.debug_scroll_y;
+            }
+
+            if (self.debug_scrollbar_dragging) {
+                if (self.mouse_down) {
+                    const delta_y = self.mouse_y - self.debug_scrollbar_drag_start_y;
+                    const scroll_per_pixel = max_scroll / (sb_track_rect.height() - thumb_height);
+                    self.debug_scroll_y = self.debug_scrollbar_drag_start_scroll_y + delta_y * scroll_per_pixel;
+                } else {
+                    self.debug_scrollbar_dragging = false;
+                }
+            }
+        } else {
+            self.debug_scrollbar_dragging = false;
+        }
+
+        // Draw a simple Copy button if something is selected (use the same rect as computed above)
+        if (self.debug_selected_index) |sel_idx| {
+            if (sel_idx < self.debug_events.items.len) {
+                // copy_btn_rect already computed above so clicks won't also select a line beneath it
+                if (self.drawButtonWidget(copy_btn_rect, "Copy", .{ .variant = .secondary })) {
+                    const entry = self.debug_events.items[sel_idx];
+                    const to_copy = std.fmt.allocPrint(
+                        self.allocator,
+                        "{d} {s} {s}",
+                        .{ entry.timestamp_ms, entry.category, entry.payload_json },
+                    ) catch "";
+                    if (to_copy.len > 0) {
+                        const buf = self.allocator.alloc(u8, to_copy.len + 1) catch {
+                            self.allocator.free(to_copy);
+                            // Out of memory: skip copy
+                            return;
+                        };
+                        @memcpy(buf[0..to_copy.len], to_copy);
+                        buf[to_copy.len] = 0;
+                        const zslice: [:0]const u8 = buf[0..to_copy.len :0];
+                        zapp.clipboard.setTextZ(zslice);
+                        self.allocator.free(buf);
+                        self.allocator.free(to_copy);
+                    }
+                }
+            }
         }
     }
 
@@ -3912,6 +4192,228 @@ const App = struct {
         return null;
     }
 
+    fn isJsonString(s: []const u8) bool {
+        const trimmed = std.mem.trim(u8, s, " \n\r\t");
+        if (trimmed.len < 2) return false;
+        if (trimmed[0] == '{' and trimmed[trimmed.len - 1] == '}') return true;
+        if (trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') return true;
+        return false;
+    }
+
+    fn looksLikeEscaped(s: []const u8) bool {
+        var i: usize = 0;
+        while (i + 1 < s.len) : (i += 1) {
+            if (s[i] == '\\') {
+                const next_ch = s[i + 1];
+                switch (next_ch) {
+                    'n', 'r', 't', '"', '\\' => return true,
+                    'u' => return true, // unicode escape
+                    else => {},
+                }
+            }
+        }
+        return false;
+    }
+
+    fn hexVal(b: u8) ?u8 {
+        if (b >= '0' and b <= '9') return b - '0';
+        if (b >= 'a' and b <= 'f') return 10 + (b - 'a');
+        if (b >= 'A' and b <= 'F') return 10 + (b - 'A');
+        return null;
+    }
+
+    fn unescapeJsonStringAlloc(self: *App, s: []const u8) ![]u8 {
+        // Allocate worst-case size; we'll slice down at the end
+        var out = try self.allocator.alloc(u8, s.len);
+        errdefer self.allocator.free(out);
+
+        var j: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) : (i += 1) {
+            const ch = s[i];
+            if (ch == '\\' and i + 1 < s.len) {
+                const esc = s[i + 1];
+                switch (esc) {
+                    'n' => { out[j] = '\n'; j += 1; i += 1; continue; },
+                    'r' => { out[j] = '\r'; j += 1; i += 1; continue; },
+                    't' => { out[j] = '\t'; j += 1; i += 1; continue; },
+                    '"' => { out[j] = '"'; j += 1; i += 1; continue; },
+                    '\\' => { out[j] = '\\'; j += 1; i += 1; continue; },
+                    'u' => {
+                        // Minimal handling: keep as-is if malformed
+                        if (i + 5 < s.len) {
+                            // Try to parse 4 hex digits and encode as UTF-8
+                            const h0 = s[i + 2];
+                            const h1 = s[i + 3];
+                            const h2 = s[i + 4];
+                            const h3 = s[i + 5];
+                            const v0 = hexVal(h0) orelse { out[j] = ch; j += 1; continue; };
+                            const v1 = hexVal(h1) orelse { out[j] = ch; j += 1; continue; };
+                            const v2 = hexVal(h2) orelse { out[j] = ch; j += 1; continue; };
+                            const v3 = hexVal(h3) orelse { out[j] = ch; j += 1; continue; };
+                            const code_unit: u16 = (@as(u16, v0) << 12) | (@as(u16, v1) << 8) | (@as(u16, v2) << 4) | @as(u16, v3);
+                            var buf: [4]u8 = undefined;
+                            const wrote = std.unicode.utf8Encode(@as(u21, code_unit), &buf) catch {
+                                // Fallback: copy literally
+                                out[j] = ch; j += 1;
+                                continue;
+                            };
+                            @memcpy(out[j..j + wrote], buf[0..wrote]);
+                            j += wrote;
+                            i += 5; // consumed '\\uXXXX'
+                            continue;
+                        }
+                        // Not enough bytes, just copy
+                        out[j] = ch; j += 1;
+                        continue;
+                    },
+                    else => {
+                        // Unknown escape; drop backslash and keep char
+                        out[j] = esc; j += 1; i += 1; continue;
+                    },
+                }
+            }
+            out[j] = ch;
+            j += 1;
+        }
+        return self.allocator.realloc(out, j);
+    }
+
+    fn prettifyValue(self: *App, val: std.json.Value) error{OutOfMemory}!std.json.Value {
+        switch (val) {
+            .string => |s| {
+                const s_trimmed = std.mem.trim(u8, s, " \n\r\t");
+                if (isJsonString(s_trimmed)) {
+                    const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, s_trimmed, .{}) catch null;
+                    if (parsed) |p| {
+                        defer p.deinit();
+                        const cloned = try self.cloneJsonValue(p.value);
+                        errdefer self.freePrettifiedValue(cloned);
+                        const pretty = try self.prettifyValue(cloned);
+                        if (!std.meta.eql(pretty, cloned)) {
+                            self.freePrettifiedValue(cloned);
+                        }
+                        return pretty;
+                    }
+                }
+
+                if (std.mem.indexOfScalar(u8, s, '\n') != null) {
+                    var new_arr = std.json.Array.init(self.allocator);
+                    errdefer self.freePrettifiedValue(.{ .array = new_arr });
+                    var iter = std.mem.splitScalar(u8, s, '\n');
+                    while (iter.next()) |line| {
+                        const line_trimmed = std.mem.trimRight(u8, line, "\r");
+                        // We must dupe the line because prettifyValue may transform/clone; we own and must free our duplicate
+                        const duped_line = try self.allocator.dupe(u8, line_trimmed);
+                        defer self.allocator.free(duped_line);
+                        const v = try self.prettifyValue(.{ .string = duped_line });
+                        // v is now owned. If append fails, we must free v.
+                        errdefer self.freePrettifiedValue(v);
+                        try new_arr.append(v);
+                    }
+                    return std.json.Value{ .array = new_arr };
+                }
+
+                if (looksLikeEscaped(s)) {
+                    const un = self.unescapeJsonStringAlloc(s) catch return try self.cloneJsonValue(val);
+                    defer self.allocator.free(un);
+                    const v = try self.prettifyValue(.{ .string = un });
+                    return v;
+                }
+
+                return try self.cloneJsonValue(val);
+            },
+            .object => |obj| {
+                var new_obj = std.json.ObjectMap.init(self.allocator);
+                errdefer self.freePrettifiedValue(.{ .object = new_obj });
+                var iter = obj.iterator();
+                while (iter.next()) |entry| {
+                    const k = try self.allocator.dupe(u8, entry.key_ptr.*);
+                    errdefer self.allocator.free(k);
+                    const v = try self.prettifyValue(entry.value_ptr.*);
+                    try new_obj.put(k, v);
+                }
+                return std.json.Value{ .object = new_obj };
+            },
+            .array => |arr| {
+                var new_arr = std.json.Array.init(self.allocator);
+                errdefer self.freePrettifiedValue(.{ .array = new_arr });
+                for (arr.items) |v| {
+                    try new_arr.append(try self.prettifyValue(v));
+                }
+                return std.json.Value{ .array = new_arr };
+            },
+            else => return val, // non-allocated types are safe to return by value
+        }
+    }
+
+    fn freePrettifiedValue(self: *App, val: std.json.Value) void {
+        switch (val) {
+            .object => |obj| {
+                var mut_obj = obj;
+                var it = mut_obj.iterator();
+                while (it.next()) |entry| {
+                    self.allocator.free(entry.key_ptr.*);
+                    self.freePrettifiedValue(entry.value_ptr.*);
+                }
+                mut_obj.deinit();
+            },
+            .array => |arr| {
+                var mut_arr = arr;
+                for (mut_arr.items) |v| {
+                    self.freePrettifiedValue(v);
+                }
+                mut_arr.deinit();
+            },
+            .string => |s| {
+                self.allocator.free(s);
+            },
+            else => {},
+        }
+    }
+
+    fn cloneJsonValue(self: *App, val: std.json.Value) error{OutOfMemory}!std.json.Value {
+        switch (val) {
+            .object => |obj| {
+                var new_obj = std.json.ObjectMap.init(self.allocator);
+                errdefer {
+                    var iter = new_obj.iterator();
+                    while (iter.next()) |entry| {
+                        self.allocator.free(entry.key_ptr.*);
+                        self.freePrettifiedValue(entry.value_ptr.*);
+                    }
+                    new_obj.deinit();
+                }
+                var iter = obj.iterator();
+                while (iter.next()) |entry| {
+                    const key_copy = try self.allocator.dupe(u8, entry.key_ptr.*);
+                    errdefer self.allocator.free(key_copy);
+                    const value_copy = try self.cloneJsonValue(entry.value_ptr.*);
+                    try new_obj.put(key_copy, value_copy);
+                }
+                return std.json.Value{ .object = new_obj };
+            },
+            .array => |arr| {
+                var new_arr = std.json.Array.init(self.allocator);
+                errdefer {
+                    for (new_arr.items) |it| {
+                        self.freePrettifiedValue(it);
+                    }
+                    new_arr.deinit();
+                }
+                for (arr.items) |it| {
+                    try new_arr.append(try self.cloneJsonValue(it));
+                }
+                return std.json.Value{ .array = new_arr };
+            },
+            .string => |s| {
+                const s_copy = try self.allocator.dupe(u8, s);
+                return std.json.Value{ .string = s_copy };
+            },
+            else => return val,
+        }
+    }
+
     fn handleDebugEventMessage(self: *App, root: std.json.ObjectMap) !void {
         const timestamp = if (root.get("timestamp")) |value| switch (value) {
             .integer => value.integer,
@@ -3921,10 +4423,15 @@ const App = struct {
             .string => value.string,
             else => "unknown",
         } else "unknown";
-        const payload_json = if (root.get("payload")) |value|
-            try std.json.Stringify.valueAlloc(self.allocator, value, .{})
+
+        // Prettify the payload before stringifying
+        const prettified = if (root.get("payload")) |p|
+            self.prettifyValue(p) catch try self.cloneJsonValue(p)
         else
-            try self.allocator.dupe(u8, "{}");
+            std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
+        defer self.freePrettifiedValue(prettified);
+
+        const payload_json = try std.json.Stringify.valueAlloc(self.allocator, prettified, .{ .whitespace = .indent_4 });
         defer self.allocator.free(payload_json);
 
         if (std.mem.eql(u8, category, "control.subscription")) {
@@ -4115,6 +4622,20 @@ const App = struct {
         final: bool,
         timestamp: i64,
     ) !void {
+        // Best-effort: unescape common JSON escapes for display ONLY if chunk starts and ends with quotes,
+        // which strongly suggests it's a JSON-encoded string literal.
+        var use = chunk;
+        var owned = false;
+        if (chunk.len >= 2 and chunk[0] == '"' and chunk[chunk.len - 1] == '"') {
+            if (looksLikeEscaped(chunk)) {
+                if (self.unescapeJsonStringAlloc(chunk)) |tmp| {
+                    use = tmp;
+                    owned = true;
+                } else |_| {}
+            }
+        }
+        defer if (owned) self.allocator.free(use);
+
         const target_session = if (request_id) |request| blk: {
             if (self.pending_send_request_id) |pending| {
                 if (std.mem.eql(u8, pending, request)) {
@@ -4144,15 +4665,16 @@ const App = struct {
 
             if (self.findMessageIndex(target, stream_id)) |idx| {
                 if (final) {
-                    try self.setMessageContentByIndex(target, idx, chunk);
+                    try self.setMessageContentByIndex(target, idx, use);
                 } else {
-                    try self.appendToMessage(target, idx, chunk);
+                    try self.appendToMessage(target, idx, use);
                 }
                 if (state.messages.items.len > idx) {
                     state.messages.items[idx].timestamp = timestamp;
                 }
             } else {
-                _ = try self.appendMessageWithIdForSession(target, "assistant", chunk, null, stream_id);
+                const new_id = try self.appendMessageWithIdForSession(target, "assistant", use, null, stream_id);
+                self.allocator.free(new_id);
             }
 
             if (self.pending_send_request_id) |pending| {
@@ -4173,7 +4695,7 @@ const App = struct {
             return;
         }
 
-        try self.appendMessageForSession(target, "assistant", chunk, null);
+        try self.appendMessageForSession(target, "assistant", use, null);
     }
 
     fn findSessionMessageState(self: *App, key: []const u8) ?*SessionMessageState {
@@ -4370,6 +4892,7 @@ const App = struct {
         for (self.session_messages.items) |*state| {
             state.messages.deinit(self.allocator);
             self.allocator.free(state.key);
+            if (state.streaming_request_id) |rid| self.allocator.free(rid);
         }
         self.session_messages.clearRetainingCapacity();
     }
@@ -4613,6 +5136,106 @@ const App = struct {
 
     fn drawText(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
         self.ui_commands.pushText(text, .{ x, y }, color, .body, @intFromFloat(14.0 * self.ui_scale));
+    }
+
+    fn drawTextWrapped(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) f32 {
+        var current_y = y;
+        const line_height: f32 = 16.0 * self.ui_scale;
+
+        // Split by existing newlines first
+        var lines_iter = std.mem.splitScalar(u8, text, '\n');
+        while (lines_iter.next()) |raw_line| {
+            if (raw_line.len == 0) {
+                current_y += line_height;
+                continue;
+            }
+
+            var line_start: usize = 0;
+            while (line_start < raw_line.len) {
+                var low: usize = line_start;
+                var high: usize = raw_line.len;
+                var best_end: usize = line_start;
+
+                // Find how many characters fit in the line
+                while (low <= high) {
+                    const mid = low + (high - low) / 2;
+                    if (self.measureText(raw_line[line_start..mid]) <= max_w) {
+                        best_end = mid;
+                        low = mid + 1;
+                    } else {
+                        high = mid - 1;
+                    }
+                }
+
+                // Ensure we make progress
+                if (best_end == line_start) best_end = line_start + 1;
+
+                // Word wrap optimization: if we didn't hit the end, try to find the last space
+                if (best_end < raw_line.len) {
+                    if (std.mem.lastIndexOfScalar(u8, raw_line[line_start..best_end], ' ')) |last_space| {
+                        if (last_space > 0) {
+                            best_end = line_start + last_space + 1;
+                        }
+                    }
+                }
+
+                self.drawText(x, current_y, raw_line[line_start..best_end], color);
+                current_y += line_height;
+                line_start = best_end;
+
+                // Trim leading spaces for next wrapped line part
+                while (line_start < raw_line.len and raw_line[line_start] == ' ') : (line_start += 1) {}
+            }
+        }
+        return current_y - y;
+    }
+
+    fn measureTextWrappedHeight(self: *App, max_w: f32, text: []const u8) f32 {
+        const line_height: f32 = 16.0 * self.ui_scale;
+        var total_height: f32 = 0;
+
+        if (text.len == 0) return line_height;
+
+        // Split by existing newlines first
+        var lines_iter = std.mem.splitScalar(u8, text, '\n');
+        while (lines_iter.next()) |raw_line| {
+            if (raw_line.len == 0) {
+                total_height += line_height;
+                continue;
+            }
+
+            var line_start: usize = 0;
+            while (line_start < raw_line.len) {
+                var low: usize = line_start;
+                var high: usize = raw_line.len;
+                var best_end: usize = line_start;
+
+                while (low <= high) {
+                    const mid = low + (high - low) / 2;
+                    if (self.measureText(raw_line[line_start..mid]) <= max_w) {
+                        best_end = mid;
+                        low = mid + 1;
+                    } else {
+                        high = mid - 1;
+                    }
+                }
+
+                if (best_end == line_start) best_end = line_start + 1;
+
+                if (best_end < raw_line.len) {
+                    if (std.mem.lastIndexOfScalar(u8, raw_line[line_start..best_end], ' ')) |last_space| {
+                        if (last_space > 0) {
+                            best_end = line_start + last_space + 1;
+                        }
+                    }
+                }
+
+                total_height += line_height;
+                line_start = best_end;
+                while (line_start < raw_line.len and raw_line[line_start] == ' ') : (line_start += 1) {}
+            }
+        }
+        return total_height;
     }
 
     fn measureText(self: *App, text: []const u8) f32 {
