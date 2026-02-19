@@ -4221,6 +4221,8 @@ const App = struct {
     fn unescapeJsonStringAlloc(self: *App, s: []const u8) ![]u8 {
         // Allocate worst-case size; we'll slice down at the end
         var out = try self.allocator.alloc(u8, s.len);
+        errdefer self.allocator.free(out);
+
         var j: usize = 0;
         var i: usize = 0;
         while (i < s.len) : (i += 1) {
@@ -4270,7 +4272,7 @@ const App = struct {
             out[j] = ch;
             j += 1;
         }
-        return out[0..j];
+        return self.allocator.realloc(out, j);
     }
 
     fn prettifyValue(self: *App, val: std.json.Value) error{OutOfMemory}!std.json.Value {
