@@ -26,6 +26,14 @@ pub fn buildSessionSend(allocator: std.mem.Allocator, id: []const u8, content: [
 
 pub const buildChatSend = buildSessionSend;
 
+pub fn buildConnect(allocator: std.mem.Allocator, id: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"type\":\"connect\",\"id\":\"{s}\",\"timestamp\":{d}}}",
+        .{ id, std.time.milliTimestamp() },
+    );
+}
+
 pub fn parseMessageType(json: []const u8) ?MessageType {
     const type_prefix = "\"type\":\"";
 

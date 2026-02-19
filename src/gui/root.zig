@@ -3459,6 +3459,28 @@ const App = struct {
             return;
         };
 
+        if (self.ws_client) |*client| {
+            const connect_id = try self.nextMessageId("connect");
+            defer self.allocator.free(connect_id);
+            const connect_payload = protocol_messages.buildConnect(self.allocator, connect_id) catch |err| {
+                client.deinit();
+                self.ws_client = null;
+                const msg = try std.fmt.allocPrint(self.allocator, "Connect envelope failed: {s}", .{@errorName(err)});
+                defer self.allocator.free(msg);
+                self.setConnectionState(.error_state, msg);
+                return;
+            };
+            defer self.allocator.free(connect_payload);
+            client.send(connect_payload) catch |err| {
+                client.deinit();
+                self.ws_client = null;
+                const msg = try std.fmt.allocPrint(self.allocator, "Connect envelope send failed: {s}", .{@errorName(err)});
+                defer self.allocator.free(msg);
+                self.setConnectionState(.error_state, msg);
+                return;
+            };
+        }
+
         self.setConnectionState(.connected, "Connected");
         self.settings_panel.focused_field = .none;
 
