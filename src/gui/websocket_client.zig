@@ -67,6 +67,7 @@ pub const WebSocketClient = struct {
     // Threading - using manual read loop (like ZSC)
     read_thread: ?std.Thread = null,
     should_stop: std.atomic.Value(bool),
+    connection_alive: std.atomic.Value(bool),
     message_queue: MessageQueue,
 
     pub fn init(allocator: std.mem.Allocator, url: []const u8, token: []const u8) !WebSocketClient {
@@ -75,6 +76,7 @@ pub const WebSocketClient = struct {
             .url_buf = try allocator.dupe(u8, url),
             .token_buf = try allocator.dupe(u8, token),
             .should_stop = std.atomic.Value(bool).init(false),
+            .connection_alive = std.atomic.Value(bool).init(false),
             .message_queue = MessageQueue.init(allocator),
         };
     }
@@ -130,6 +132,7 @@ pub const WebSocketClient = struct {
         self.client = client;
         client_owned_locally = false;
         self.should_stop.store(false, .release);
+        self.connection_alive.store(true, .release);
 
         // Start our own read loop thread (like ZSC does)
         self.read_thread = try std.Thread.spawn(.{}, readLoop, .{self});
@@ -148,10 +151,12 @@ pub const WebSocketClient = struct {
                     },
                     error.Closed, error.ConnectionResetByPeer => {
                         std.log.info("[WS] Connection closed", .{});
+                        self.connection_alive.store(false, .release);
                         break;
                     },
                     else => {
                         std.log.err("[WS] read error: {s}", .{@errorName(err)});
+                        self.connection_alive.store(false, .release);
                         break;
                     },
                 } orelse {
@@ -187,12 +192,14 @@ pub const WebSocketClient = struct {
             }
         }
 
+        self.connection_alive.store(false, .release);
         std.log.info("[WS] readLoop thread stopped (should_stop={})", .{self.should_stop.load(.acquire)});
     }
 
     pub fn disconnect(self: *WebSocketClient) void {
         // Signal thread to stop
         self.should_stop.store(true, .release);
+        self.connection_alive.store(false, .release);
         
         // Close connection
         if (self.client) |*client| {
@@ -211,16 +218,22 @@ pub const WebSocketClient = struct {
 
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
         if (self.client == null) return error.NotConnected;
+        if (!self.connection_alive.load(.acquire)) return error.ConnectionClosed;
         std.log.info("[WS] Sending {d} bytes", .{ payload.len });
         if (self.client) |*client| {
             client.write(@constCast(payload)) catch |err| {
                 std.log.err("[WS] Send failed: {s}", .{@errorName(err)});
+                self.connection_alive.store(false, .release);
                 return err;
             };
             std.log.info("[WS] Send successful", .{});
             return;
         }
         return error.NotConnected;
+    }
+
+    pub fn isAlive(self: *WebSocketClient) bool {
+        return self.client != null and self.connection_alive.load(.acquire);
     }
 
     /// Non-blocking check for messages. Returns null if none available.
@@ -241,6 +254,7 @@ pub const WebSocketClient = struct {
         if (self.tryReceive()) |msg| {
             return msg;
         }
+        if (!self.connection_alive.load(.acquire)) return error.ConnectionClosed;
         return error.WouldBlock;
     }
 };

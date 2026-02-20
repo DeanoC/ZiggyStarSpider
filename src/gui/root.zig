@@ -2338,6 +2338,21 @@ const App = struct {
 
     fn pollWebSocket(self: *App) !void {
         if (self.ws_client) |*client| {
+            if (!client.isAlive()) {
+                if (self.pending_send_message_id) |message_id| {
+                    try self.setMessageFailed(message_id);
+                }
+                self.clearPendingSend();
+                self.debug_stream_pending = false;
+                self.clearPendingDebugRequest();
+
+                client.deinit();
+                self.ws_client = null;
+                self.setConnectionState(.error_state, "Connection lost. Please reconnect.");
+                try self.appendMessage("system", "Connection lost. Please reconnect.", null);
+                return;
+            }
+
             var count: u32 = 0;
             // Drain all available messages (non-blocking, like ZSC)
             while (client.tryReceive()) |msg| {
