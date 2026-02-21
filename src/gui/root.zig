@@ -4441,14 +4441,12 @@ const App = struct {
             else => "unknown",
         } else "unknown";
 
-        // Prettify the payload before stringifying
-        const prettified = if (root.get("payload")) |p|
-            self.prettifyValue(p) catch try self.cloneJsonValue(p)
+        // Render payload directly to keep debug streaming resilient for large/complex payloads.
+        const payload_json = if (root.get("payload")) |payload|
+            std.json.Stringify.valueAlloc(self.allocator, payload, .{ .whitespace = .indent_4 }) catch
+                try self.allocator.dupe(u8, "{\"error\":\"failed to format debug payload\"}")
         else
-            std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
-        defer self.freePrettifiedValue(prettified);
-
-        const payload_json = try std.json.Stringify.valueAlloc(self.allocator, prettified, .{ .whitespace = .indent_4 });
+            try self.allocator.dupe(u8, "{}");
         defer self.allocator.free(payload_json);
 
         if (std.mem.eql(u8, category, "control.subscription")) {
