@@ -3511,11 +3511,7 @@ const App = struct {
         // Precompute total wrapped content height for scrolling
         var total_wrapped_height: f32 = 0.0;
         for (self.debug_events.items) |entry| {
-            const line = std.fmt.allocPrint(
-                self.allocator,
-                "{d} {s} {s}",
-                .{ entry.timestamp_ms, entry.category, entry.payload_json },
-            ) catch "";
+            const line = self.formatDebugEventLine(entry) catch "";
             if (line.len == 0) {
                 total_wrapped_height += line_height;
             } else {
@@ -3528,11 +3524,7 @@ const App = struct {
         var cur_y = output_rect.min[1] + 6.0 - self.debug_scroll_y;
 
         for (self.debug_events.items, 0..) |entry, idx| {
-            const line = std.fmt.allocPrint(
-                self.allocator,
-                "{d} {s} {s}",
-                .{ entry.timestamp_ms, entry.category, entry.payload_json },
-            ) catch break;
+            const line = self.formatDebugEventLine(entry) catch break;
             defer self.allocator.free(line);
 
             const entry_h = self.measureTextWrappedHeight(max_text_width, line);
@@ -3642,11 +3634,7 @@ const App = struct {
                 // copy_btn_rect already computed above so clicks won't also select a line beneath it
                 if (self.drawButtonWidget(copy_btn_rect, "Copy", .{ .variant = .secondary })) {
                     const entry = self.debug_events.items[sel_idx];
-                    const to_copy = std.fmt.allocPrint(
-                        self.allocator,
-                        "{d} {s} {s}",
-                        .{ entry.timestamp_ms, entry.category, entry.payload_json },
-                    ) catch "";
+                    const to_copy = self.formatDebugEventLine(entry) catch "";
                     if (to_copy.len > 0) {
                         const buf = self.allocator.alloc(u8, to_copy.len + 1) catch {
                             self.allocator.free(to_copy);
@@ -4431,6 +4419,86 @@ const App = struct {
         }
     }
 
+    fn formatDebugPayloadJson(self: *App, payload: std.json.Value) ![]u8 {
+        var pretty = payload;
+        var used_pretty = false;
+        if (self.prettifyValue(payload)) |val| {
+            pretty = val;
+            used_pretty = true;
+        } else |_| {}
+        defer if (used_pretty) self.freePrettifiedValue(pretty);
+
+        return std.json.Stringify.valueAlloc(self.allocator, pretty, .{ .whitespace = .indent_2 });
+    }
+
+    fn recordDecodeError(self: *App, reason: []const u8, msg: []const u8) !void {
+        const preview_max: usize = 1024;
+        var preview = msg;
+        var preview_owned: ?[]u8 = null;
+        if (msg.len > preview_max) {
+            const suffix = "...(truncated)";
+            const total = preview_max + suffix.len;
+            const buf = try self.allocator.alloc(u8, total);
+            @memcpy(buf[0..preview_max], msg[0..preview_max]);
+            @memcpy(buf[preview_max..total], suffix);
+            preview_owned = buf;
+            preview = buf;
+        }
+        defer if (preview_owned) |buf| self.allocator.free(buf);
+
+        var obj = std.json.ObjectMap.init(self.allocator);
+        errdefer self.freePrettifiedValue(.{ .object = obj });
+
+        const key_error = try self.allocator.dupe(u8, "error");
+        errdefer self.allocator.free(key_error);
+        const val_error = try self.allocator.dupe(u8, reason);
+        errdefer self.allocator.free(val_error);
+        try obj.put(key_error, .{ .string = val_error });
+
+        const key_bytes = try self.allocator.dupe(u8, "bytes");
+        errdefer self.allocator.free(key_bytes);
+        try obj.put(key_bytes, .{ .integer = @intCast(msg.len) });
+
+        const key_preview = try self.allocator.dupe(u8, "preview");
+        errdefer self.allocator.free(key_preview);
+        const val_preview = try self.allocator.dupe(u8, preview);
+        errdefer self.allocator.free(val_preview);
+        try obj.put(key_preview, .{ .string = val_preview });
+
+        const value = std.json.Value{ .object = obj };
+        defer self.freePrettifiedValue(value);
+
+        const payload_json = std.json.Stringify.valueAlloc(self.allocator, value, .{ .whitespace = .indent_2 }) catch |err| {
+            std.log.err("Failed to format decode error payload: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.allocator.free(payload_json);
+
+        try self.appendDebugEvent(std.time.milliTimestamp(), "decode.error", payload_json);
+    }
+
+    fn formatDebugEventLine(self: *App, entry: DebugEventEntry) ![]u8 {
+        if (std.mem.indexOfScalar(u8, entry.payload_json, '\n') == null) {
+            return std.fmt.allocPrint(
+                self.allocator,
+                "{d} {s} {s}",
+                .{ entry.timestamp_ms, entry.category, entry.payload_json },
+            );
+        }
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        try out.writer(self.allocator).print("{d} {s}\n", .{ entry.timestamp_ms, entry.category });
+        var iter = std.mem.splitScalar(u8, entry.payload_json, '\n');
+        while (iter.next()) |line| {
+            try out.writer(self.allocator).print("  {s}\n", .{line});
+        }
+        if (out.items.len > 0 and out.items[out.items.len - 1] == '\n') {
+            _ = out.pop();
+        }
+        return out.toOwnedSlice(self.allocator);
+    }
+
     fn handleDebugEventMessage(self: *App, root: std.json.ObjectMap) !void {
         const timestamp = if (root.get("timestamp")) |value| switch (value) {
             .integer => value.integer,
@@ -4442,11 +4510,11 @@ const App = struct {
         } else "unknown";
 
         // Render payload directly to keep debug streaming resilient for large/complex payloads.
-        const payload_json = if (root.get("payload")) |payload|
-            std.json.Stringify.valueAlloc(self.allocator, payload, .{ .whitespace = .indent_4 }) catch
-                try self.allocator.dupe(u8, "{\"error\":\"failed to format debug payload\"}")
-        else
-            try self.allocator.dupe(u8, "{}");
+        const payload_json = if (root.get("payload")) |payload| blk: {
+            if (self.formatDebugPayloadJson(payload)) |pretty| break :blk pretty else |_| {
+                break :blk try self.allocator.dupe(u8, "{\"error\":\"failed to format debug payload\"}");
+            }
+        } else try self.allocator.dupe(u8, "{}");
         defer self.allocator.free(payload_json);
 
         if (std.mem.eql(u8, category, "control.subscription")) {
@@ -4474,9 +4542,15 @@ const App = struct {
     }
 
     fn handleIncomingMessage(self: *App, msg: []const u8) !void {
-        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{});
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch |err| {
+            self.recordDecodeError(@errorName(err), msg) catch {};
+            return;
+        };
         defer parsed.deinit();
-        if (parsed.value != .object) return;
+        if (parsed.value != .object) {
+            self.recordDecodeError("non-object json", msg) catch {};
+            return;
+        }
         const root = parsed.value.object;
 
         const mt = protocol_messages.parseMessageType(msg) orelse return;
