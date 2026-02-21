@@ -3540,8 +3540,8 @@ const App = struct {
 
         var total_content_height: f32 = 12.0;
         for (self.debug_events.items) |entry| {
-            const payload_visible_lines = self.countVisibleDebugPayloadLines(entry);
-            const visible_lines = 1 + payload_visible_lines;
+            const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - 14.0, entry);
+            const visible_lines = 1 + payload_visible_rows;
             total_content_height += line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
         }
         const max_scroll = @max(0.0, total_content_height - output_rect.height());
@@ -3553,8 +3553,8 @@ const App = struct {
 
         var cur_y = output_rect.min[1] + 6.0 - self.debug_scroll_y;
         for (self.debug_events.items, 0..) |entry, idx| {
-            const payload_visible_lines = self.countVisibleDebugPayloadLines(entry);
-            const visible_lines = 1 + payload_visible_lines;
+            const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - 14.0, entry);
+            const visible_lines = 1 + payload_visible_rows;
             const entry_h = line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
 
             if (cur_y + entry_h < output_rect.min[1]) {
@@ -3607,17 +3607,13 @@ const App = struct {
                     text_x = line_x_base + marker_w + self.measureText(" ");
                 }
 
-                self.drawJsonLineColored(text_x, line_y, content_max_x, content);
+                const rows_used = self.drawJsonLineColored(text_x, line_y, content_max_x, content);
 
                 if (can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx)) {
-                    const preview_x = text_x + self.measureText(content) + self.measureText(" ");
-                    if (preview_x < content_max_x) {
-                        self.drawText(preview_x, line_y, "...", self.theme.colors.text_secondary);
-                    }
                     next_line_idx = @as(usize, @intCast(meta.matching_close_index.?)) + 1;
                 }
 
-                line_y += line_height;
+                line_y += line_height * @as(f32, @floatFromInt(rows_used));
                 payload_line_idx = next_line_idx;
             }
 
@@ -3736,12 +3732,23 @@ const App = struct {
         }
     }
 
-    fn countVisibleDebugPayloadLines(self: *App, entry: DebugEventEntry) usize {
-        var count: usize = 0;
+    fn countVisibleDebugPayloadRows(self: *App, output_min_x: f32, content_max_x: f32, entry: DebugEventEntry) usize {
+        const fold_marker_w = self.measureText("[-]") + self.measureText(" ");
+        var rows: usize = 0;
         var line_index: usize = 0;
         while (line_index < entry.payload_lines.items.len) {
-            count += 1;
             const meta = entry.payload_lines.items[line_index];
+            const line = entry.payload_json[meta.start..meta.end];
+            const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * 6.5 * self.ui_scale;
+            const line_x_base = output_min_x + 8.0 + indent_width;
+            const content_start = @min(meta.indent_spaces, line.len);
+            const content = line[content_start..];
+
+            const can_fold = meta.opens_block and meta.matching_close_index != null and
+                @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1;
+            const text_x = if (can_fold) line_x_base + fold_marker_w else line_x_base;
+            rows += self.measureJsonLineWrapRows(text_x, content_max_x, content);
+
             if (meta.opens_block and meta.matching_close_index != null and
                 @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1 and
                 self.isDebugBlockCollapsed(entry.id, line_index))
@@ -3751,7 +3758,20 @@ const App = struct {
                 line_index += 1;
             }
         }
-        return count;
+        return rows;
+    }
+
+    fn measureJsonLineWrapRows(self: *App, line_x: f32, max_x: f32, line: []const u8) usize {
+        const line_height: f32 = 16.0 * self.ui_scale;
+        const available_w = @max(1.0, max_x - line_x);
+        const h = self.measureTextWrappedHeight(available_w, line);
+
+        var rows: usize = 1;
+        var remaining = h - line_height;
+        while (remaining > line_height * 0.05) : (rows += 1) {
+            remaining -= line_height;
+        }
+        return rows;
     }
 
     fn debugCategoryColor(self: *App, category: []const u8) [4]f32 {
@@ -3795,40 +3815,102 @@ const App = struct {
         };
     }
 
-    fn drawJsonToken(
+    fn wrappedLineBreak(self: *App, wrap_x: f32, cursor_x: *f32, cursor_y: *f32, rows: *usize) void {
+        const line_height: f32 = 16.0 * self.ui_scale;
+        cursor_x.* = wrap_x;
+        cursor_y.* += line_height;
+        rows.* += 1;
+    }
+
+    fn maxFittingPrefix(self: *App, text: []const u8, max_w: f32) usize {
+        if (text.len == 0 or max_w <= 0.0) return 0;
+
+        var low: usize = 0;
+        var high: usize = text.len;
+        while (low < high) {
+            const mid = low + (high - low + 1) / 2;
+            if (self.measureText(text[0..mid]) <= max_w) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        return low;
+    }
+
+    fn drawJsonTokenWrapped(
         self: *App,
+        wrap_x: f32,
         cursor_x: *f32,
-        y: f32,
+        cursor_y: *f32,
         max_x: f32,
         token: []const u8,
         color: [4]f32,
+        rows: *usize,
     ) void {
-        if (token.len == 0 or cursor_x.* >= max_x) return;
-        const remaining = max_x - cursor_x.*;
-        const token_w = self.measureText(token);
-        if (token_w <= remaining) {
-            self.drawText(cursor_x.*, y, token, color);
-            cursor_x.* += token_w;
-            return;
+        if (token.len == 0) return;
+
+        var start: usize = 0;
+        while (start < token.len) {
+            const remaining_w = max_x - cursor_x.*;
+            if (remaining_w <= 0.0) {
+                if (cursor_x.* > wrap_x) {
+                    self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
+                    continue;
+                }
+                const single = token[start .. start + 1];
+                self.drawText(cursor_x.*, cursor_y.*, single, color);
+                cursor_x.* += self.measureText(single);
+                start += 1;
+                continue;
+            }
+
+            const rest = token[start..];
+            const fit = self.maxFittingPrefix(rest, remaining_w);
+            if (fit == 0) {
+                if (cursor_x.* > wrap_x) {
+                    self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
+                    continue;
+                }
+                const single = rest[0..1];
+                self.drawText(cursor_x.*, cursor_y.*, single, color);
+                cursor_x.* += self.measureText(single);
+                start += 1;
+                continue;
+            }
+
+            const piece = rest[0..fit];
+            self.drawText(cursor_x.*, cursor_y.*, piece, color);
+            cursor_x.* += self.measureText(piece);
+            start += fit;
+
+            if (start < token.len) {
+                self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
+            }
         }
-        self.drawTextTrimmed(cursor_x.*, y, remaining, token, color);
-        cursor_x.* = max_x;
     }
 
     fn isJsonDelimiter(ch: u8) bool {
         return ch == ' ' or ch == '\t' or ch == ',' or ch == ':' or ch == ']' or ch == '}' or ch == '[' or ch == '{';
     }
 
-    fn drawJsonLineColored(self: *App, x: f32, y: f32, max_x: f32, line: []const u8) void {
+    fn drawJsonLineColored(self: *App, x: f32, y: f32, max_x: f32, line: []const u8) usize {
         var cursor_x = x;
+        var cursor_y = y;
+        var rows: usize = 1;
         var i: usize = 0;
-        while (i < line.len and cursor_x < max_x) {
+        while (i < line.len) {
             const ch = line[i];
 
             if (ch == ' ' or ch == '\t') {
                 var j = i + 1;
                 while (j < line.len and (line[j] == ' ' or line[j] == '\t')) : (j += 1) {}
-                cursor_x += self.measureText(line[i..j]);
+                const ws_width = self.measureText(line[i..j]);
+                if (cursor_x + ws_width <= max_x) {
+                    cursor_x += ws_width;
+                } else if (cursor_x > x) {
+                    self.wrappedLineBreak(x, &cursor_x, &cursor_y, &rows);
+                }
                 i = j;
                 continue;
             }
@@ -3859,13 +3941,13 @@ const App = struct {
                 if (k < line.len and line[k] == ':') {
                     kind = .key;
                 }
-                self.drawJsonToken(&cursor_x, y, max_x, line[i..j], self.jsonTokenColor(kind));
+                self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..j], self.jsonTokenColor(kind), &rows);
                 i = j;
                 continue;
             }
 
             if (ch == '{' or ch == '}' or ch == '[' or ch == ']' or ch == ':' or ch == ',') {
-                self.drawJsonToken(&cursor_x, y, max_x, line[i .. i + 1], self.jsonTokenColor(.punctuation));
+                self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i .. i + 1], self.jsonTokenColor(.punctuation), &rows);
                 i += 1;
                 continue;
             }
@@ -3878,7 +3960,7 @@ const App = struct {
                         break;
                     }
                 }
-                self.drawJsonToken(&cursor_x, y, max_x, line[i..j], self.jsonTokenColor(.number));
+                self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..j], self.jsonTokenColor(.number), &rows);
                 i = j;
                 continue;
             }
@@ -3886,7 +3968,7 @@ const App = struct {
             if (std.mem.startsWith(u8, line[i..], "true")) {
                 const end = i + 4;
                 if (end == line.len or isJsonDelimiter(line[end])) {
-                    self.drawJsonToken(&cursor_x, y, max_x, line[i..end], self.jsonTokenColor(.keyword));
+                    self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..end], self.jsonTokenColor(.keyword), &rows);
                     i = end;
                     continue;
                 }
@@ -3894,7 +3976,7 @@ const App = struct {
             if (std.mem.startsWith(u8, line[i..], "false")) {
                 const end = i + 5;
                 if (end == line.len or isJsonDelimiter(line[end])) {
-                    self.drawJsonToken(&cursor_x, y, max_x, line[i..end], self.jsonTokenColor(.keyword));
+                    self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..end], self.jsonTokenColor(.keyword), &rows);
                     i = end;
                     continue;
                 }
@@ -3902,7 +3984,7 @@ const App = struct {
             if (std.mem.startsWith(u8, line[i..], "null")) {
                 const end = i + 4;
                 if (end == line.len or isJsonDelimiter(line[end])) {
-                    self.drawJsonToken(&cursor_x, y, max_x, line[i..end], self.jsonTokenColor(.keyword));
+                    self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..end], self.jsonTokenColor(.keyword), &rows);
                     i = end;
                     continue;
                 }
@@ -3915,9 +3997,10 @@ const App = struct {
                     break;
                 }
             }
-            self.drawJsonToken(&cursor_x, y, max_x, line[i..j], self.jsonTokenColor(.plain));
+            self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..j], self.jsonTokenColor(.plain), &rows);
             i = j;
         }
+        return rows;
     }
 
     fn drawChatPanel(self: *App, rect: UiRect) void {
