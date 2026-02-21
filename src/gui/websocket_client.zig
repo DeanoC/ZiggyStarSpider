@@ -42,7 +42,7 @@ const MessageQueue = struct {
         if (self.items.items.len == 0) {
             return null;
         }
-        return self.items.swapRemove(0);
+        return self.items.orderedRemove(0);
     }
 
     fn popWait(self: *MessageQueue, timeout_ms: u32) ?[]u8 {
@@ -54,7 +54,7 @@ const MessageQueue = struct {
         if (self.items.items.len == 0) {
             return null;
         }
-        return self.items.swapRemove(0);
+        return self.items.orderedRemove(0);
     }
 };
 
@@ -324,4 +324,28 @@ fn parseUrl(allocator: std.mem.Allocator, input: []const u8) !ParsedUrl {
         .path = path,
         .tls = tls,
     };
+}
+
+test "MessageQueue preserves FIFO order" {
+    const allocator = std.testing.allocator;
+    var q = MessageQueue.init(allocator);
+    defer q.deinit();
+
+    q.push(try allocator.dupe(u8, "one"));
+    q.push(try allocator.dupe(u8, "two"));
+    q.push(try allocator.dupe(u8, "three"));
+
+    const first = q.pop().?;
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("one", first);
+
+    const second = q.pop().?;
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings("two", second);
+
+    const third = q.pop().?;
+    defer allocator.free(third);
+    try std.testing.expectEqualStrings("three", third);
+
+    try std.testing.expect(q.pop() == null);
 }
