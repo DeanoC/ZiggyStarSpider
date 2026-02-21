@@ -2632,9 +2632,10 @@ const App = struct {
         ui_draw_context.setGlobalCommandList(&self.ui_commands);
         defer ui_draw_context.clearGlobalCommandList();
 
+        const status_height: f32 = 24.0 * self.ui_scale;
         const viewport = UiRect.fromMinSize(
             .{ 0, 0 },
-            .{ @floatFromInt(fb_width), @floatFromInt(fb_height) },
+            .{ @floatFromInt(fb_width), @as(f32, @floatFromInt(fb_height)) - status_height },
         );
 
         // Draw background
@@ -2693,9 +2694,10 @@ const App = struct {
             .{ .fill = self.theme.colors.background },
         );
 
+        const status_height: f32 = 24.0 * self.ui_scale;
         const viewport = UiRect.fromMinSize(
             .{ 0, 0 },
-            .{ @floatFromInt(fb_width), @floatFromInt(fb_height) },
+            .{ @floatFromInt(fb_width), @as(f32, @floatFromInt(fb_height)) - status_height },
         );
         ui_window.ui_state.last_dock_content_rect = viewport;
 
