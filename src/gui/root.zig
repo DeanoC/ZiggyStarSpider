@@ -109,14 +109,39 @@ const SessionMessageState = struct {
 };
 
 const DebugEventEntry = struct {
+    id: u64,
     timestamp_ms: i64,
     category: []u8,
     payload_json: []u8,
+    payload_lines: std.ArrayList(DebugPayloadLine) = .empty,
 
     fn deinit(self: *DebugEventEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.category);
         allocator.free(self.payload_json);
+        self.payload_lines.deinit(allocator);
     }
+};
+
+const DebugPayloadLine = struct {
+    start: usize,
+    end: usize,
+    indent_spaces: usize,
+    opens_block: bool = false,
+    matching_close_index: ?u32 = null,
+};
+
+const DebugFoldKey = struct {
+    event_id: u64,
+    line_index: u32,
+};
+
+const JsonTokenKind = enum {
+    key,
+    string,
+    number,
+    keyword,
+    punctuation,
+    plain,
 };
 
 const DockTabHit = struct {
@@ -236,6 +261,8 @@ const App = struct {
     pending_debug_request_id: ?[]u8 = null,
     debug_panel_id: ?workspace.PanelId = null,
     debug_events: std.ArrayList(DebugEventEntry) = .empty,
+    debug_next_event_id: u64 = 1,
+    debug_folded_blocks: std.AutoHashMap(DebugFoldKey, void),
     debug_scroll_y: f32 = 0.0,
     debug_selected_index: ?usize = null,
     debug_output_rect: Rect = Rect.fromXYWH(0, 0, 0, 0),
@@ -367,6 +394,7 @@ const App = struct {
             .config = config,
             .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
             .frame_clock = zapp.frame_clock.FrameClock.init(60),
+            .debug_folded_blocks = std.AutoHashMap(DebugFoldKey, void).init(allocator),
             .manager = undefined,
         };
         app.applyThemeFromSettings();
@@ -426,6 +454,7 @@ const App = struct {
         self.session_messages.deinit(self.allocator);
         self.clearDebugEvents();
         self.debug_events.deinit(self.allocator);
+        self.debug_folded_blocks.deinit();
         self.invalidateWorkspaceSnapshot();
         if (self.pending_send_request_id) |request_id| self.allocator.free(request_id);
         if (self.pending_send_message_id) |message_id| self.allocator.free(message_id);
@@ -3428,8 +3457,9 @@ const App = struct {
         _ = manager;
 
         const pad = self.theme.spacing.md;
-        const line_height: f32 = 16.0 * self.ui_scale;
         const row_height: f32 = 32.0 * self.ui_scale;
+        const line_height: f32 = 16.0 * self.ui_scale;
+        const event_gap: f32 = 4.0 * self.ui_scale;
         var y = rect.min[1] + pad;
         const width = rect.max[0] - rect.min[0];
 
@@ -3453,7 +3483,15 @@ const App = struct {
             status_text,
             self.theme.colors.text_secondary,
         );
-        y += 24.0 * self.ui_scale;
+        y += 20.0 * self.ui_scale;
+
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Fold nested JSON with [+]/[-].",
+            self.theme.colors.text_secondary,
+        );
+        y += 22.0 * self.ui_scale;
 
         const toggle_rect = Rect.fromXYWH(
             rect.min[0] + pad,
@@ -3480,20 +3518,12 @@ const App = struct {
             @max(240.0, width - pad * 2.0),
             @max(120.0, rect.max[1] - y - pad),
         );
-        // Save for keyboard handling (Ctrl+C allowed when mouse is over output area)
         self.debug_output_rect = output_rect;
         self.drawSurfacePanel(output_rect);
 
         const usable_height = @max(0.0, output_rect.height() - 12.0);
         if (usable_height <= 0) return;
 
-        const max_text_width = output_rect.width() - 16.0;
-
-        // Push clip rect for the log stream area
-        self.ui_commands.pushClip(.{ .min = output_rect.min, .max = output_rect.max });
-        defer self.ui_commands.popClip();
-
-        // If a selection exists, compute the Copy button rect early so selection hit-test can ignore it
         var have_copy_rect = false;
         var copy_btn_rect: Rect = Rect.fromXYWH(0, 0, 0, 0);
         if (self.debug_selected_index) |_| {
@@ -3508,73 +3538,94 @@ const App = struct {
             have_copy_rect = true;
         }
 
-        // Precompute total wrapped content height for scrolling
-        var total_wrapped_height: f32 = 0.0;
+        var total_content_height: f32 = 12.0;
         for (self.debug_events.items) |entry| {
-            const line = self.formatDebugEventLine(entry) catch "";
-            if (line.len == 0) {
-                total_wrapped_height += line_height;
-            } else {
-                total_wrapped_height += self.measureTextWrappedHeight(max_text_width, line);
-                self.allocator.free(line);
-            }
+            const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - 14.0, entry);
+            const visible_lines = 1 + payload_visible_rows;
+            total_content_height += line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
         }
+        const max_scroll = @max(0.0, total_content_height - output_rect.height());
+        if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
+        if (self.debug_scroll_y > max_scroll) self.debug_scroll_y = max_scroll;
 
-        // Apply scroll offset
+        self.ui_commands.pushClip(.{ .min = output_rect.min, .max = output_rect.max });
+        defer self.ui_commands.popClip();
+
         var cur_y = output_rect.min[1] + 6.0 - self.debug_scroll_y;
-
         for (self.debug_events.items, 0..) |entry, idx| {
-            const line = self.formatDebugEventLine(entry) catch break;
-            defer self.allocator.free(line);
+            const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - 14.0, entry);
+            const visible_lines = 1 + payload_visible_rows;
+            const entry_h = line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
 
-            const entry_h = self.measureTextWrappedHeight(max_text_width, line);
-
-            // Skip entries above the visible area
             if (cur_y + entry_h < output_rect.min[1]) {
                 cur_y += entry_h;
                 continue;
             }
-            // Stop if we're below the visible area
             if (cur_y > output_rect.max[1]) break;
 
+            const entry_rect = Rect.fromXYWH(output_rect.min[0], cur_y, output_rect.width(), entry_h - event_gap);
             const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
-            const entry_rect = Rect.fromXYWH(output_rect.min[0], cur_y, output_rect.width(), entry_h);
-
-            // Handle selection; ignore click if it was on top of the Copy button
-            if (self.mouse_clicked and entry_rect.contains(.{ self.mouse_x, self.mouse_y })) {
-                if (!(have_copy_rect and copy_btn_rect.contains(.{ self.mouse_x, self.mouse_y }))) {
-                    self.debug_selected_index = idx;
-                }
-            }
-
             if (is_selected) {
                 const select_color = zcolors.withAlpha(self.theme.colors.primary, 0.25);
                 self.drawFilledRect(entry_rect, select_color);
             }
 
-            _ = self.drawTextWrapped(
-                output_rect.min[0] + 8.0,
-                cur_y,
-                max_text_width,
-                line,
-                self.theme.colors.text_primary,
-            );
+            const content_max_x = output_rect.max[0] - 14.0;
+            self.drawDebugEventHeaderLine(output_rect.min[0] + 8.0, cur_y, content_max_x, entry);
+
+            var clicked_fold_marker = false;
+            var line_y = cur_y + line_height;
+            var payload_line_idx: usize = 0;
+            while (payload_line_idx < entry.payload_lines.items.len) {
+                const meta = entry.payload_lines.items[payload_line_idx];
+                const line = entry.payload_json[meta.start..meta.end];
+                const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * 6.5 * self.ui_scale;
+                const line_x_base = output_rect.min[0] + 8.0 + indent_width;
+                const content_start = @min(meta.indent_spaces, line.len);
+                const content = line[content_start..];
+
+                var next_line_idx = payload_line_idx + 1;
+                var text_x = line_x_base;
+
+                const can_fold = meta.opens_block and meta.matching_close_index != null and
+                    @as(usize, @intCast(meta.matching_close_index.?)) > payload_line_idx + 1;
+                if (can_fold) {
+                    const marker = if (self.isDebugBlockCollapsed(entry.id, payload_line_idx)) "[+]" else "[-]";
+                    const marker_w = self.measureText(marker);
+                    const marker_rect = Rect.fromXYWH(line_x_base, line_y, marker_w, line_height);
+                    const marker_hovered = marker_rect.contains(.{ self.mouse_x, self.mouse_y });
+                    if (self.mouse_clicked and marker_hovered) {
+                        self.toggleDebugBlockCollapsed(entry.id, payload_line_idx);
+                        clicked_fold_marker = true;
+                    }
+
+                    const marker_color = if (marker_hovered)
+                        zcolors.blend(self.theme.colors.primary, self.theme.colors.text_primary, 0.22)
+                    else
+                        self.theme.colors.primary;
+                    self.drawText(line_x_base, line_y, marker, marker_color);
+                    text_x = line_x_base + marker_w + self.measureText(" ");
+                }
+
+                const rows_used = self.drawJsonLineColored(text_x, line_y, content_max_x, content);
+
+                if (can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx)) {
+                    next_line_idx = @as(usize, @intCast(meta.matching_close_index.?)) + 1;
+                }
+
+                line_y += line_height * @as(f32, @floatFromInt(rows_used));
+                payload_line_idx = next_line_idx;
+            }
+
+            const clicked_entry = self.mouse_clicked and entry_rect.contains(.{ self.mouse_x, self.mouse_y });
+            const clicked_copy = have_copy_rect and copy_btn_rect.contains(.{ self.mouse_x, self.mouse_y });
+            if (clicked_entry and !clicked_copy and !clicked_fold_marker) {
+                self.debug_selected_index = idx;
+            }
+
             cur_y += entry_h;
         }
 
-        // Handle scroll wheel if mouse is over output_rect
-        // Note: we don't have direct access to mouse wheel here easily without changing processInputEvents,
-        // but we can add keyboard support in handleKeyDownEvent.
-
-        // Calculate total content height for scrolling (based on wrapped lines)
-        const total_content_height = total_wrapped_height + 12.0;
-        const max_scroll = @max(0.0, total_content_height - output_rect.height());
-
-        // Update scroll bounds
-        if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
-        if (self.debug_scroll_y > max_scroll) self.debug_scroll_y = max_scroll;
-
-        // Draw scrollbar
         if (max_scroll > 0) {
             const sb_width: f32 = 8.0 * self.ui_scale;
             const sb_track_rect = Rect.fromXYWH(
@@ -3594,10 +3645,8 @@ const App = struct {
                 thumb_height,
             );
 
-            // Draw track
             self.drawFilledRect(sb_track_rect, zcolors.withAlpha(self.theme.colors.border, 0.3));
 
-            // Draw thumb
             const is_hovered = thumb_rect.contains(.{ self.mouse_x, self.mouse_y });
             const thumb_color = if (self.debug_scrollbar_dragging)
                 self.theme.colors.primary
@@ -3605,10 +3654,8 @@ const App = struct {
                 zcolors.blend(self.theme.colors.border, self.theme.colors.primary, 0.5)
             else
                 self.theme.colors.border;
-
             self.drawFilledRect(thumb_rect, thumb_color);
 
-            // Handle scrollbar dragging
             if (self.mouse_clicked and is_hovered) {
                 self.debug_scrollbar_dragging = true;
                 self.debug_scrollbar_drag_start_y = self.mouse_y;
@@ -3628,17 +3675,14 @@ const App = struct {
             self.debug_scrollbar_dragging = false;
         }
 
-        // Draw a simple Copy button if something is selected (use the same rect as computed above)
         if (self.debug_selected_index) |sel_idx| {
             if (sel_idx < self.debug_events.items.len) {
-                // copy_btn_rect already computed above so clicks won't also select a line beneath it
                 if (self.drawButtonWidget(copy_btn_rect, "Copy", .{ .variant = .secondary })) {
                     const entry = self.debug_events.items[sel_idx];
                     const to_copy = self.formatDebugEventLine(entry) catch "";
                     if (to_copy.len > 0) {
                         const buf = self.allocator.alloc(u8, to_copy.len + 1) catch {
                             self.allocator.free(to_copy);
-                            // Out of memory: skip copy
                             return;
                         };
                         @memcpy(buf[0..to_copy.len], to_copy);
@@ -3651,6 +3695,312 @@ const App = struct {
                 }
             }
         }
+    }
+
+    fn makeDebugFoldKey(event_id: u64, line_index: usize) DebugFoldKey {
+        return .{
+            .event_id = event_id,
+            .line_index = @intCast(line_index),
+        };
+    }
+
+    fn isDebugBlockCollapsed(self: *App, event_id: u64, line_index: usize) bool {
+        return self.debug_folded_blocks.contains(makeDebugFoldKey(event_id, line_index));
+    }
+
+    fn toggleDebugBlockCollapsed(self: *App, event_id: u64, line_index: usize) void {
+        const key = makeDebugFoldKey(event_id, line_index);
+        if (self.debug_folded_blocks.contains(key)) {
+            _ = self.debug_folded_blocks.remove(key);
+            return;
+        }
+        self.debug_folded_blocks.put(key, {}) catch {};
+    }
+
+    fn pruneDebugFoldStateForEvent(self: *App, event_id: u64) void {
+        var to_remove: std.ArrayList(DebugFoldKey) = .empty;
+        defer to_remove.deinit(self.allocator);
+
+        var it = self.debug_folded_blocks.keyIterator();
+        while (it.next()) |key_ptr| {
+            if (key_ptr.*.event_id == event_id) {
+                to_remove.append(self.allocator, key_ptr.*) catch return;
+            }
+        }
+        for (to_remove.items) |key| {
+            _ = self.debug_folded_blocks.remove(key);
+        }
+    }
+
+    fn countVisibleDebugPayloadRows(self: *App, output_min_x: f32, content_max_x: f32, entry: DebugEventEntry) usize {
+        const fold_marker_w = self.measureText("[-]") + self.measureText(" ");
+        var rows: usize = 0;
+        var line_index: usize = 0;
+        while (line_index < entry.payload_lines.items.len) {
+            const meta = entry.payload_lines.items[line_index];
+            const line = entry.payload_json[meta.start..meta.end];
+            const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * 6.5 * self.ui_scale;
+            const line_x_base = output_min_x + 8.0 + indent_width;
+            const content_start = @min(meta.indent_spaces, line.len);
+            const content = line[content_start..];
+
+            const can_fold = meta.opens_block and meta.matching_close_index != null and
+                @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1;
+            const text_x = if (can_fold) line_x_base + fold_marker_w else line_x_base;
+            rows += self.measureJsonLineWrapRows(text_x, content_max_x, content);
+
+            if (meta.opens_block and meta.matching_close_index != null and
+                @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1 and
+                self.isDebugBlockCollapsed(entry.id, line_index))
+            {
+                line_index = @as(usize, @intCast(meta.matching_close_index.?)) + 1;
+            } else {
+                line_index += 1;
+            }
+        }
+        return rows;
+    }
+
+    fn measureJsonLineWrapRows(self: *App, line_x: f32, max_x: f32, line: []const u8) usize {
+        const line_height: f32 = 16.0 * self.ui_scale;
+        const available_w = @max(1.0, max_x - line_x);
+        const h = self.measureTextWrappedHeight(available_w, line);
+
+        var rows: usize = 1;
+        var remaining = h - line_height;
+        while (remaining > line_height * 0.05) : (rows += 1) {
+            remaining -= line_height;
+        }
+        return rows;
+    }
+
+    fn debugCategoryColor(self: *App, category: []const u8) [4]f32 {
+        if (std.mem.indexOf(u8, category, "error") != null) {
+            return zcolors.rgba(196, 74, 74, 255);
+        }
+        if (std.mem.startsWith(u8, category, "control.")) {
+            return zcolors.blend(self.theme.colors.primary, self.theme.colors.text_primary, 0.32);
+        }
+        if (std.mem.startsWith(u8, category, "session.")) {
+            return zcolors.rgba(64, 134, 196, 255);
+        }
+        return self.theme.colors.text_primary;
+    }
+
+    fn drawDebugEventHeaderLine(self: *App, x: f32, y: f32, max_x: f32, entry: DebugEventEntry) void {
+        var ts_buf: [64]u8 = undefined;
+        const ts = std.fmt.bufPrint(&ts_buf, "{d}", .{entry.timestamp_ms}) catch "0";
+
+        // Use a fixed timestamp column so category text never overlaps when
+        // text measurement is slightly off relative to actual glyph widths.
+        const ts_col_w = 116.0 * self.ui_scale;
+        const ts_max_w = @max(0.0, @min(ts_col_w, max_x - x));
+        self.drawTextTrimmed(x, y, ts_max_w, ts, self.theme.colors.text_secondary);
+
+        const cursor_x = x + ts_col_w + 6.0 * self.ui_scale;
+        if (cursor_x >= max_x) return;
+
+        const category_max = @max(0.0, max_x - cursor_x);
+        self.drawTextTrimmed(cursor_x, y, category_max, entry.category, self.debugCategoryColor(entry.category));
+    }
+
+    fn jsonTokenColor(self: *App, kind: JsonTokenKind) [4]f32 {
+        return switch (kind) {
+            .key => zcolors.blend(self.theme.colors.text_primary, self.theme.colors.primary, 0.5),
+            .string => zcolors.rgba(48, 140, 92, 255),
+            .number => zcolors.rgba(193, 126, 54, 255),
+            .keyword => zcolors.rgba(137, 88, 186, 255),
+            .punctuation => self.theme.colors.text_secondary,
+            .plain => self.theme.colors.text_primary,
+        };
+    }
+
+    fn wrappedLineBreak(self: *App, wrap_x: f32, cursor_x: *f32, cursor_y: *f32, rows: *usize) void {
+        const line_height: f32 = 16.0 * self.ui_scale;
+        cursor_x.* = wrap_x;
+        cursor_y.* += line_height;
+        rows.* += 1;
+    }
+
+    fn maxFittingPrefix(self: *App, text: []const u8, max_w: f32) usize {
+        if (text.len == 0 or max_w <= 0.0) return 0;
+
+        var low: usize = 0;
+        var high: usize = text.len;
+        while (low < high) {
+            const mid = low + (high - low + 1) / 2;
+            if (self.measureText(text[0..mid]) <= max_w) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        return low;
+    }
+
+    fn drawJsonTokenWrapped(
+        self: *App,
+        wrap_x: f32,
+        cursor_x: *f32,
+        cursor_y: *f32,
+        max_x: f32,
+        token: []const u8,
+        color: [4]f32,
+        rows: *usize,
+    ) void {
+        if (token.len == 0) return;
+
+        var start: usize = 0;
+        while (start < token.len) {
+            const remaining_w = max_x - cursor_x.*;
+            if (remaining_w <= 0.0) {
+                if (cursor_x.* > wrap_x) {
+                    self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
+                    continue;
+                }
+                const single = token[start .. start + 1];
+                self.drawText(cursor_x.*, cursor_y.*, single, color);
+                cursor_x.* += self.measureText(single);
+                start += 1;
+                continue;
+            }
+
+            const rest = token[start..];
+            const fit = self.maxFittingPrefix(rest, remaining_w);
+            if (fit == 0) {
+                if (cursor_x.* > wrap_x) {
+                    self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
+                    continue;
+                }
+                const single = rest[0..1];
+                self.drawText(cursor_x.*, cursor_y.*, single, color);
+                cursor_x.* += self.measureText(single);
+                start += 1;
+                continue;
+            }
+
+            const piece = rest[0..fit];
+            self.drawText(cursor_x.*, cursor_y.*, piece, color);
+            cursor_x.* += self.measureText(piece);
+            start += fit;
+
+            if (start < token.len) {
+                self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
+            }
+        }
+    }
+
+    fn isJsonDelimiter(ch: u8) bool {
+        return ch == ' ' or ch == '\t' or ch == ',' or ch == ':' or ch == ']' or ch == '}' or ch == '[' or ch == '{';
+    }
+
+    fn drawJsonLineColored(self: *App, x: f32, y: f32, max_x: f32, line: []const u8) usize {
+        var cursor_x = x;
+        var cursor_y = y;
+        var rows: usize = 1;
+        var i: usize = 0;
+        while (i < line.len) {
+            const ch = line[i];
+
+            if (ch == ' ' or ch == '\t') {
+                var j = i + 1;
+                while (j < line.len and (line[j] == ' ' or line[j] == '\t')) : (j += 1) {}
+                const ws_width = self.measureText(line[i..j]);
+                if (cursor_x + ws_width <= max_x) {
+                    cursor_x += ws_width;
+                } else if (cursor_x > x) {
+                    self.wrappedLineBreak(x, &cursor_x, &cursor_y, &rows);
+                }
+                i = j;
+                continue;
+            }
+
+            if (ch == '"') {
+                var j = i + 1;
+                var escaped = false;
+                while (j < line.len) : (j += 1) {
+                    const cur = line[j];
+                    if (escaped) {
+                        escaped = false;
+                        continue;
+                    }
+                    if (cur == '\\') {
+                        escaped = true;
+                        continue;
+                    }
+                    if (cur == '"') {
+                        j += 1;
+                        break;
+                    }
+                }
+                if (j > line.len) j = line.len;
+
+                var kind: JsonTokenKind = .string;
+                var k = j;
+                while (k < line.len and (line[k] == ' ' or line[k] == '\t')) : (k += 1) {}
+                if (k < line.len and line[k] == ':') {
+                    kind = .key;
+                }
+                self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..j], self.jsonTokenColor(kind), &rows);
+                i = j;
+                continue;
+            }
+
+            if (ch == '{' or ch == '}' or ch == '[' or ch == ']' or ch == ':' or ch == ',') {
+                self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i .. i + 1], self.jsonTokenColor(.punctuation), &rows);
+                i += 1;
+                continue;
+            }
+
+            if ((ch >= '0' and ch <= '9') or ch == '-') {
+                var j = i + 1;
+                while (j < line.len) : (j += 1) {
+                    const cur = line[j];
+                    if (!((cur >= '0' and cur <= '9') or cur == '.' or cur == 'e' or cur == 'E' or cur == '+' or cur == '-')) {
+                        break;
+                    }
+                }
+                self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..j], self.jsonTokenColor(.number), &rows);
+                i = j;
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, line[i..], "true")) {
+                const end = i + 4;
+                if (end == line.len or isJsonDelimiter(line[end])) {
+                    self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..end], self.jsonTokenColor(.keyword), &rows);
+                    i = end;
+                    continue;
+                }
+            }
+            if (std.mem.startsWith(u8, line[i..], "false")) {
+                const end = i + 5;
+                if (end == line.len or isJsonDelimiter(line[end])) {
+                    self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..end], self.jsonTokenColor(.keyword), &rows);
+                    i = end;
+                    continue;
+                }
+            }
+            if (std.mem.startsWith(u8, line[i..], "null")) {
+                const end = i + 4;
+                if (end == line.len or isJsonDelimiter(line[end])) {
+                    self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..end], self.jsonTokenColor(.keyword), &rows);
+                    i = end;
+                    continue;
+                }
+            }
+
+            var j = i + 1;
+            while (j < line.len) : (j += 1) {
+                const cur = line[j];
+                if (cur == '"' or cur == ' ' or cur == '\t' or cur == '{' or cur == '}' or cur == '[' or cur == ']' or cur == ',' or cur == ':') {
+                    break;
+                }
+            }
+            self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..j], self.jsonTokenColor(.plain), &rows);
+            i = j;
+        }
+        return rows;
     }
 
     fn drawChatPanel(self: *App, rect: UiRect) void {
@@ -4239,11 +4589,36 @@ const App = struct {
             if (ch == '\\' and i + 1 < s.len) {
                 const esc = s[i + 1];
                 switch (esc) {
-                    'n' => { out[j] = '\n'; j += 1; i += 1; continue; },
-                    'r' => { out[j] = '\r'; j += 1; i += 1; continue; },
-                    't' => { out[j] = '\t'; j += 1; i += 1; continue; },
-                    '"' => { out[j] = '"'; j += 1; i += 1; continue; },
-                    '\\' => { out[j] = '\\'; j += 1; i += 1; continue; },
+                    'n' => {
+                        out[j] = '\n';
+                        j += 1;
+                        i += 1;
+                        continue;
+                    },
+                    'r' => {
+                        out[j] = '\r';
+                        j += 1;
+                        i += 1;
+                        continue;
+                    },
+                    't' => {
+                        out[j] = '\t';
+                        j += 1;
+                        i += 1;
+                        continue;
+                    },
+                    '"' => {
+                        out[j] = '"';
+                        j += 1;
+                        i += 1;
+                        continue;
+                    },
+                    '\\' => {
+                        out[j] = '\\';
+                        j += 1;
+                        i += 1;
+                        continue;
+                    },
                     'u' => {
                         // Minimal handling: keep as-is if malformed
                         if (i + 5 < s.len) {
@@ -4252,29 +4627,50 @@ const App = struct {
                             const h1 = s[i + 3];
                             const h2 = s[i + 4];
                             const h3 = s[i + 5];
-                            const v0 = hexVal(h0) orelse { out[j] = ch; j += 1; continue; };
-                            const v1 = hexVal(h1) orelse { out[j] = ch; j += 1; continue; };
-                            const v2 = hexVal(h2) orelse { out[j] = ch; j += 1; continue; };
-                            const v3 = hexVal(h3) orelse { out[j] = ch; j += 1; continue; };
+                            const v0 = hexVal(h0) orelse {
+                                out[j] = ch;
+                                j += 1;
+                                continue;
+                            };
+                            const v1 = hexVal(h1) orelse {
+                                out[j] = ch;
+                                j += 1;
+                                continue;
+                            };
+                            const v2 = hexVal(h2) orelse {
+                                out[j] = ch;
+                                j += 1;
+                                continue;
+                            };
+                            const v3 = hexVal(h3) orelse {
+                                out[j] = ch;
+                                j += 1;
+                                continue;
+                            };
                             const code_unit: u16 = (@as(u16, v0) << 12) | (@as(u16, v1) << 8) | (@as(u16, v2) << 4) | @as(u16, v3);
                             var buf: [4]u8 = undefined;
                             const wrote = std.unicode.utf8Encode(@as(u21, code_unit), &buf) catch {
                                 // Fallback: copy literally
-                                out[j] = ch; j += 1;
+                                out[j] = ch;
+                                j += 1;
                                 continue;
                             };
-                            @memcpy(out[j..j + wrote], buf[0..wrote]);
+                            @memcpy(out[j .. j + wrote], buf[0..wrote]);
                             j += wrote;
                             i += 5; // consumed '\\uXXXX'
                             continue;
                         }
                         // Not enough bytes, just copy
-                        out[j] = ch; j += 1;
+                        out[j] = ch;
+                        j += 1;
                         continue;
                     },
                     else => {
                         // Unknown escape; drop backslash and keep char
-                        out[j] = esc; j += 1; i += 1; continue;
+                        out[j] = esc;
+                        j += 1;
+                        i += 1;
+                        continue;
                     },
                 }
             }
@@ -4497,6 +4893,65 @@ const App = struct {
             _ = out.pop();
         }
         return out.toOwnedSlice(self.allocator);
+    }
+
+    fn lineStartsWithJsonClose(trimmed_line: []const u8) bool {
+        if (trimmed_line.len == 0) return false;
+        return trimmed_line[0] == '}' or trimmed_line[0] == ']';
+    }
+
+    fn lineEndsWithJsonOpen(trimmed_line: []const u8) bool {
+        if (trimmed_line.len == 0) return false;
+        var end = trimmed_line.len;
+        while (end > 0 and trimmed_line[end - 1] == ',') : (end -= 1) {}
+        if (end == 0) return false;
+        const ch = trimmed_line[end - 1];
+        return ch == '{' or ch == '[';
+    }
+
+    fn buildDebugPayloadLines(self: *App, payload_json: []const u8) !std.ArrayList(DebugPayloadLine) {
+        var lines: std.ArrayList(DebugPayloadLine) = .empty;
+        errdefer lines.deinit(self.allocator);
+
+        var open_stack: std.ArrayList(usize) = .empty;
+        defer open_stack.deinit(self.allocator);
+
+        var line_start: usize = 0;
+        while (true) {
+            const maybe_nl = std.mem.indexOfScalarPos(u8, payload_json, line_start, '\n');
+            const line_end = maybe_nl orelse payload_json.len;
+            const line = payload_json[line_start..line_end];
+
+            var indent_spaces: usize = 0;
+            while (indent_spaces < line.len and line[indent_spaces] == ' ') : (indent_spaces += 1) {}
+
+            const trimmed = std.mem.trim(u8, line, " \t\r");
+            const is_close_line = lineStartsWithJsonClose(trimmed);
+            const is_open_line = lineEndsWithJsonOpen(trimmed);
+
+            const current_line_index = lines.items.len;
+            try lines.append(self.allocator, .{
+                .start = line_start,
+                .end = line_end,
+                .indent_spaces = indent_spaces,
+                .opens_block = is_open_line,
+            });
+
+            if (is_close_line and open_stack.items.len > 0) {
+                const open_line_index = open_stack.items[open_stack.items.len - 1];
+                open_stack.items.len -= 1;
+                lines.items[open_line_index].matching_close_index = @intCast(current_line_index);
+            }
+
+            if (is_open_line) {
+                try open_stack.append(self.allocator, current_line_index);
+            }
+
+            if (maybe_nl == null) break;
+            line_start = line_end + 1;
+        }
+
+        return lines;
     }
 
     fn handleDebugEventMessage(self: *App, root: std.json.ObjectMap) !void {
@@ -4991,11 +5446,14 @@ const App = struct {
             entry.deinit(self.allocator);
         }
         self.debug_events.clearRetainingCapacity();
+        self.debug_folded_blocks.clearRetainingCapacity();
+        self.debug_next_event_id = 1;
     }
 
     fn appendDebugEvent(self: *App, timestamp_ms: i64, category: []const u8, payload_json: []const u8) !void {
         while (self.debug_events.items.len >= MAX_DEBUG_EVENTS) {
             var removed = self.debug_events.orderedRemove(0);
+            self.pruneDebugFoldStateForEvent(removed.id);
             removed.deinit(self.allocator);
         }
 
@@ -5003,10 +5461,19 @@ const App = struct {
         errdefer self.allocator.free(category_copy);
         const payload_copy = try self.allocator.dupe(u8, payload_json);
         errdefer self.allocator.free(payload_copy);
+        var payload_lines = try self.buildDebugPayloadLines(payload_copy);
+        errdefer payload_lines.deinit(self.allocator);
+
+        const event_id = self.debug_next_event_id;
+        self.debug_next_event_id +%= 1;
+        if (self.debug_next_event_id == 0) self.debug_next_event_id = 1;
+
         try self.debug_events.append(self.allocator, .{
+            .id = event_id,
             .timestamp_ms = timestamp_ms,
             .category = category_copy,
             .payload_json = payload_copy,
+            .payload_lines = payload_lines,
         });
     }
 
