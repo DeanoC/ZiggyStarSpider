@@ -3721,6 +3721,21 @@ const App = struct {
         self.debug_folded_blocks.put(key, {}) catch {};
     }
 
+    fn pruneDebugFoldStateForEvent(self: *App, event_id: u64) void {
+        var to_remove: std.ArrayList(DebugFoldKey) = .empty;
+        defer to_remove.deinit(self.allocator);
+
+        var it = self.debug_folded_blocks.keyIterator();
+        while (it.next()) |key_ptr| {
+            if (key_ptr.*.event_id == event_id) {
+                to_remove.append(self.allocator, key_ptr.*) catch return;
+            }
+        }
+        for (to_remove.items) |key| {
+            _ = self.debug_folded_blocks.remove(key);
+        }
+    }
+
     fn countVisibleDebugPayloadLines(self: *App, entry: DebugEventEntry) usize {
         var count: usize = 0;
         var line_index: usize = 0;
@@ -5355,8 +5370,8 @@ const App = struct {
     fn appendDebugEvent(self: *App, timestamp_ms: i64, category: []const u8, payload_json: []const u8) !void {
         while (self.debug_events.items.len >= MAX_DEBUG_EVENTS) {
             var removed = self.debug_events.orderedRemove(0);
+            self.pruneDebugFoldStateForEvent(removed.id);
             removed.deinit(self.allocator);
-            self.debug_folded_blocks.clearRetainingCapacity();
         }
 
         const category_copy = try self.allocator.dupe(u8, category);
