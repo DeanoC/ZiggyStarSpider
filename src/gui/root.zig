@@ -2,6 +2,7 @@ const std = @import("std");
 const zui = @import("ziggy-ui");
 const ws_client_mod = @import("websocket_client.zig");
 const config_mod = @import("client-config");
+const panels_bridge = @import("panels_bridge.zig");
 
 const zapp = zui.ui.app;
 const c = zapp.sdl_app.c;
@@ -646,6 +647,7 @@ const App = struct {
     workspace_snapshot_restore_attempted: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !App {
+        panels_bridge.assertAvailable();
         try zapp.sdl_app.init(.{ .video = true, .events = true, .gamepad = false });
         zapp.clipboard.init();
 
