@@ -4636,6 +4636,7 @@ const App = struct {
     }
 
     fn disconnect(self: *App) void {
+        self.drainAsyncChatWorker();
         if (self.ws_client) |*client| {
             // Drain any pending messages before disconnecting
             while (client.tryReceive()) |msg| {
@@ -4653,12 +4654,17 @@ const App = struct {
 
     fn drainAsyncChatWorker(self: *App) void {
         var worker_thread: ?std.Thread = null;
-        var response: ?[]u8 = null;
-        var error_text: ?[]u8 = null;
 
         self.async_chat_worker.mutex.lock();
         worker_thread = self.async_chat_worker.worker_thread;
         self.async_chat_worker.worker_thread = null;
+        self.async_chat_worker.mutex.unlock();
+
+        if (worker_thread) |thread| thread.join();
+
+        var response: ?[]u8 = null;
+        var error_text: ?[]u8 = null;
+        self.async_chat_worker.mutex.lock();
         response = self.async_chat_worker.response;
         error_text = self.async_chat_worker.error_text;
         self.async_chat_worker.response = null;
@@ -4667,7 +4673,6 @@ const App = struct {
         self.async_chat_worker.done = false;
         self.async_chat_worker.mutex.unlock();
 
-        if (worker_thread) |thread| thread.join();
         if (response) |value| std.heap.page_allocator.free(value);
         if (error_text) |value| std.heap.page_allocator.free(value);
     }
@@ -4675,24 +4680,22 @@ const App = struct {
     fn startAsyncChatSend(self: *App, text: []const u8) !void {
         const client = self.ws_client orelse return error.NotConnected;
 
+        self.async_chat_worker.mutex.lock();
+        if (self.async_chat_worker.in_flight) {
+            self.async_chat_worker.mutex.unlock();
+            return error.SendInProgress;
+        }
+        self.async_chat_worker.mutex.unlock();
+
         const page_allocator = std.heap.page_allocator;
         const url = try page_allocator.dupe(u8, client.url_buf);
-        const token = page_allocator.dupe(u8, client.token_buf) catch |err| {
-            page_allocator.free(url);
-            return err;
-        };
-        const message = page_allocator.dupe(u8, text) catch |err| {
-            page_allocator.free(token);
-            page_allocator.free(url);
-            return err;
-        };
-
-        const context = page_allocator.create(AsyncChatWorkerContext) catch |err| {
-            page_allocator.free(message);
-            page_allocator.free(token);
-            page_allocator.free(url);
-            return err;
-        };
+        errdefer page_allocator.free(url);
+        const token = try page_allocator.dupe(u8, client.token_buf);
+        errdefer page_allocator.free(token);
+        const message = try page_allocator.dupe(u8, text);
+        errdefer page_allocator.free(message);
+        const context = try page_allocator.create(AsyncChatWorkerContext);
+        errdefer page_allocator.destroy(context);
 
         self.async_chat_worker.mutex.lock();
         defer self.async_chat_worker.mutex.unlock();
@@ -4720,10 +4723,6 @@ const App = struct {
 
         const worker = std.Thread.spawn(.{}, runAsyncChatSendWorker, .{context}) catch |err| {
             self.async_chat_worker.in_flight = false;
-            page_allocator.destroy(context);
-            page_allocator.free(message);
-            page_allocator.free(token);
-            page_allocator.free(url);
             return err;
         };
         self.async_chat_worker.worker_thread = worker;
