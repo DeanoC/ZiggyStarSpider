@@ -239,6 +239,7 @@ pub fn build(b: *std.Build) void {
         tui_module.addImport("tui", dep.module("tui"));
         tui_module.addImport("websocket", websocket.module("websocket"));
         tui_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        tui_module.addImport("ziggy-spider-protocol", ziggy_spider_protocol_module);
 
         // Add CLI and client modules for TUI
         const cli_args_module = b.createModule(.{
@@ -256,14 +257,6 @@ pub fn build(b: *std.Build) void {
         });
         client_config_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
         tui_module.addImport("client_config", client_config_module);
-
-        const session_protocol_module = b.createModule(.{
-            .root_source_file = b.path("src/client/session_protocol.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        session_protocol_module.addImport("ziggy-spider-protocol", ziggy_spider_protocol_module);
-        tui_module.addImport("session_protocol", session_protocol_module);
 
         const websocket_client_module = b.createModule(.{
             .root_source_file = b.path("src/client/websocket.zig"),

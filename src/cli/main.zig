@@ -2,7 +2,7 @@ const std = @import("std");
 const args = @import("args.zig");
 const logger = @import("ziggy-core").utils.logger;
 const WebSocketClient = @import("../client/websocket.zig").WebSocketClient;
-const session_protocol = @import("../client/session_protocol.zig");
+const session_protocol = @import("ziggy-spider-protocol").session_protocol;
 
 // Main CLI entry point for ZiggyStarSpider
 
