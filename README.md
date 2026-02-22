@@ -82,6 +82,10 @@ ZSS speaks the Spiderweb protocol - an extension of OpenClaw that adds:
 
 See [PROTOCOL.md](./docs/PROTOCOL.md) for message formats.
 
+## Module Migration Notes
+
+StarSpider now imports `ziggy-spider-protocol` directly for `session.send` envelope helpers. The local compatibility wrapper (`src/client/session_protocol.zig`) was marked for removal on February 22, 2026 with a target of `v0.3.0`, and is now removed.
+
 ## License
 
 MIT - See LICENSE
