@@ -12,6 +12,10 @@
             .url = "https://github.com/DeanoC/ziggy-core/archive/refs/heads/master.tar.gz",
             .hash = "ziggy_core-0.1.0-q2d-rGiFAAA8ZiSbvWysW_gbVUJMoh-fGGn8PINTljE6",
         },
+        .ziggy_spider_protocol = .{
+            .url = "https://github.com/DeanoC/ZiggySpiderProtocol/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "ziggy_spider_protocol-0.1.0-Tn7uqxFxAADru6TiwRN12AgHK9UGtsNwI93n1rjSJAMw",
+        },
         .ziggy_ui = .{
             .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/heads/main.tar.gz",
             .hash = "ziggy_ui-0.1.0-dS4PqE4C8QHrfGnHkW4UwqbBUTzOaG5mL0BJg5InTKMl",
