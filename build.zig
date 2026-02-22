@@ -141,6 +141,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const ziggy_spider_protocol = b.dependency("ziggy_spider_protocol", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const ziggy_spider_protocol_module = ziggy_spider_protocol.module("ziggy-spider-protocol");
 
     const ziggy_ui = b.dependency("ziggy_ui", .{
         .target = target,
@@ -180,6 +185,7 @@ pub fn build(b: *std.Build) void {
     });
     cli_module.addImport("websocket", websocket.module("websocket"));
     cli_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    cli_module.addImport("ziggy-spider-protocol", ziggy_spider_protocol_module);
 
     const cli_exe = b.addExecutable(.{
         .name = "zss",
@@ -256,6 +262,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+        session_protocol_module.addImport("ziggy-spider-protocol", ziggy_spider_protocol_module);
         tui_module.addImport("session_protocol", session_protocol_module);
 
         const websocket_client_module = b.createModule(.{
@@ -295,6 +302,7 @@ pub fn build(b: *std.Build) void {
     });
     test_module.addImport("websocket", websocket.module("websocket"));
     test_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    test_module.addImport("ziggy-spider-protocol", ziggy_spider_protocol_module);
 
     const unit_tests = b.addTest(.{
         .root_module = test_module,
