@@ -63,6 +63,22 @@ const FsrpcEnvelope = struct {
     }
 };
 
+const AsyncChatWorkerState = struct {
+    mutex: std.Thread.Mutex = .{},
+    in_flight: bool = false,
+    done: bool = false,
+    response: ?[]u8 = null,
+    error_text: ?[]u8 = null,
+    worker_thread: ?std.Thread = null,
+};
+
+const AsyncChatWorkerContext = struct {
+    state: *AsyncChatWorkerState,
+    url: []u8,
+    token: []u8,
+    message: []u8,
+};
+
 fn encodeDataB64(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     const encoder = std.base64.standard.Encoder;
     const encoded_len = encoder.calcSize(data.len);
@@ -93,6 +109,278 @@ fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+fn nextCounter(counter: *u32, minimum: u32) u32 {
+    const current = counter.*;
+    counter.* +%= 1;
+    if (counter.* < minimum) counter.* = minimum;
+    return current;
+}
+
+fn sendAndAwaitFsrpcBlocking(
+    allocator: std.mem.Allocator,
+    client: *ws_client_mod.WebSocketClient,
+    request_json: []const u8,
+    tag: u32,
+    timeout_ms: u32,
+) !FsrpcEnvelope {
+    try client.send(request_json);
+
+    const started = std.time.milliTimestamp();
+    while (std.time.milliTimestamp() - started < timeout_ms) {
+        if (client.receive(250)) |raw| {
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch {
+                allocator.free(raw);
+                continue;
+            };
+
+            var matched = false;
+            if (parsed.value == .object) {
+                const obj = parsed.value.object;
+                if (obj.get("channel")) |channel| {
+                    if (channel == .string and std.mem.eql(u8, channel.string, "fsrpc")) {
+                        if (obj.get("tag")) |raw_tag| {
+                            if (raw_tag == .integer and raw_tag.integer >= 0 and @as(u32, @intCast(raw_tag.integer)) == tag) {
+                                matched = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (matched) {
+                return .{
+                    .raw = raw,
+                    .parsed = parsed,
+                };
+            }
+
+            parsed.deinit();
+            allocator.free(raw);
+        }
+    }
+
+    return error.Timeout;
+}
+
+fn ensureFsrpcOkBlocking(envelope: *FsrpcEnvelope) !void {
+    if (envelope.parsed.value != .object) return error.InvalidResponse;
+    const obj = envelope.parsed.value.object;
+    const ok_value = obj.get("ok") orelse return error.InvalidResponse;
+    if (ok_value != .bool) return error.InvalidResponse;
+    if (!ok_value.bool) return error.RemoteError;
+}
+
+fn getFsrpcPayloadObjectBlocking(root: std.json.ObjectMap) !std.json.ObjectMap {
+    const payload = root.get("payload") orelse return error.InvalidResponse;
+    if (payload != .object) return error.InvalidResponse;
+    return payload.object;
+}
+
+fn fsrpcBootstrapBlocking(
+    allocator: std.mem.Allocator,
+    client: *ws_client_mod.WebSocketClient,
+    next_tag: *u32,
+) !void {
+    const connect_id = try std.fmt.allocPrint(allocator, "ctl-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(connect_id);
+
+    const connect_payload = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"control\",\"type\":\"control.connect\",\"id\":\"{s}\"}}",
+        .{connect_id},
+    );
+    defer allocator.free(connect_payload);
+    try client.send(connect_payload);
+
+    const version_tag = nextCounter(next_tag, 1);
+    const version_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"styx-lite-1\"}}",
+        .{version_tag},
+    );
+    defer allocator.free(version_req);
+    var version = try sendAndAwaitFsrpcBlocking(allocator, client, version_req, version_tag, 15_000);
+    defer version.deinit(allocator);
+    try ensureFsrpcOkBlocking(&version);
+
+    const attach_tag = nextCounter(next_tag, 1);
+    const attach_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_attach\",\"tag\":{d},\"fid\":1}}",
+        .{attach_tag},
+    );
+    defer allocator.free(attach_req);
+    var attach = try sendAndAwaitFsrpcBlocking(allocator, client, attach_req, attach_tag, 15_000);
+    defer attach.deinit(allocator);
+    try ensureFsrpcOkBlocking(&attach);
+}
+
+fn fsrpcClunkBestEffortBlocking(
+    allocator: std.mem.Allocator,
+    client: *ws_client_mod.WebSocketClient,
+    next_tag: *u32,
+    fid: u32,
+) void {
+    const tag = nextCounter(next_tag, 1);
+    const req = std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
+        .{ tag, fid },
+    ) catch return;
+    defer allocator.free(req);
+    var response = sendAndAwaitFsrpcBlocking(allocator, client, req, tag, 1_000) catch return;
+    response.deinit(allocator);
+}
+
+fn sendChatViaFsrpcBlocking(
+    allocator: std.mem.Allocator,
+    client: *ws_client_mod.WebSocketClient,
+    text: []const u8,
+) ![]u8 {
+    var next_tag: u32 = 1;
+    var next_fid: u32 = 2;
+
+    try fsrpcBootstrapBlocking(allocator, client, &next_tag);
+
+    const input_fid = nextCounter(&next_fid, 2);
+    const result_fid = nextCounter(&next_fid, 2);
+    defer fsrpcClunkBestEffortBlocking(allocator, client, &next_tag, input_fid);
+    defer fsrpcClunkBestEffortBlocking(allocator, client, &next_tag, result_fid);
+
+    const walk_input_tag = nextCounter(&next_tag, 1);
+    const walk_input_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"capabilities\",\"chat\",\"control\",\"input\"]}}",
+        .{ walk_input_tag, input_fid },
+    );
+    defer allocator.free(walk_input_req);
+    var walk_input = try sendAndAwaitFsrpcBlocking(allocator, client, walk_input_req, walk_input_tag, 15_000);
+    defer walk_input.deinit(allocator);
+    try ensureFsrpcOkBlocking(&walk_input);
+
+    const open_input_tag = nextCounter(&next_tag, 1);
+    const open_input_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
+        .{ open_input_tag, input_fid },
+    );
+    defer allocator.free(open_input_req);
+    var open_input = try sendAndAwaitFsrpcBlocking(allocator, client, open_input_req, open_input_tag, 15_000);
+    defer open_input.deinit(allocator);
+    try ensureFsrpcOkBlocking(&open_input);
+
+    const encoded = try encodeDataB64(allocator, text);
+    defer allocator.free(encoded);
+    const write_tag = nextCounter(&next_tag, 1);
+    const write_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+        .{ write_tag, input_fid, encoded },
+    );
+    defer allocator.free(write_req);
+    var write = try sendAndAwaitFsrpcBlocking(allocator, client, write_req, write_tag, 15_000);
+    defer write.deinit(allocator);
+    try ensureFsrpcOkBlocking(&write);
+
+    const write_payload = try getFsrpcPayloadObjectBlocking(write.parsed.value.object);
+    const job_value = write_payload.get("job") orelse return error.InvalidResponse;
+    if (job_value != .string) return error.InvalidResponse;
+    const job_name = job_value.string;
+
+    const escaped_job = try jsonEscape(allocator, job_name);
+    defer allocator.free(escaped_job);
+    const walk_result_tag = nextCounter(&next_tag, 1);
+    const walk_result_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"jobs\",\"{s}\",\"result.txt\"]}}",
+        .{ walk_result_tag, result_fid, escaped_job },
+    );
+    defer allocator.free(walk_result_req);
+    var walk_result = try sendAndAwaitFsrpcBlocking(allocator, client, walk_result_req, walk_result_tag, 15_000);
+    defer walk_result.deinit(allocator);
+    try ensureFsrpcOkBlocking(&walk_result);
+
+    const open_result_tag = nextCounter(&next_tag, 1);
+    const open_result_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"r\"}}",
+        .{ open_result_tag, result_fid },
+    );
+    defer allocator.free(open_result_req);
+    var open_result = try sendAndAwaitFsrpcBlocking(allocator, client, open_result_req, open_result_tag, 15_000);
+    defer open_result.deinit(allocator);
+    try ensureFsrpcOkBlocking(&open_result);
+
+    const read_tag = nextCounter(&next_tag, 1);
+    const read_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
+        .{ read_tag, result_fid },
+    );
+    defer allocator.free(read_req);
+    var read = try sendAndAwaitFsrpcBlocking(allocator, client, read_req, read_tag, 15_000);
+    defer read.deinit(allocator);
+    try ensureFsrpcOkBlocking(&read);
+
+    const read_payload = try getFsrpcPayloadObjectBlocking(read.parsed.value.object);
+    const data_b64 = read_payload.get("data_b64") orelse return error.InvalidResponse;
+    if (data_b64 != .string) return error.InvalidResponse;
+
+    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
+    const decoded = try allocator.alloc(u8, decoded_len);
+    errdefer allocator.free(decoded);
+    _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
+    return decoded;
+}
+
+fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
+    const allocator = std.heap.page_allocator;
+    defer {
+        allocator.free(ctx.url);
+        allocator.free(ctx.token);
+        allocator.free(ctx.message);
+        allocator.destroy(ctx);
+    }
+
+    var response: ?[]u8 = null;
+    var error_text: ?[]u8 = null;
+
+    var client = ws_client_mod.WebSocketClient.init(allocator, ctx.url, ctx.token) catch |err| {
+        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+        ctx.state.mutex.lock();
+        defer ctx.state.mutex.unlock();
+        ctx.state.response = null;
+        ctx.state.error_text = error_text;
+        ctx.state.done = true;
+        ctx.state.in_flight = false;
+        return;
+    };
+    defer client.deinit();
+
+    client.connect() catch |err| {
+        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+        ctx.state.mutex.lock();
+        defer ctx.state.mutex.unlock();
+        ctx.state.response = null;
+        ctx.state.error_text = error_text;
+        ctx.state.done = true;
+        ctx.state.in_flight = false;
+        return;
+    };
+
+    response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message) catch |err| blk: {
+        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+        break :blk null;
+    };
+
+    ctx.state.mutex.lock();
+    defer ctx.state.mutex.unlock();
+    ctx.state.response = response;
+    ctx.state.error_text = error_text;
+    ctx.state.done = true;
+    ctx.state.in_flight = false;
 }
 
 const SettingsFocusField = enum {
@@ -315,6 +603,7 @@ const App = struct {
     ui_commands: zui.ui.render.command_list.CommandList,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
+    async_chat_worker: AsyncChatWorkerState = .{},
 
     connection_state: ConnectionState = .disconnected,
     status_text: []u8,
@@ -494,6 +783,7 @@ const App = struct {
 
     pub fn deinit(self: *App) void {
         self.disconnect();
+        self.drainAsyncChatWorker();
         self.clearSessions();
         self.chat_sessions.deinit(self.allocator);
         self.session_messages.deinit(self.allocator);
@@ -610,6 +900,7 @@ const App = struct {
             }
 
             try self.pollWebSocket();
+            try self.pollAsyncChatSendCompletion();
             self.frame_clock.endFrame();
         }
     }
@@ -4360,6 +4651,128 @@ const App = struct {
         self.clearPendingDebugRequest();
     }
 
+    fn drainAsyncChatWorker(self: *App) void {
+        var worker_thread: ?std.Thread = null;
+        var response: ?[]u8 = null;
+        var error_text: ?[]u8 = null;
+
+        self.async_chat_worker.mutex.lock();
+        worker_thread = self.async_chat_worker.worker_thread;
+        self.async_chat_worker.worker_thread = null;
+        response = self.async_chat_worker.response;
+        error_text = self.async_chat_worker.error_text;
+        self.async_chat_worker.response = null;
+        self.async_chat_worker.error_text = null;
+        self.async_chat_worker.in_flight = false;
+        self.async_chat_worker.done = false;
+        self.async_chat_worker.mutex.unlock();
+
+        if (worker_thread) |thread| thread.join();
+        if (response) |value| std.heap.page_allocator.free(value);
+        if (error_text) |value| std.heap.page_allocator.free(value);
+    }
+
+    fn startAsyncChatSend(self: *App, text: []const u8) !void {
+        const client = self.ws_client orelse return error.NotConnected;
+
+        const page_allocator = std.heap.page_allocator;
+        const url = try page_allocator.dupe(u8, client.url_buf);
+        const token = page_allocator.dupe(u8, client.token_buf) catch |err| {
+            page_allocator.free(url);
+            return err;
+        };
+        const message = page_allocator.dupe(u8, text) catch |err| {
+            page_allocator.free(token);
+            page_allocator.free(url);
+            return err;
+        };
+
+        const context = page_allocator.create(AsyncChatWorkerContext) catch |err| {
+            page_allocator.free(message);
+            page_allocator.free(token);
+            page_allocator.free(url);
+            return err;
+        };
+
+        self.async_chat_worker.mutex.lock();
+        defer self.async_chat_worker.mutex.unlock();
+        if (self.async_chat_worker.in_flight) return error.SendInProgress;
+
+        if (self.async_chat_worker.response) |value| {
+            page_allocator.free(value);
+            self.async_chat_worker.response = null;
+        }
+        if (self.async_chat_worker.error_text) |value| {
+            page_allocator.free(value);
+            self.async_chat_worker.error_text = null;
+        }
+
+        context.* = .{
+            .state = &self.async_chat_worker,
+            .url = url,
+            .token = token,
+            .message = message,
+        };
+
+        self.async_chat_worker.in_flight = true;
+        self.async_chat_worker.done = false;
+        self.async_chat_worker.worker_thread = null;
+
+        const worker = std.Thread.spawn(.{}, runAsyncChatSendWorker, .{context}) catch |err| {
+            self.async_chat_worker.in_flight = false;
+            page_allocator.destroy(context);
+            page_allocator.free(message);
+            page_allocator.free(token);
+            page_allocator.free(url);
+            return err;
+        };
+        self.async_chat_worker.worker_thread = worker;
+    }
+
+    fn pollAsyncChatSendCompletion(self: *App) !void {
+        var worker_thread: ?std.Thread = null;
+        var response: ?[]u8 = null;
+        var error_text: ?[]u8 = null;
+
+        self.async_chat_worker.mutex.lock();
+        if (!self.async_chat_worker.done) {
+            self.async_chat_worker.mutex.unlock();
+            return;
+        }
+        worker_thread = self.async_chat_worker.worker_thread;
+        self.async_chat_worker.worker_thread = null;
+        response = self.async_chat_worker.response;
+        error_text = self.async_chat_worker.error_text;
+        self.async_chat_worker.response = null;
+        self.async_chat_worker.error_text = null;
+        self.async_chat_worker.done = false;
+        self.async_chat_worker.mutex.unlock();
+
+        if (worker_thread) |thread| thread.join();
+        defer if (response) |value| std.heap.page_allocator.free(value);
+        defer if (error_text) |value| std.heap.page_allocator.free(value);
+
+        if (response) |value| {
+            if (self.pending_send_message_id) |message_id| {
+                try self.setMessageState(message_id, null);
+            }
+            const session_key = if (self.pending_send_session_key) |key|
+                key
+            else
+                try self.currentSessionOrDefault();
+            try self.appendMessageForSession(session_key, "assistant", value, null);
+            self.clearPendingSend();
+            return;
+        }
+
+        const err_text = error_text orelse "Send failed";
+        try self.appendMessage("system", err_text, null);
+        if (self.pending_send_message_id) |message_id| {
+            try self.setMessageFailed(message_id);
+        }
+        self.clearPendingSend();
+    }
+
     fn saveConfig(self: *App) !void {
         if (self.settings_panel.default_session.items.len == 0) {
             try self.settings_panel.default_session.appendSlice(self.allocator, "main");
@@ -4393,6 +4806,10 @@ const App = struct {
     fn sendChatMessageText(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
         std.log.info("[GUI] sendChatMessageText: text_len={d} connected={}", .{ text.len, self.ws_client != null });
+        if (self.awaiting_reply) {
+            try self.appendMessage("system", "Wait for the current send to finish.", null);
+            return;
+        }
 
         // Keep a session key for this send
         const session_key = try self.currentSessionOrDefault();
@@ -4406,32 +4823,11 @@ const App = struct {
         defer self.allocator.free(appended_user_msg_id);
         self.allocator.free(user_msg_id);
         try self.setPendingSend(self.allocator, appended_user_msg_id, session_key);
+        self.awaiting_reply = true;
 
-        if (self.ws_client) |*client| {
-            const response = self.sendChatViaFsrpc(client, text) catch |err| {
-                std.log.err("[GUI] sendChatMessageText: websocket send failed: {s}", .{@errorName(err)});
-                const err_text = try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{@errorName(err)});
-                defer self.allocator.free(err_text);
-                try self.appendMessage("system", err_text, null);
-                if (self.pending_send_message_id) |message_id| {
-                    try self.setMessageFailed(message_id);
-                } else {
-                    try self.setMessageFailed(appended_user_msg_id);
-                }
-                self.clearPendingSend();
-                return;
-            };
-            defer self.allocator.free(response);
-
-            if (self.pending_send_message_id) |message_id| {
-                try self.setMessageState(message_id, null);
-            } else {
-                try self.setMessageState(appended_user_msg_id, null);
-            }
-            try self.appendMessageForSession(session_key, "assistant", response, null);
-            self.clearPendingSend();
-        } else {
-            const err_text = try std.fmt.allocPrint(self.allocator, "Not connected", .{});
+        self.startAsyncChatSend(text) catch |err| {
+            std.log.err("[GUI] sendChatMessageText: async send start failed: {s}", .{@errorName(err)});
+            const err_text = try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{@errorName(err)});
             defer self.allocator.free(err_text);
             try self.appendMessage("system", err_text, null);
             if (self.pending_send_message_id) |message_id| {
@@ -4440,7 +4836,8 @@ const App = struct {
                 try self.setMessageFailed(appended_user_msg_id);
             }
             self.clearPendingSend();
-        }
+            return err;
+        };
     }
 
     fn nextFsrpcTag(self: *App) u32 {
