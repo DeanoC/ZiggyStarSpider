@@ -407,7 +407,7 @@ const SettingsPanel = struct {
 
     pub fn init(allocator: std.mem.Allocator) SettingsPanel {
         var panel = SettingsPanel{};
-        panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790/v2/agents/default/stream") catch {};
+        panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790") catch {};
         panel.default_session.appendSlice(allocator, "main") catch {};
         return panel;
     }
@@ -3546,7 +3546,7 @@ const App = struct {
             input_rect,
             self.settings_panel.server_url.items,
             self.settings_panel.focused_field == .server_url,
-            .{ .placeholder = "ws://127.0.0.1:18790/v2/agents/default/stream" },
+            .{ .placeholder = "ws://127.0.0.1:18790" },
         );
         if (url_focused) self.settings_panel.focused_field = .server_url;
 

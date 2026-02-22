@@ -5,8 +5,7 @@ const build_options = @import("build_options");
 // CLI argument parsing for ZiggyStarSpider
 // Uses simple iteration like ZSC - no ArrayList complexity for basic parsing
 
-const default_stream_path = "/v2/agents/default/stream";
-const default_server_url = "ws://127.0.0.1:18790/v2/agents/default/stream";
+const default_server_url = "ws://127.0.0.1:18790";
 const app_version = build_options.app_version;
 const git_revision = build_options.git_revision;
 
@@ -124,39 +123,6 @@ pub fn gitRevision() []const u8 {
     return git_revision;
 }
 
-fn normalizeServerUrl(allocator: std.mem.Allocator, raw_url: []const u8) ![]const u8 {
-    const ws_prefix = "ws://";
-    const wss_prefix = "wss://";
-
-    const scheme_len: usize = if (std.mem.startsWith(u8, raw_url, ws_prefix))
-        ws_prefix.len
-    else if (std.mem.startsWith(u8, raw_url, wss_prefix))
-        wss_prefix.len
-    else
-        return allocator.dupe(u8, raw_url);
-
-    const after_scheme = raw_url[scheme_len..];
-    const slash_in_rest = std.mem.indexOfScalar(u8, after_scheme, '/');
-    if (slash_in_rest == null) {
-        return std.fmt.allocPrint(allocator, "{s}{s}", .{ raw_url, default_stream_path });
-    }
-
-    const slash_at = scheme_len + slash_in_rest.?;
-    const path_and_query = raw_url[slash_at..];
-    if (std.mem.eql(u8, path_and_query, "/")) {
-        return std.fmt.allocPrint(allocator, "{s}{s}", .{ raw_url[0..slash_at], default_stream_path });
-    }
-    if (std.mem.startsWith(u8, path_and_query, "/?")) {
-        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{
-            raw_url[0..slash_at],
-            default_stream_path,
-            path_and_query[1..],
-        });
-    }
-
-    return allocator.dupe(u8, raw_url);
-}
-
 fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "chat")) return .chat;
     if (std.mem.eql(u8, arg, "fs")) return .fs;
@@ -246,10 +212,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
                 allocator.free(options.url);
             }
 
-            options.url = try normalizeServerUrl(allocator, args[i]);
-            if (!std.mem.eql(u8, options.url, args[i])) {
-                logger.warn("URL missing stream path; using {s}", .{options.url});
-            }
+            options.url = try allocator.dupe(u8, args[i]);
             options.url_explicitly_provided = true;
             continue;
         }
@@ -363,26 +326,4 @@ pub fn formatCommand(allocator: std.mem.Allocator, cmd: Command) ![]u8 {
     }
 
     return std.mem.join(allocator, " ", parts.items);
-}
-
-test "normalizeServerUrl appends default path for bare host" {
-    const allocator = std.testing.allocator;
-    const normalized = try normalizeServerUrl(allocator, "ws://100.101.192.123:18790");
-    defer allocator.free(normalized);
-
-    try std.testing.expectEqualStrings(
-        "ws://100.101.192.123:18790/v2/agents/default/stream",
-        normalized,
-    );
-}
-
-test "normalizeServerUrl keeps explicit stream path unchanged" {
-    const allocator = std.testing.allocator;
-    const normalized = try normalizeServerUrl(allocator, "ws://100.101.192.123:18790/v2/agents/default/stream");
-    defer allocator.free(normalized);
-
-    try std.testing.expectEqualStrings(
-        "ws://100.101.192.123:18790/v2/agents/default/stream",
-        normalized,
-    );
 }

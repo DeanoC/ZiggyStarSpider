@@ -307,8 +307,10 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     defer allocator.free(message);
 
     const client = try getOrCreateClient(allocator, options.url);
+    logger.info("Negotiating FS-RPC session...", .{});
     try fsrpcBootstrap(allocator, client);
 
+    logger.info("Submitting chat job...", .{});
     const chat_input_fid = try fsrpcWalkPath(allocator, client, "/capabilities/chat/control/input");
     defer fsrpcClunkBestEffort(allocator, client, chat_input_fid);
     try fsrpcOpen(allocator, client, chat_input_fid, "rw");
@@ -327,6 +329,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     defer fsrpcClunkBestEffort(allocator, client, result_fid);
     try fsrpcOpen(allocator, client, result_fid, "r");
 
+    logger.info("Waiting for chat result...", .{});
     const content = try fsrpcReadAllText(allocator, client, result_fid);
     defer allocator.free(content);
 
@@ -427,7 +430,12 @@ fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void 
         .{connect_id},
     );
     defer allocator.free(connect_payload);
-    try client.send(connect_payload);
+    client.send(connect_payload) catch |err| {
+        if (err == error.BrokenPipe or err == error.ConnectionResetByPeer or err == error.EndOfStream or err == error.Closed) {
+            logger.err("Server closed connection before control handshake", .{});
+        }
+        return err;
+    };
 
     const version_tag = nextFsrpcTag();
     const version_req = try std.fmt.allocPrint(
@@ -588,8 +596,8 @@ fn sendAndAwaitFsrpc(allocator: std.mem.Allocator, client: *WebSocketClient, req
     const started = std.time.milliTimestamp();
     while (std.time.milliTimestamp() - started < 15_000) {
         const maybe_raw = client.readTimeout(2_000) catch |err| {
-            if (err == error.Closed or err == error.ConnectionResetByPeer or err == error.EndOfStream) {
-                logger.err("Connection closed while waiting for FS-RPC response; ensure URL path is /v2/agents/<agent>/stream", .{});
+            if (err == error.Closed or err == error.BrokenPipe or err == error.ConnectionResetByPeer or err == error.EndOfStream) {
+                logger.err("Connection closed while waiting for FS-RPC response", .{});
             }
             return err;
         };
