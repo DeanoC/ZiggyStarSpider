@@ -597,12 +597,37 @@ fn sendAndAwaitFsrpc(allocator: std.mem.Allocator, client: *WebSocketClient, req
                 };
             }
 
+            if (parsed.value == .object) {
+                logOutOfBandFrame(parsed.value.object);
+            }
             parsed.deinit();
             allocator.free(raw);
         }
     }
 
     return error.Timeout;
+}
+
+fn logOutOfBandFrame(root: std.json.ObjectMap) void {
+    const type_value = root.get("type") orelse return;
+    if (type_value != .string) return;
+
+    if (std.mem.eql(u8, type_value.string, "debug.event")) {
+        const category = if (root.get("category")) |value| switch (value) {
+            .string => value.string,
+            else => "unknown",
+        } else "unknown";
+        logger.info("Debug event: {s}", .{category});
+        return;
+    }
+
+    if (std.mem.eql(u8, type_value.string, "control.error")) {
+        const message = if (root.get("message")) |value| switch (value) {
+            .string => value.string,
+            else => "control.error",
+        } else "control.error";
+        logger.warn("Control error while awaiting FS-RPC response: {s}", .{message});
+    }
 }
 
 fn ensureFsrpcOk(envelope: *JsonEnvelope) !void {

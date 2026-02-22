@@ -4487,6 +4487,9 @@ const App = struct {
                 }
 
                 parsed.deinit();
+                self.handleIncomingMessage(raw) catch |err| {
+                    std.log.warn("[GUI] dropped out-of-band frame while awaiting fsrpc tag={d}: {s}", .{ tag, @errorName(err) });
+                };
                 self.allocator.free(raw);
             }
         }
