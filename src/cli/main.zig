@@ -10,6 +10,8 @@ var g_client: ?WebSocketClient = null;
 var g_connected: bool = false;
 var g_fsrpc_tag: u32 = 1;
 var g_fsrpc_fid: u32 = 2;
+const fsrpc_default_timeout_ms: i64 = 15_000;
+const fsrpc_chat_write_timeout_ms: i64 = 180_000;
 
 pub fn run(allocator: std.mem.Allocator) !void {
     defer cleanupGlobalClient();
@@ -444,7 +446,7 @@ fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void 
         .{version_tag},
     );
     defer allocator.free(version_req);
-    var version = try sendAndAwaitFsrpc(allocator, client, version_req, version_tag);
+    var version = try sendAndAwaitFsrpcWithTimeout(allocator, client, version_req, version_tag, fsrpc_default_timeout_ms);
     defer version.deinit(allocator);
     try ensureFsrpcOk(&version);
 
@@ -455,7 +457,7 @@ fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void 
         .{attach_tag},
     );
     defer allocator.free(attach_req);
-    var attach = try sendAndAwaitFsrpc(allocator, client, attach_req, attach_tag);
+    var attach = try sendAndAwaitFsrpcWithTimeout(allocator, client, attach_req, attach_tag, fsrpc_default_timeout_ms);
     defer attach.deinit(allocator);
     try ensureFsrpcOk(&attach);
 }
@@ -476,7 +478,7 @@ fn fsrpcWalkPath(allocator: std.mem.Allocator, client: *WebSocketClient, path: [
     );
     defer allocator.free(req);
 
-    var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
+    var response = try sendAndAwaitFsrpcWithTimeout(allocator, client, req, tag, fsrpc_default_timeout_ms);
     defer response.deinit(allocator);
     try ensureFsrpcOk(&response);
     return new_fid;
@@ -494,7 +496,7 @@ fn fsrpcOpen(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32, m
     );
     defer allocator.free(req);
 
-    var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
+    var response = try sendAndAwaitFsrpcWithTimeout(allocator, client, req, tag, fsrpc_default_timeout_ms);
     defer response.deinit(allocator);
     try ensureFsrpcOk(&response);
 }
@@ -508,7 +510,7 @@ fn fsrpcReadAllText(allocator: std.mem.Allocator, client: *WebSocketClient, fid:
     );
     defer allocator.free(req);
 
-    var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
+    var response = try sendAndAwaitFsrpcWithTimeout(allocator, client, req, tag, fsrpc_default_timeout_ms);
     defer response.deinit(allocator);
     try ensureFsrpcOk(&response);
 
@@ -537,7 +539,7 @@ fn fsrpcWriteText(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u
     );
     defer allocator.free(req);
 
-    var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
+    var response = try sendAndAwaitFsrpcWithTimeout(allocator, client, req, tag, fsrpc_chat_write_timeout_ms);
     defer response.deinit(allocator);
     try ensureFsrpcOk(&response);
 
@@ -566,7 +568,7 @@ fn fsrpcStatRaw(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32
     );
     defer allocator.free(req);
 
-    var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
+    var response = try sendAndAwaitFsrpcWithTimeout(allocator, client, req, tag, fsrpc_default_timeout_ms);
     defer response.deinit(allocator);
     try ensureFsrpcOk(&response);
 
@@ -586,15 +588,25 @@ fn fsrpcClunkBestEffort(allocator: std.mem.Allocator, client: *WebSocketClient, 
         .{ tag, fid },
     ) catch return;
     defer allocator.free(req);
-    var response = sendAndAwaitFsrpc(allocator, client, req, tag) catch return;
+    var response = sendAndAwaitFsrpcWithTimeout(allocator, client, req, tag, 1_000) catch return;
     response.deinit(allocator);
 }
 
 fn sendAndAwaitFsrpc(allocator: std.mem.Allocator, client: *WebSocketClient, request_json: []const u8, tag: u32) !JsonEnvelope {
+    return sendAndAwaitFsrpcWithTimeout(allocator, client, request_json, tag, fsrpc_default_timeout_ms);
+}
+
+fn sendAndAwaitFsrpcWithTimeout(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    request_json: []const u8,
+    tag: u32,
+    timeout_ms: i64,
+) !JsonEnvelope {
     try client.send(request_json);
 
     const started = std.time.milliTimestamp();
-    while (std.time.milliTimestamp() - started < 15_000) {
+    while (std.time.milliTimestamp() - started < timeout_ms) {
         const maybe_raw = client.readTimeout(2_000) catch |err| {
             if (err == error.Closed or err == error.BrokenPipe or err == error.ConnectionResetByPeer or err == error.EndOfStream) {
                 logger.err("Connection closed while waiting for FS-RPC response", .{});
