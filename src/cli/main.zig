@@ -12,6 +12,8 @@ var g_fsrpc_tag: u32 = 1;
 var g_fsrpc_fid: u32 = 2;
 
 pub fn run(allocator: std.mem.Allocator) !void {
+    defer cleanupGlobalClient();
+
     // Parse arguments
     var options = args.parseArgs(allocator) catch |err| {
         if (err == error.InvalidArguments) {
@@ -62,22 +64,30 @@ pub fn run(allocator: std.mem.Allocator) !void {
         // No command and not interactive - show help
         args.printHelp();
     }
-
-    // Cleanup global client if exists
-    if (g_client) |*client| {
-        client.deinit();
-        g_client = null;
-        g_connected = false;
-    }
 }
 
 fn getOrCreateClient(allocator: std.mem.Allocator, url: []const u8) !*WebSocketClient {
     if (g_client == null) {
         g_client = WebSocketClient.init(allocator, url, "");
-        try g_client.?.connect();
+    }
+
+    if (!g_connected) {
+        g_client.?.connect() catch |err| {
+            cleanupGlobalClient();
+            return err;
+        };
         g_connected = true;
     }
+
     return &g_client.?;
+}
+
+fn cleanupGlobalClient() void {
+    if (g_client) |*client| {
+        client.deinit();
+    }
+    g_client = null;
+    g_connected = false;
 }
 
 fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
@@ -215,12 +225,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 return;
             }
 
-            if (g_client) |*client| {
-                client.disconnect();
-                client.deinit();
-            }
-            g_client = null;
-            g_connected = false;
+            cleanupGlobalClient();
             try stdout.print("Disconnected\n", .{});
         },
         .status => {
