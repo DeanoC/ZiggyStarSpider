@@ -2,12 +2,13 @@ const std = @import("std");
 const args = @import("args.zig");
 const logger = @import("ziggy-core").utils.logger;
 const WebSocketClient = @import("../client/websocket.zig").WebSocketClient;
-const session_protocol = @import("ziggy-spider-protocol").session_protocol;
+const unified = @import("ziggy-spider-protocol").unified;
 
 // Main CLI entry point for ZiggyStarSpider
 
 var g_client: ?WebSocketClient = null;
 var g_connected: bool = false;
+var g_fsrpc_tag: u32 = 1;
 
 pub fn run(allocator: std.mem.Allocator) !void {
     // Parse arguments
@@ -84,93 +85,24 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
     switch (cmd.noun) {
         .chat => {
             switch (cmd.verb) {
-                .send => {
-                    if (cmd.args.len == 0) {
-                        logger.err("chat send requires a message", .{});
-                        return error.InvalidArguments;
-                    }
-                    const message = try std.mem.join(allocator, " ", cmd.args);
-                    defer allocator.free(message);
-
-                    // Connect and send
-                    const client = try getOrCreateClient(allocator, options.url);
-
-                    const payload = try session_protocol.buildSessionSendJson(allocator, client.session_key, message);
-                    defer allocator.free(payload);
-                    try client.send(payload);
-                    try stdout.print("Sent: \"{s}\"\n", .{message});
-
-                    // Wait for response(s)
-                    const start_time = std.time.milliTimestamp();
-                    var got_content = false;
-                    while (std.time.milliTimestamp() - start_time < 15_000) {
-                        if (try client.readTimeout(5_000)) |response| {
-                            defer allocator.free(response);
-
-                            // Try to parse message
-                            const parsed = std.json.parseFromSlice(std.json.Value, allocator, response, .{}) catch null;
-                            if (parsed) |p| {
-                                defer p.deinit();
-                                if (p.value == .object) {
-                                    const msg_obj = p.value.object;
-
-                                    // Handle sessionKey
-                                    if (msg_obj.get("sessionKey")) |sk| {
-                                        if (sk == .string) {
-                                            if (client.session_key) |old| allocator.free(old);
-                                            client.session_key = try allocator.dupe(u8, sk.string);
-                                        }
-                                    } else if (msg_obj.get("session_key")) |sk| {
-                                        if (sk == .string) {
-                                            if (client.session_key) |old| allocator.free(old);
-                                            client.session_key = try allocator.dupe(u8, sk.string);
-                                        }
-                                    }
-
-                                    // Handle content
-                                    const msg_type = msg_obj.get("type");
-                                    if (msg_type) |mt| {
-                                        if (mt == .string) {
-                                            if (std.mem.eql(u8, mt.string, "chat.receive") or std.mem.eql(u8, mt.string, "session.receive")) {
-                                                if (msg_obj.get("content")) |content| {
-                                                    if (content == .string) {
-                                                        try stdout.print("AI: {s}\n", .{content.string});
-                                                        got_content = true;
-                                                        break;
-                                                    }
-                                                }
-                                            } else if (std.mem.eql(u8, mt.string, "error")) {
-                                                if (msg_obj.get("message")) |msg| {
-                                                    if (msg == .string) {
-                                                        try stdout.print("Error: {s}\n", .{msg.string});
-                                                    }
-                                                }
-                                                break;
-                                            } else if (std.mem.eql(u8, mt.string, "connect.ack")) {
-                                                logger.debug("Received connect.ack", .{});
-                                            } else {
-                                                logger.debug("Received other message type: {s}", .{mt.string});
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                try stdout.print("Raw Response: {s}\n", .{response});
-                            }
-                        } else {
-                            // Timeout on single read
-                            if (got_content) break;
-                        }
-                    }
-                    if (!got_content) {
-                        try stdout.print("(Timed out waiting for AI response)\n", .{});
-                    }
-                },
+                .send => try executeChatSend(allocator, options, cmd),
                 .history => {
                     try stdout.print("Chat history not yet implemented\n", .{});
                 },
                 else => {
                     logger.err("Unknown chat verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
+        .fs => {
+            switch (cmd.verb) {
+                .ls => try executeFsLs(allocator, options, cmd),
+                .read => try executeFsRead(allocator, options, cmd),
+                .write => try executeFsWrite(allocator, options, cmd),
+                .stat => try executeFsStat(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown fs verb", .{});
                     return error.InvalidArguments;
                 },
             }
@@ -317,4 +249,419 @@ fn runInteractive(allocator: std.mem.Allocator, options: args.Options) !void {
     // TODO: Implement actual interactive REPL with connection
     try stdout.print("Interactive mode not yet implemented.\n", .{});
     try stdout.print("Use command mode for now: ziggystarspider chat send \"hello\"\n", .{});
+}
+
+const JsonEnvelope = struct {
+    raw: []const u8,
+    parsed: std.json.Parsed(std.json.Value),
+
+    fn deinit(self: *JsonEnvelope, allocator: std.mem.Allocator) void {
+        self.parsed.deinit();
+        allocator.free(self.raw);
+        self.* = undefined;
+    }
+};
+
+const FsrpcWriteResult = struct {
+    written: u64,
+    job: ?[]u8 = null,
+
+    fn deinit(self: *FsrpcWriteResult, allocator: std.mem.Allocator) void {
+        if (self.job) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+fn nextFsrpcTag() u32 {
+    const tag = g_fsrpc_tag;
+    g_fsrpc_tag +%= 1;
+    if (g_fsrpc_tag == 0) g_fsrpc_tag = 1;
+    return tag;
+}
+
+fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("chat send requires a message", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const message = try std.mem.join(allocator, " ", cmd.args);
+    defer allocator.free(message);
+
+    const client = try getOrCreateClient(allocator, options.url);
+    try fsrpcBootstrap(allocator, client);
+
+    const chat_input_fid = try fsrpcWalkPath(allocator, client, "/capabilities/chat/control/input");
+    defer fsrpcClunkBestEffort(allocator, client, chat_input_fid);
+    try fsrpcOpen(allocator, client, chat_input_fid, "rw");
+
+    var write = try fsrpcWriteText(allocator, client, chat_input_fid, message);
+    defer write.deinit(allocator);
+    const job_name = write.job orelse {
+        logger.err("chat send did not return a job identifier", .{});
+        return error.InvalidResponse;
+    };
+
+    const result_path = try std.fmt.allocPrint(allocator, "/jobs/{s}/result.txt", .{job_name});
+    defer allocator.free(result_path);
+
+    const result_fid = try fsrpcWalkPath(allocator, client, result_path);
+    defer fsrpcClunkBestEffort(allocator, client, result_fid);
+    try fsrpcOpen(allocator, client, result_fid, "r");
+
+    const content = try fsrpcReadAllText(allocator, client, result_fid);
+    defer allocator.free(content);
+
+    try stdout.print("Sent: \"{s}\"\n", .{message});
+    if (content.len == 0) {
+        try stdout.print("AI: (no content)\n", .{});
+    } else {
+        try stdout.print("AI: {s}\n", .{content});
+    }
+}
+
+fn executeFsLs(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try fsrpcBootstrap(allocator, client);
+
+    const path = if (cmd.args.len > 0) cmd.args[0] else "/";
+    const fid = try fsrpcWalkPath(allocator, client, path);
+    defer fsrpcClunkBestEffort(allocator, client, fid);
+
+    try fsrpcOpen(allocator, client, fid, "r");
+    const content = try fsrpcReadAllText(allocator, client, fid);
+    defer allocator.free(content);
+
+    if (content.len == 0) {
+        try stdout.print("(empty)\n", .{});
+    } else {
+        try stdout.print("{s}\n", .{content});
+    }
+}
+
+fn executeFsRead(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("fs read requires a path", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try fsrpcBootstrap(allocator, client);
+
+    const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
+    defer fsrpcClunkBestEffort(allocator, client, fid);
+
+    try fsrpcOpen(allocator, client, fid, "r");
+    const content = try fsrpcReadAllText(allocator, client, fid);
+    defer allocator.free(content);
+    try stdout.print("{s}\n", .{content});
+}
+
+fn executeFsWrite(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len < 2) {
+        logger.err("fs write requires a path and content", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try fsrpcBootstrap(allocator, client);
+
+    const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
+    defer fsrpcClunkBestEffort(allocator, client, fid);
+
+    const content = try std.mem.join(allocator, " ", cmd.args[1..]);
+    defer allocator.free(content);
+
+    try fsrpcOpen(allocator, client, fid, "rw");
+    var write = try fsrpcWriteText(allocator, client, fid, content);
+    defer write.deinit(allocator);
+    try stdout.print("wrote {d} byte(s)\n", .{write.written});
+}
+
+fn executeFsStat(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("fs stat requires a path", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options.url);
+    try fsrpcBootstrap(allocator, client);
+
+    const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
+    defer fsrpcClunkBestEffort(allocator, client, fid);
+
+    const stat_json = try fsrpcStatRaw(allocator, client, fid);
+    defer allocator.free(stat_json);
+    try stdout.print("{s}\n", .{stat_json});
+}
+
+fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void {
+    const connect_id = try std.fmt.allocPrint(allocator, "ctl-{d}", .{std.time.milliTimestamp()});
+    defer allocator.free(connect_id);
+
+    const connect_payload = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"control\",\"type\":\"control.connect\",\"id\":\"{s}\"}}",
+        .{connect_id},
+    );
+    defer allocator.free(connect_payload);
+    try client.send(connect_payload);
+
+    const version_tag = nextFsrpcTag();
+    const version_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"styx-lite-1\"}}",
+        .{version_tag},
+    );
+    defer allocator.free(version_req);
+    var version = try sendAndAwaitFsrpc(allocator, client, version_req, version_tag);
+    defer version.deinit(allocator);
+    try ensureFsrpcOk(&version);
+
+    const attach_tag = nextFsrpcTag();
+    const attach_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_attach\",\"tag\":{d},\"fid\":1}}",
+        .{attach_tag},
+    );
+    defer allocator.free(attach_req);
+    var attach = try sendAndAwaitFsrpc(allocator, client, attach_req, attach_tag);
+    defer attach.deinit(allocator);
+    try ensureFsrpcOk(&attach);
+}
+
+fn fsrpcWalkPath(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8) !u32 {
+    const segments = try splitPathSegments(allocator, path);
+    defer freeSegments(allocator, segments);
+
+    const path_json = try buildPathArrayJson(allocator, segments);
+    defer allocator.free(path_json);
+
+    const tag = nextFsrpcTag();
+    const req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":2,\"path\":{s}}}",
+        .{ tag, path_json },
+    );
+    defer allocator.free(req);
+
+    var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
+    defer response.deinit(allocator);
+    try ensureFsrpcOk(&response);
+    return 2;
+}
+
+fn fsrpcOpen(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32, mode: []const u8) !void {
+    const escaped_mode = try unified.jsonEscape(allocator, mode);
+    defer allocator.free(escaped_mode);
+
+    const tag = nextFsrpcTag();
+    const req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
+        .{ tag, fid, escaped_mode },
+    );
+    defer allocator.free(req);
+
+    var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
+    defer response.deinit(allocator);
+    try ensureFsrpcOk(&response);
+}
+
+fn fsrpcReadAllText(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32) ![]u8 {
+    const tag = nextFsrpcTag();
+    const req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
+        .{ tag, fid },
+    );
+    defer allocator.free(req);
+
+    var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
+    defer response.deinit(allocator);
+    try ensureFsrpcOk(&response);
+
+    const payload = try getPayloadObject(response.parsed.value.object);
+    const data_b64 = payload.get("data_b64") orelse return error.InvalidResponse;
+    if (data_b64 != .string) return error.InvalidResponse;
+
+    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
+    const decoded = try allocator.alloc(u8, decoded_len);
+    _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch {
+        allocator.free(decoded);
+        return error.InvalidResponse;
+    };
+    return decoded;
+}
+
+fn fsrpcWriteText(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32, content: []const u8) !FsrpcWriteResult {
+    const encoded = try unified.encodeDataB64(allocator, content);
+    defer allocator.free(encoded);
+
+    const tag = nextFsrpcTag();
+    const req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+        .{ tag, fid, encoded },
+    );
+    defer allocator.free(req);
+
+    var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
+    defer response.deinit(allocator);
+    try ensureFsrpcOk(&response);
+
+    const payload = try getPayloadObject(response.parsed.value.object);
+    const n = payload.get("n") orelse return error.InvalidResponse;
+    if (n != .integer or n.integer < 0) return error.InvalidResponse;
+
+    var job: ?[]u8 = null;
+    if (payload.get("job")) |job_value| {
+        if (job_value != .string) return error.InvalidResponse;
+        job = try allocator.dupe(u8, job_value.string);
+    }
+
+    return .{
+        .written = @intCast(n.integer),
+        .job = job,
+    };
+}
+
+fn fsrpcStatRaw(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32) ![]u8 {
+    const tag = nextFsrpcTag();
+    const req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_stat\",\"tag\":{d},\"fid\":{d}}}",
+        .{ tag, fid },
+    );
+    defer allocator.free(req);
+
+    var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
+    defer response.deinit(allocator);
+    try ensureFsrpcOk(&response);
+
+    const payload = response.parsed.value.object.get("payload") orelse return error.InvalidResponse;
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+    const formatter = std.json.fmt(payload, .{ .whitespace = .indent_2 });
+    try std.fmt.format(out.writer(allocator), "{f}", .{formatter});
+    return out.toOwnedSlice(allocator);
+}
+
+fn fsrpcClunkBestEffort(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32) void {
+    const tag = nextFsrpcTag();
+    const req = std.fmt.allocPrint(
+        allocator,
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
+        .{ tag, fid },
+    ) catch return;
+    defer allocator.free(req);
+    var response = sendAndAwaitFsrpc(allocator, client, req, tag) catch return;
+    response.deinit(allocator);
+}
+
+fn sendAndAwaitFsrpc(allocator: std.mem.Allocator, client: *WebSocketClient, request_json: []const u8, tag: u32) !JsonEnvelope {
+    try client.send(request_json);
+
+    const started = std.time.milliTimestamp();
+    while (std.time.milliTimestamp() - started < 15_000) {
+        const maybe_raw = try client.readTimeout(2_000);
+        if (maybe_raw) |raw| {
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch {
+                allocator.free(raw);
+                continue;
+            };
+
+            var matched = false;
+            if (parsed.value == .object) {
+                const obj = parsed.value.object;
+                if (obj.get("channel")) |channel| {
+                    if (channel == .string and std.mem.eql(u8, channel.string, "fsrpc")) {
+                        if (obj.get("tag")) |raw_tag| {
+                            if (raw_tag == .integer and raw_tag.integer >= 0 and @as(u32, @intCast(raw_tag.integer)) == tag) {
+                                matched = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (matched) {
+                return .{
+                    .raw = raw,
+                    .parsed = parsed,
+                };
+            }
+
+            parsed.deinit();
+            allocator.free(raw);
+        }
+    }
+
+    return error.Timeout;
+}
+
+fn ensureFsrpcOk(envelope: *JsonEnvelope) !void {
+    if (envelope.parsed.value != .object) return error.InvalidResponse;
+    const obj = envelope.parsed.value.object;
+    const ok_value = obj.get("ok") orelse return error.InvalidResponse;
+    if (ok_value != .bool) return error.InvalidResponse;
+    if (!ok_value.bool) {
+        const error_value = obj.get("error") orelse return error.RemoteError;
+        if (error_value == .object) {
+            if (error_value.object.get("message")) |message| {
+                if (message == .string) logger.err("FS-RPC error: {s}", .{message.string});
+            }
+        }
+        return error.RemoteError;
+    }
+}
+
+fn getPayloadObject(root: std.json.ObjectMap) !std.json.ObjectMap {
+    const payload = root.get("payload") orelse return error.InvalidResponse;
+    if (payload != .object) return error.InvalidResponse;
+    return payload.object;
+}
+
+fn splitPathSegments(allocator: std.mem.Allocator, path: []const u8) ![][]u8 {
+    if (path.len == 0 or std.mem.eql(u8, path, "/")) return &.{};
+
+    var out = std.ArrayListUnmanaged([]u8){};
+    errdefer {
+        for (out.items) |segment| allocator.free(segment);
+        out.deinit(allocator);
+    }
+
+    var it = std.mem.tokenizeAny(u8, path, "/");
+    while (it.next()) |segment| {
+        if (segment.len == 0) continue;
+        try out.append(allocator, try allocator.dupe(u8, segment));
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn freeSegments(allocator: std.mem.Allocator, segments: [][]u8) void {
+    for (segments) |segment| allocator.free(segment);
+    if (segments.len > 0) allocator.free(segments);
+}
+
+fn buildPathArrayJson(allocator: std.mem.Allocator, segments: [][]u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+
+    try out.append(allocator, '[');
+    for (segments, 0..) |segment, idx| {
+        if (idx > 0) try out.append(allocator, ',');
+        const escaped = try unified.jsonEscape(allocator, segment);
+        defer allocator.free(escaped);
+        try out.writer(allocator).print("\"{s}\"", .{escaped});
+    }
+    try out.append(allocator, ']');
+
+    return out.toOwnedSlice(allocator);
 }

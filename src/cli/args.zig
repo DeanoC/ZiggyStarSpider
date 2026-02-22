@@ -4,7 +4,7 @@ const logger = @import("ziggy-core").utils.logger;
 // CLI argument parsing for ZiggyStarSpider
 // Uses simple iteration like ZSC - no ArrayList complexity for basic parsing
 
-const default_server_url = "ws://127.0.0.1:18790/v1/agents/default/stream";
+const default_server_url = "ws://127.0.0.1:18790/v2/agents/default/stream";
 
 pub const Command = struct {
     noun: Noun,
@@ -14,6 +14,7 @@ pub const Command = struct {
 
 pub const Noun = enum {
     chat,
+    fs,
     project,
     goal,
     task,
@@ -27,6 +28,10 @@ pub const Noun = enum {
 
 pub const Verb = enum {
     send,
+    read,
+    write,
+    stat,
+    ls,
     history,
     list,
     use,
@@ -105,6 +110,7 @@ pub fn printVersion() void {
 
 fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "chat")) return .chat;
+    if (std.mem.eql(u8, arg, "fs")) return .fs;
     if (std.mem.eql(u8, arg, "project")) return .project;
     if (std.mem.eql(u8, arg, "goal")) return .goal;
     if (std.mem.eql(u8, arg, "task")) return .task;
@@ -121,6 +127,12 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
         .chat => {
             if (std.mem.eql(u8, arg, "send")) return .send;
             if (std.mem.eql(u8, arg, "history")) return .history;
+        },
+        .fs => {
+            if (std.mem.eql(u8, arg, "ls")) return .ls;
+            if (std.mem.eql(u8, arg, "read")) return .read;
+            if (std.mem.eql(u8, arg, "write")) return .write;
+            if (std.mem.eql(u8, arg, "stat")) return .stat;
         },
         .project => {
             if (std.mem.eql(u8, arg, "list")) return .list;

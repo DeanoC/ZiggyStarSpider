@@ -52,6 +52,49 @@ const ChatSession = zui.protocol.types.Session;
 
 const ChatPanel = zui.ChatPanel(ChatMessage, ChatSession);
 
+const FsrpcEnvelope = struct {
+    raw: []u8,
+    parsed: std.json.Parsed(std.json.Value),
+
+    fn deinit(self: *FsrpcEnvelope, allocator: std.mem.Allocator) void {
+        self.parsed.deinit();
+        allocator.free(self.raw);
+        self.* = undefined;
+    }
+};
+
+fn encodeDataB64(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    const encoder = std.base64.standard.Encoder;
+    const encoded_len = encoder.calcSize(data.len);
+    const out = try allocator.alloc(u8, encoded_len);
+    _ = encoder.encode(out, data);
+    return out;
+}
+
+fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+
+    for (input) |char| {
+        switch (char) {
+            '\\' => try out.appendSlice(allocator, "\\\\"),
+            '"' => try out.appendSlice(allocator, "\\\""),
+            '\n' => try out.appendSlice(allocator, "\\n"),
+            '\r' => try out.appendSlice(allocator, "\\r"),
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            else => {
+                if (char < 0x20) {
+                    try out.writer(allocator).print("\\u00{x:0>2}", .{char});
+                } else {
+                    try out.append(allocator, char);
+                }
+            },
+        }
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
 const SettingsFocusField = enum {
     none,
     server_url,
@@ -75,7 +118,7 @@ const SettingsPanel = struct {
 
     pub fn init(allocator: std.mem.Allocator) SettingsPanel {
         var panel = SettingsPanel{};
-        panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790/v1/agents/default/stream") catch {};
+        panel.server_url.appendSlice(allocator, "ws://127.0.0.1:18790/v2/agents/default/stream") catch {};
         panel.default_session.appendSlice(allocator, "main") catch {};
         return panel;
     }
@@ -296,6 +339,7 @@ const App = struct {
     pending_close_window_id: ?u32 = null,
 
     message_counter: u64 = 0,
+    next_fsrpc_tag: u32 = 1,
     debug_frame_counter: u64 = 0,
     frame_clock: zapp.frame_clock.FrameClock,
     workspace_recovery_blocked_until: u64 = 0,
@@ -3208,7 +3252,7 @@ const App = struct {
             input_rect,
             self.settings_panel.server_url.items,
             self.settings_panel.focused_field == .server_url,
-            .{ .placeholder = "ws://127.0.0.1:18790/v1/agents/default/stream" },
+            .{ .placeholder = "ws://127.0.0.1:18790/v2/agents/default/stream" },
         );
         if (url_focused) self.settings_panel.focused_field = .server_url;
 
@@ -4362,27 +4406,8 @@ const App = struct {
         self.allocator.free(user_msg_id);
         try self.setPendingSend(self.allocator, appended_user_msg_id, session_key);
 
-        const request_id = try self.nextMessageId("req");
-        if (self.pending_send_request_id) |request| {
-            self.allocator.free(request);
-        }
-        self.pending_send_request_id = request_id;
-        self.awaiting_reply = true;
-
         if (self.ws_client) |*client| {
-            const payload = protocol_messages.buildSessionSend(
-                self.allocator,
-                request_id,
-                text,
-                session_key,
-            ) catch {
-                try self.setMessageFailed(appended_user_msg_id);
-                self.clearPendingSend();
-                return;
-            };
-            defer self.allocator.free(payload);
-
-            client.send(payload) catch |err| {
+            const response = self.sendChatViaFsrpc(client, text) catch |err| {
                 std.log.err("[GUI] sendChatMessageText: websocket send failed: {s}", .{@errorName(err)});
                 const err_text = try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{@errorName(err)});
                 defer self.allocator.free(err_text);
@@ -4395,6 +4420,15 @@ const App = struct {
                 self.clearPendingSend();
                 return;
             };
+            defer self.allocator.free(response);
+
+            if (self.pending_send_message_id) |message_id| {
+                try self.setMessageState(message_id, null);
+            } else {
+                try self.setMessageState(appended_user_msg_id, null);
+            }
+            try self.appendMessageForSession(session_key, "assistant", response, null);
+            self.clearPendingSend();
         } else {
             const err_text = try std.fmt.allocPrint(self.allocator, "Not connected", .{});
             defer self.allocator.free(err_text);
@@ -4406,6 +4440,218 @@ const App = struct {
             }
             self.clearPendingSend();
         }
+    }
+
+    fn nextFsrpcTag(self: *App) u32 {
+        const tag = self.next_fsrpc_tag;
+        self.next_fsrpc_tag +%= 1;
+        if (self.next_fsrpc_tag == 0) self.next_fsrpc_tag = 1;
+        return tag;
+    }
+
+    fn sendAndAwaitFsrpc(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        request_json: []const u8,
+        tag: u32,
+    ) !FsrpcEnvelope {
+        try client.send(request_json);
+
+        const started = std.time.milliTimestamp();
+        while (std.time.milliTimestamp() - started < 15_000) {
+            if (client.receive(500)) |raw| {
+                const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, raw, .{}) catch {
+                    self.allocator.free(raw);
+                    continue;
+                };
+
+                var matched = false;
+                if (parsed.value == .object) {
+                    const obj = parsed.value.object;
+                    if (obj.get("channel")) |channel| {
+                        if (channel == .string and std.mem.eql(u8, channel.string, "fsrpc")) {
+                            if (obj.get("tag")) |raw_tag| {
+                                if (raw_tag == .integer and raw_tag.integer >= 0 and @as(u32, @intCast(raw_tag.integer)) == tag) {
+                                    matched = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (matched) {
+                    return .{
+                        .raw = raw,
+                        .parsed = parsed,
+                    };
+                }
+
+                parsed.deinit();
+                self.allocator.free(raw);
+            }
+        }
+
+        return error.Timeout;
+    }
+
+    fn ensureFsrpcOk(self: *App, envelope: *FsrpcEnvelope) !void {
+        _ = self;
+        if (envelope.parsed.value != .object) return error.InvalidResponse;
+        const obj = envelope.parsed.value.object;
+        const ok_value = obj.get("ok") orelse return error.InvalidResponse;
+        if (ok_value != .bool) return error.InvalidResponse;
+        if (!ok_value.bool) return error.RemoteError;
+    }
+
+    fn getFsrpcPayloadObject(self: *App, root: std.json.ObjectMap) !std.json.ObjectMap {
+        _ = self;
+        const payload = root.get("payload") orelse return error.InvalidResponse;
+        if (payload != .object) return error.InvalidResponse;
+        return payload.object;
+    }
+
+    fn fsrpcBootstrapGui(self: *App, client: *ws_client_mod.WebSocketClient) !void {
+        const connect_id = try self.nextMessageId("ctl");
+        defer self.allocator.free(connect_id);
+
+        const connect_payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"control\",\"type\":\"control.connect\",\"id\":\"{s}\"}}",
+            .{connect_id},
+        );
+        defer self.allocator.free(connect_payload);
+        try client.send(connect_payload);
+
+        const version_tag = self.nextFsrpcTag();
+        const version_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"styx-lite-1\"}}",
+            .{version_tag},
+        );
+        defer self.allocator.free(version_req);
+        var version = try self.sendAndAwaitFsrpc(client, version_req, version_tag);
+        defer version.deinit(self.allocator);
+        try self.ensureFsrpcOk(&version);
+
+        const attach_tag = self.nextFsrpcTag();
+        const attach_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_attach\",\"tag\":{d},\"fid\":1}}",
+            .{attach_tag},
+        );
+        defer self.allocator.free(attach_req);
+        var attach = try self.sendAndAwaitFsrpc(client, attach_req, attach_tag);
+        defer attach.deinit(self.allocator);
+        try self.ensureFsrpcOk(&attach);
+    }
+
+    fn fsrpcClunkBestEffort(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) void {
+        const tag = self.nextFsrpcTag();
+        const req = std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
+            .{ tag, fid },
+        ) catch return;
+        defer self.allocator.free(req);
+
+        var response = self.sendAndAwaitFsrpc(client, req, tag) catch return;
+        response.deinit(self.allocator);
+    }
+
+    fn sendChatViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
+        try self.fsrpcBootstrapGui(client);
+
+        const input_fid: u32 = 2;
+        const result_fid: u32 = 3;
+
+        const walk_input_tag = self.nextFsrpcTag();
+        const walk_input_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"capabilities\",\"chat\",\"control\",\"input\"]}}",
+            .{ walk_input_tag, input_fid },
+        );
+        defer self.allocator.free(walk_input_req);
+        var walk_input = try self.sendAndAwaitFsrpc(client, walk_input_req, walk_input_tag);
+        defer walk_input.deinit(self.allocator);
+        try self.ensureFsrpcOk(&walk_input);
+
+        const open_input_tag = self.nextFsrpcTag();
+        const open_input_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
+            .{ open_input_tag, input_fid },
+        );
+        defer self.allocator.free(open_input_req);
+        var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag);
+        defer open_input.deinit(self.allocator);
+        try self.ensureFsrpcOk(&open_input);
+
+        const encoded = try encodeDataB64(self.allocator, text);
+        defer self.allocator.free(encoded);
+        const write_tag = self.nextFsrpcTag();
+        const write_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+            .{ write_tag, input_fid, encoded },
+        );
+        defer self.allocator.free(write_req);
+        var write = try self.sendAndAwaitFsrpc(client, write_req, write_tag);
+        defer write.deinit(self.allocator);
+        try self.ensureFsrpcOk(&write);
+
+        const write_payload = try self.getFsrpcPayloadObject(write.parsed.value.object);
+        const job_value = write_payload.get("job") orelse return error.InvalidResponse;
+        if (job_value != .string) return error.InvalidResponse;
+        const job_name = job_value.string;
+
+        self.fsrpcClunkBestEffort(client, input_fid);
+
+        const escaped_job = try jsonEscape(self.allocator, job_name);
+        defer self.allocator.free(escaped_job);
+        const walk_result_tag = self.nextFsrpcTag();
+        const walk_result_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"jobs\",\"{s}\",\"result.txt\"]}}",
+            .{ walk_result_tag, result_fid, escaped_job },
+        );
+        defer self.allocator.free(walk_result_req);
+        var walk_result = try self.sendAndAwaitFsrpc(client, walk_result_req, walk_result_tag);
+        defer walk_result.deinit(self.allocator);
+        try self.ensureFsrpcOk(&walk_result);
+
+        const open_result_tag = self.nextFsrpcTag();
+        const open_result_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"r\"}}",
+            .{ open_result_tag, result_fid },
+        );
+        defer self.allocator.free(open_result_req);
+        var open_result = try self.sendAndAwaitFsrpc(client, open_result_req, open_result_tag);
+        defer open_result.deinit(self.allocator);
+        try self.ensureFsrpcOk(&open_result);
+
+        const read_tag = self.nextFsrpcTag();
+        const read_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
+            .{ read_tag, result_fid },
+        );
+        defer self.allocator.free(read_req);
+        var read = try self.sendAndAwaitFsrpc(client, read_req, read_tag);
+        defer read.deinit(self.allocator);
+        try self.ensureFsrpcOk(&read);
+
+        const read_payload = try self.getFsrpcPayloadObject(read.parsed.value.object);
+        const data_b64 = read_payload.get("data_b64") orelse return error.InvalidResponse;
+        if (data_b64 != .string) return error.InvalidResponse;
+
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
+        const decoded = try self.allocator.alloc(u8, decoded_len);
+        errdefer self.allocator.free(decoded);
+        _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
+
+        self.fsrpcClunkBestEffort(client, result_fid);
+        return decoded;
     }
 
     fn nextMessageId(self: *App, prefix: []const u8) ![]const u8 {
@@ -5136,6 +5382,12 @@ const App = struct {
                 } else root;
                 const err_message = if (payload.get("message")) |value| switch (value) {
                     .string => value.string,
+                    else => "Unknown error",
+                } else if (root.get("error")) |value| switch (value) {
+                    .object => if (value.object.get("message")) |err_msg| switch (err_msg) {
+                        .string => err_msg.string,
+                        else => "Unknown error",
+                    } else "Unknown error",
                     else => "Unknown error",
                 } else "Unknown error";
                 if (extractRequestId(root, payload)) |request_id| {
