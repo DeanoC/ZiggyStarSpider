@@ -45,6 +45,9 @@ const WORKSPACE_RECOVERY_COOLDOWN_FRAMES: u64 = 60;
 const WORKSPACE_RECOVERY_SUSPEND_FRAMES: u64 = 9000;
 const WORKSPACE_RECOVERY_ATTEMPTS_BEFORE_SUSPEND: u8 = 1;
 const MAX_DEBUG_EVENTS: usize = 500;
+const FSRPC_DEFAULT_TIMEOUT_MS: u32 = 15_000;
+const FSRPC_CHAT_WRITE_TIMEOUT_MS: u32 = 180_000;
+const FSRPC_CLUNK_TIMEOUT_MS: u32 = 1_000;
 
 const ChatAttachment = zui.protocol.types.ChatAttachment;
 const ChatMessage = zui.protocol.types.ChatMessage;
@@ -70,6 +73,7 @@ const AsyncChatWorkerState = struct {
     done: bool = false,
     response: ?[]u8 = null,
     error_text: ?[]u8 = null,
+    pending_debug_frames: std.ArrayListUnmanaged([]u8) = .{},
     worker_thread: ?std.Thread = null,
 };
 
@@ -78,6 +82,7 @@ const AsyncChatWorkerContext = struct {
     url: []u8,
     token: []u8,
     message: []u8,
+    subscribe_debug: bool = false,
 };
 
 fn encodeDataB64(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
@@ -125,6 +130,7 @@ fn sendAndAwaitFsrpcBlocking(
     request_json: []const u8,
     tag: u32,
     timeout_ms: u32,
+    debug_state: ?*AsyncChatWorkerState,
 ) !FsrpcEnvelope {
     try client.send(request_json);
 
@@ -157,6 +163,22 @@ fn sendAndAwaitFsrpcBlocking(
                 };
             }
 
+            if (debug_state) |state| {
+                if (parsed.value == .object) {
+                    const maybe_type = parsed.value.object.get("type");
+                    if (maybe_type != null and maybe_type.? == .string and std.mem.eql(u8, maybe_type.?.string, "debug.event")) {
+                        const copied = allocator.dupe(u8, raw) catch null;
+                        if (copied) |payload| {
+                            state.mutex.lock();
+                            state.pending_debug_frames.append(allocator, payload) catch {
+                                allocator.free(payload);
+                            };
+                            state.mutex.unlock();
+                        }
+                    }
+                }
+            }
+
             parsed.deinit();
             allocator.free(raw);
         }
@@ -183,6 +205,8 @@ fn fsrpcBootstrapBlocking(
     allocator: std.mem.Allocator,
     client: *ws_client_mod.WebSocketClient,
     next_tag: *u32,
+    debug_state: ?*AsyncChatWorkerState,
+    subscribe_debug: bool,
 ) !void {
     const connect_id = try std.fmt.allocPrint(allocator, "ctl-{d}", .{std.time.milliTimestamp()});
     defer allocator.free(connect_id);
@@ -195,6 +219,18 @@ fn fsrpcBootstrapBlocking(
     defer allocator.free(connect_payload);
     try client.send(connect_payload);
 
+    if (subscribe_debug) {
+        const debug_id = try std.fmt.allocPrint(allocator, "debug-worker-{d}", .{std.time.milliTimestamp()});
+        defer allocator.free(debug_id);
+        const debug_payload = try std.fmt.allocPrint(
+            allocator,
+            "{{\"channel\":\"control\",\"type\":\"control.debug_subscribe\",\"id\":\"{s}\"}}",
+            .{debug_id},
+        );
+        defer allocator.free(debug_payload);
+        try client.send(debug_payload);
+    }
+
     const version_tag = nextCounter(next_tag, 1);
     const version_req = try std.fmt.allocPrint(
         allocator,
@@ -202,7 +238,7 @@ fn fsrpcBootstrapBlocking(
         .{version_tag},
     );
     defer allocator.free(version_req);
-    var version = try sendAndAwaitFsrpcBlocking(allocator, client, version_req, version_tag, 15_000);
+    var version = try sendAndAwaitFsrpcBlocking(allocator, client, version_req, version_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer version.deinit(allocator);
     try ensureFsrpcOkBlocking(&version);
 
@@ -213,7 +249,7 @@ fn fsrpcBootstrapBlocking(
         .{attach_tag},
     );
     defer allocator.free(attach_req);
-    var attach = try sendAndAwaitFsrpcBlocking(allocator, client, attach_req, attach_tag, 15_000);
+    var attach = try sendAndAwaitFsrpcBlocking(allocator, client, attach_req, attach_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer attach.deinit(allocator);
     try ensureFsrpcOkBlocking(&attach);
 }
@@ -223,6 +259,7 @@ fn fsrpcClunkBestEffortBlocking(
     client: *ws_client_mod.WebSocketClient,
     next_tag: *u32,
     fid: u32,
+    debug_state: ?*AsyncChatWorkerState,
 ) void {
     const tag = nextCounter(next_tag, 1);
     const req = std.fmt.allocPrint(
@@ -231,7 +268,7 @@ fn fsrpcClunkBestEffortBlocking(
         .{ tag, fid },
     ) catch return;
     defer allocator.free(req);
-    var response = sendAndAwaitFsrpcBlocking(allocator, client, req, tag, 1_000) catch return;
+    var response = sendAndAwaitFsrpcBlocking(allocator, client, req, tag, FSRPC_CLUNK_TIMEOUT_MS, debug_state) catch return;
     response.deinit(allocator);
 }
 
@@ -239,16 +276,18 @@ fn sendChatViaFsrpcBlocking(
     allocator: std.mem.Allocator,
     client: *ws_client_mod.WebSocketClient,
     text: []const u8,
+    debug_state: ?*AsyncChatWorkerState,
+    subscribe_debug: bool,
 ) ![]u8 {
     var next_tag: u32 = 1;
     var next_fid: u32 = 2;
 
-    try fsrpcBootstrapBlocking(allocator, client, &next_tag);
+    try fsrpcBootstrapBlocking(allocator, client, &next_tag, debug_state, subscribe_debug);
 
     const input_fid = nextCounter(&next_fid, 2);
     const result_fid = nextCounter(&next_fid, 2);
-    defer fsrpcClunkBestEffortBlocking(allocator, client, &next_tag, input_fid);
-    defer fsrpcClunkBestEffortBlocking(allocator, client, &next_tag, result_fid);
+    defer fsrpcClunkBestEffortBlocking(allocator, client, &next_tag, input_fid, debug_state);
+    defer fsrpcClunkBestEffortBlocking(allocator, client, &next_tag, result_fid, debug_state);
 
     const walk_input_tag = nextCounter(&next_tag, 1);
     const walk_input_req = try std.fmt.allocPrint(
@@ -257,7 +296,7 @@ fn sendChatViaFsrpcBlocking(
         .{ walk_input_tag, input_fid },
     );
     defer allocator.free(walk_input_req);
-    var walk_input = try sendAndAwaitFsrpcBlocking(allocator, client, walk_input_req, walk_input_tag, 15_000);
+    var walk_input = try sendAndAwaitFsrpcBlocking(allocator, client, walk_input_req, walk_input_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer walk_input.deinit(allocator);
     try ensureFsrpcOkBlocking(&walk_input);
 
@@ -268,7 +307,7 @@ fn sendChatViaFsrpcBlocking(
         .{ open_input_tag, input_fid },
     );
     defer allocator.free(open_input_req);
-    var open_input = try sendAndAwaitFsrpcBlocking(allocator, client, open_input_req, open_input_tag, 15_000);
+    var open_input = try sendAndAwaitFsrpcBlocking(allocator, client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer open_input.deinit(allocator);
     try ensureFsrpcOkBlocking(&open_input);
 
@@ -281,7 +320,7 @@ fn sendChatViaFsrpcBlocking(
         .{ write_tag, input_fid, encoded },
     );
     defer allocator.free(write_req);
-    var write = try sendAndAwaitFsrpcBlocking(allocator, client, write_req, write_tag, 15_000);
+    var write = try sendAndAwaitFsrpcBlocking(allocator, client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS, debug_state);
     defer write.deinit(allocator);
     try ensureFsrpcOkBlocking(&write);
 
@@ -299,7 +338,7 @@ fn sendChatViaFsrpcBlocking(
         .{ walk_result_tag, result_fid, escaped_job },
     );
     defer allocator.free(walk_result_req);
-    var walk_result = try sendAndAwaitFsrpcBlocking(allocator, client, walk_result_req, walk_result_tag, 15_000);
+    var walk_result = try sendAndAwaitFsrpcBlocking(allocator, client, walk_result_req, walk_result_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer walk_result.deinit(allocator);
     try ensureFsrpcOkBlocking(&walk_result);
 
@@ -310,7 +349,7 @@ fn sendChatViaFsrpcBlocking(
         .{ open_result_tag, result_fid },
     );
     defer allocator.free(open_result_req);
-    var open_result = try sendAndAwaitFsrpcBlocking(allocator, client, open_result_req, open_result_tag, 15_000);
+    var open_result = try sendAndAwaitFsrpcBlocking(allocator, client, open_result_req, open_result_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer open_result.deinit(allocator);
     try ensureFsrpcOkBlocking(&open_result);
 
@@ -321,7 +360,7 @@ fn sendChatViaFsrpcBlocking(
         .{ read_tag, result_fid },
     );
     defer allocator.free(read_req);
-    var read = try sendAndAwaitFsrpcBlocking(allocator, client, read_req, read_tag, 15_000);
+    var read = try sendAndAwaitFsrpcBlocking(allocator, client, read_req, read_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer read.deinit(allocator);
     try ensureFsrpcOkBlocking(&read);
 
@@ -371,7 +410,7 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
         return;
     };
 
-    response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message) catch |err| blk: {
+    response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message, ctx.state, ctx.subscribe_debug) catch |err| blk: {
         error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
         break :blk null;
     };
@@ -4666,17 +4705,26 @@ const App = struct {
 
         var response: ?[]u8 = null;
         var error_text: ?[]u8 = null;
+        var pending_debug_frames: [][]u8 = &.{};
         self.async_chat_worker.mutex.lock();
         response = self.async_chat_worker.response;
         error_text = self.async_chat_worker.error_text;
         self.async_chat_worker.response = null;
         self.async_chat_worker.error_text = null;
+        if (self.async_chat_worker.pending_debug_frames.items.len > 0) {
+            pending_debug_frames = self.async_chat_worker.pending_debug_frames.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            self.async_chat_worker.pending_debug_frames = .{};
+        }
         self.async_chat_worker.in_flight = false;
         self.async_chat_worker.done = false;
         self.async_chat_worker.mutex.unlock();
 
         if (response) |value| std.heap.page_allocator.free(value);
         if (error_text) |value| std.heap.page_allocator.free(value);
+        if (pending_debug_frames.len > 0) {
+            for (pending_debug_frames) |payload| std.heap.page_allocator.free(payload);
+            std.heap.page_allocator.free(pending_debug_frames);
+        }
     }
 
     fn startAsyncChatSend(self: *App, text: []const u8) !void {
@@ -4711,12 +4759,20 @@ const App = struct {
             page_allocator.free(value);
             self.async_chat_worker.error_text = null;
         }
+        if (self.async_chat_worker.pending_debug_frames.items.len > 0) {
+            for (self.async_chat_worker.pending_debug_frames.items) |payload| {
+                page_allocator.free(payload);
+            }
+            self.async_chat_worker.pending_debug_frames.deinit(page_allocator);
+            self.async_chat_worker.pending_debug_frames = .{};
+        }
 
         context.* = .{
             .state = &self.async_chat_worker,
             .url = url,
             .token = token,
             .message = message,
+            .subscribe_debug = self.debug_stream_enabled or self.debug_stream_pending,
         };
 
         self.async_chat_worker.in_flight = true;
@@ -4734,10 +4790,24 @@ const App = struct {
         var worker_thread: ?std.Thread = null;
         var response: ?[]u8 = null;
         var error_text: ?[]u8 = null;
+        var pending_debug_frames: [][]u8 = &.{};
 
         self.async_chat_worker.mutex.lock();
+        if (self.async_chat_worker.pending_debug_frames.items.len > 0) {
+            pending_debug_frames = self.async_chat_worker.pending_debug_frames.toOwnedSlice(std.heap.page_allocator) catch &.{};
+            self.async_chat_worker.pending_debug_frames = .{};
+        }
         if (!self.async_chat_worker.done) {
             self.async_chat_worker.mutex.unlock();
+            if (pending_debug_frames.len > 0) {
+                defer std.heap.page_allocator.free(pending_debug_frames);
+                for (pending_debug_frames) |raw| {
+                    defer std.heap.page_allocator.free(raw);
+                    self.handleWorkerDebugFrame(raw) catch |err| {
+                        std.log.warn("[GUI] dropped worker debug frame: {s}", .{@errorName(err)});
+                    };
+                }
+            }
             return;
         }
         worker_thread = self.async_chat_worker.worker_thread;
@@ -4748,6 +4818,16 @@ const App = struct {
         self.async_chat_worker.error_text = null;
         self.async_chat_worker.done = false;
         self.async_chat_worker.mutex.unlock();
+
+        if (pending_debug_frames.len > 0) {
+            defer std.heap.page_allocator.free(pending_debug_frames);
+            for (pending_debug_frames) |raw| {
+                defer std.heap.page_allocator.free(raw);
+                self.handleWorkerDebugFrame(raw) catch |err| {
+                    std.log.warn("[GUI] dropped worker debug frame: {s}", .{@errorName(err)});
+                };
+            }
+        }
 
         if (worker_thread) |thread| thread.join();
         defer if (response) |value| std.heap.page_allocator.free(value);
@@ -4860,11 +4940,12 @@ const App = struct {
         client: *ws_client_mod.WebSocketClient,
         request_json: []const u8,
         tag: u32,
+        timeout_ms: u32,
     ) !FsrpcEnvelope {
         try client.send(request_json);
 
         const started = std.time.milliTimestamp();
-        while (std.time.milliTimestamp() - started < 15_000) {
+        while (std.time.milliTimestamp() - started < timeout_ms) {
             if (client.receive(500)) |raw| {
                 const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, raw, .{}) catch {
                     self.allocator.free(raw);
@@ -4938,7 +5019,7 @@ const App = struct {
             .{version_tag},
         );
         defer self.allocator.free(version_req);
-        var version = try self.sendAndAwaitFsrpc(client, version_req, version_tag);
+        var version = try self.sendAndAwaitFsrpc(client, version_req, version_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer version.deinit(self.allocator);
         try self.ensureFsrpcOk(&version);
 
@@ -4949,7 +5030,7 @@ const App = struct {
             .{attach_tag},
         );
         defer self.allocator.free(attach_req);
-        var attach = try self.sendAndAwaitFsrpc(client, attach_req, attach_tag);
+        var attach = try self.sendAndAwaitFsrpc(client, attach_req, attach_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer attach.deinit(self.allocator);
         try self.ensureFsrpcOk(&attach);
     }
@@ -4963,7 +5044,7 @@ const App = struct {
         ) catch return;
         defer self.allocator.free(req);
 
-        var response = self.sendAndAwaitFsrpc(client, req, tag) catch return;
+        var response = self.sendAndAwaitFsrpc(client, req, tag, FSRPC_CLUNK_TIMEOUT_MS) catch return;
         response.deinit(self.allocator);
     }
 
@@ -4982,7 +5063,7 @@ const App = struct {
             .{ walk_input_tag, input_fid },
         );
         defer self.allocator.free(walk_input_req);
-        var walk_input = try self.sendAndAwaitFsrpc(client, walk_input_req, walk_input_tag);
+        var walk_input = try self.sendAndAwaitFsrpc(client, walk_input_req, walk_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer walk_input.deinit(self.allocator);
         try self.ensureFsrpcOk(&walk_input);
 
@@ -4993,7 +5074,7 @@ const App = struct {
             .{ open_input_tag, input_fid },
         );
         defer self.allocator.free(open_input_req);
-        var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag);
+        var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer open_input.deinit(self.allocator);
         try self.ensureFsrpcOk(&open_input);
 
@@ -5006,7 +5087,7 @@ const App = struct {
             .{ write_tag, input_fid, encoded },
         );
         defer self.allocator.free(write_req);
-        var write = try self.sendAndAwaitFsrpc(client, write_req, write_tag);
+        var write = try self.sendAndAwaitFsrpc(client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS);
         defer write.deinit(self.allocator);
         try self.ensureFsrpcOk(&write);
 
@@ -5024,7 +5105,7 @@ const App = struct {
             .{ walk_result_tag, result_fid, escaped_job },
         );
         defer self.allocator.free(walk_result_req);
-        var walk_result = try self.sendAndAwaitFsrpc(client, walk_result_req, walk_result_tag);
+        var walk_result = try self.sendAndAwaitFsrpc(client, walk_result_req, walk_result_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer walk_result.deinit(self.allocator);
         try self.ensureFsrpcOk(&walk_result);
 
@@ -5035,7 +5116,7 @@ const App = struct {
             .{ open_result_tag, result_fid },
         );
         defer self.allocator.free(open_result_req);
-        var open_result = try self.sendAndAwaitFsrpc(client, open_result_req, open_result_tag);
+        var open_result = try self.sendAndAwaitFsrpc(client, open_result_req, open_result_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer open_result.deinit(self.allocator);
         try self.ensureFsrpcOk(&open_result);
 
@@ -5046,7 +5127,7 @@ const App = struct {
             .{ read_tag, result_fid },
         );
         defer self.allocator.free(read_req);
-        var read = try self.sendAndAwaitFsrpc(client, read_req, read_tag);
+        var read = try self.sendAndAwaitFsrpc(client, read_req, read_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer read.deinit(self.allocator);
         try self.ensureFsrpcOk(&read);
 
@@ -5609,6 +5690,14 @@ const App = struct {
     }
 
     fn handleDebugEventMessage(self: *App, root: std.json.ObjectMap) !void {
+        try self.handleDebugEventMessageWithStateSync(root, true);
+    }
+
+    fn handleDebugEventMessageWithStateSync(
+        self: *App,
+        root: std.json.ObjectMap,
+        apply_subscription_state: bool,
+    ) !void {
         const timestamp = if (root.get("timestamp")) |value| switch (value) {
             .integer => value.integer,
             else => std.time.milliTimestamp(),
@@ -5626,7 +5715,7 @@ const App = struct {
         } else try self.allocator.dupe(u8, "{}");
         defer self.allocator.free(payload_json);
 
-        if (std.mem.eql(u8, category, "control.subscription")) {
+        if (apply_subscription_state and std.mem.eql(u8, category, "control.subscription")) {
             const payload_obj = if (root.get("payload")) |payload| switch (payload) {
                 .object => payload.object,
                 else => null,
@@ -5648,6 +5737,23 @@ const App = struct {
         }
 
         try self.appendDebugEvent(timestamp, category, payload_json);
+    }
+
+    fn handleWorkerDebugFrame(self: *App, msg: []const u8) !void {
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch |err| {
+            self.recordDecodeError(@errorName(err), msg) catch {};
+            return;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value != .object) {
+            self.recordDecodeError("non-object json", msg) catch {};
+            return;
+        }
+
+        const mt = protocol_messages.parseMessageType(msg) orelse return;
+        if (mt != .debug_event) return;
+        try self.handleDebugEventMessageWithStateSync(parsed.value.object, false);
     }
 
     fn handleIncomingMessage(self: *App, msg: []const u8) !void {
