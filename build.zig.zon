@@ -18,7 +18,7 @@
         },
         .ziggy_ui = .{
             .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/heads/main.tar.gz",
-            .hash = "ziggy_ui-0.1.0-dS4PqBr18QHYTysTJeKKC-bC9d821TVjN1qWgk2ZOgNz",
+            .hash = "ziggy_ui-0.1.0-dS4PqMFr8QFYT4IUGQn9uoCu6V3znYFQya05BWb8YE4-",
         },
         .sdl3 = .{
             .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",
