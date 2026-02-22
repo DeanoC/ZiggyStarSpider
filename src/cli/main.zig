@@ -12,6 +12,8 @@ var g_fsrpc_tag: u32 = 1;
 var g_fsrpc_fid: u32 = 2;
 
 pub fn run(allocator: std.mem.Allocator) !void {
+    defer cleanupGlobalClient();
+
     // Parse arguments
     var options = args.parseArgs(allocator) catch |err| {
         if (err == error.InvalidArguments) {
@@ -45,7 +47,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
         return error.TuiNotAvailable;
     }
 
-    logger.info("ZiggyStarSpider v0.1.0", .{});
+    if (std.mem.eql(u8, args.gitRevision(), "unknown")) {
+        logger.info("ZiggyStarSpider v{s}", .{args.appVersion()});
+    } else {
+        logger.info("ZiggyStarSpider v{s} ({s})", .{ args.appVersion(), args.gitRevision() });
+    }
     logger.info("Server: {s}", .{options.url});
     if (options.project) |p| {
         logger.info("Project: {s}", .{p});
@@ -62,22 +68,30 @@ pub fn run(allocator: std.mem.Allocator) !void {
         // No command and not interactive - show help
         args.printHelp();
     }
-
-    // Cleanup global client if exists
-    if (g_client) |*client| {
-        client.deinit();
-        g_client = null;
-        g_connected = false;
-    }
 }
 
 fn getOrCreateClient(allocator: std.mem.Allocator, url: []const u8) !*WebSocketClient {
     if (g_client == null) {
         g_client = WebSocketClient.init(allocator, url, "");
-        try g_client.?.connect();
+    }
+
+    if (!g_connected) {
+        g_client.?.connect() catch |err| {
+            cleanupGlobalClient();
+            return err;
+        };
         g_connected = true;
     }
+
     return &g_client.?;
+}
+
+fn cleanupGlobalClient() void {
+    if (g_client) |*client| {
+        client.deinit();
+    }
+    g_client = null;
+    g_connected = false;
 }
 
 fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
@@ -215,12 +229,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 return;
             }
 
-            if (g_client) |*client| {
-                client.disconnect();
-                client.deinit();
-            }
-            g_client = null;
-            g_connected = false;
+            cleanupGlobalClient();
             try stdout.print("Disconnected\n", .{});
         },
         .status => {
@@ -298,8 +307,10 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     defer allocator.free(message);
 
     const client = try getOrCreateClient(allocator, options.url);
+    logger.info("Negotiating FS-RPC session...", .{});
     try fsrpcBootstrap(allocator, client);
 
+    logger.info("Submitting chat job...", .{});
     const chat_input_fid = try fsrpcWalkPath(allocator, client, "/capabilities/chat/control/input");
     defer fsrpcClunkBestEffort(allocator, client, chat_input_fid);
     try fsrpcOpen(allocator, client, chat_input_fid, "rw");
@@ -318,6 +329,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     defer fsrpcClunkBestEffort(allocator, client, result_fid);
     try fsrpcOpen(allocator, client, result_fid, "r");
 
+    logger.info("Waiting for chat result...", .{});
     const content = try fsrpcReadAllText(allocator, client, result_fid);
     defer allocator.free(content);
 
@@ -418,7 +430,12 @@ fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void 
         .{connect_id},
     );
     defer allocator.free(connect_payload);
-    try client.send(connect_payload);
+    client.send(connect_payload) catch |err| {
+        if (err == error.BrokenPipe or err == error.ConnectionResetByPeer or err == error.EndOfStream or err == error.Closed) {
+            logger.err("Server closed connection before control handshake", .{});
+        }
+        return err;
+    };
 
     const version_tag = nextFsrpcTag();
     const version_req = try std.fmt.allocPrint(
@@ -578,7 +595,12 @@ fn sendAndAwaitFsrpc(allocator: std.mem.Allocator, client: *WebSocketClient, req
 
     const started = std.time.milliTimestamp();
     while (std.time.milliTimestamp() - started < 15_000) {
-        const maybe_raw = try client.readTimeout(2_000);
+        const maybe_raw = client.readTimeout(2_000) catch |err| {
+            if (err == error.Closed or err == error.BrokenPipe or err == error.ConnectionResetByPeer or err == error.EndOfStream) {
+                logger.err("Connection closed while waiting for FS-RPC response", .{});
+            }
+            return err;
+        };
         if (maybe_raw) |raw| {
             const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch {
                 allocator.free(raw);

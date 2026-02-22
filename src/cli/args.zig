@@ -1,10 +1,13 @@
 const std = @import("std");
 const logger = @import("ziggy-core").utils.logger;
+const build_options = @import("build_options");
 
 // CLI argument parsing for ZiggyStarSpider
 // Uses simple iteration like ZSC - no ArrayList complexity for basic parsing
 
-const default_server_url = "ws://127.0.0.1:18790/v2/agents/default/stream";
+const default_server_url = "ws://127.0.0.1:18790";
+const app_version = build_options.app_version;
+const git_revision = build_options.git_revision;
 
 pub const Command = struct {
     noun: Noun,
@@ -105,7 +108,19 @@ pub fn printHelpForNoun(noun: Noun) void {
 
 pub fn printVersion() void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    stdout.print("ZiggyStarSpider v0.1.0\n", .{}) catch {};
+    if (std.mem.eql(u8, git_revision, "unknown")) {
+        stdout.print("ZiggyStarSpider v{s}\n", .{app_version}) catch {};
+    } else {
+        stdout.print("ZiggyStarSpider v{s} ({s})\n", .{ app_version, git_revision }) catch {};
+    }
+}
+
+pub fn appVersion() []const u8 {
+    return app_version;
+}
+
+pub fn gitRevision() []const u8 {
+    return git_revision;
 }
 
 fn parseNoun(arg: []const u8) ?Noun {
@@ -192,7 +207,11 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
                 std.process.argsFree(allocator, args);
                 return error.InvalidArguments;
             }
-            // Copy the URL string since args will be freed
+
+            if (options.url.ptr != default_server_url.ptr) {
+                allocator.free(options.url);
+            }
+
             options.url = try allocator.dupe(u8, args[i]);
             options.url_explicitly_provided = true;
             continue;

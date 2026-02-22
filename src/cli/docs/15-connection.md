@@ -13,7 +13,7 @@ an immediate `session.receive` bootstrap message right after `control.connect_ac
 **Examples:**
 ```bash
 ziggystarspider connect
-ziggystarspider connect --url ws://100.101.192.123:18790/v2/agents/default/stream
+ziggystarspider connect --url ws://100.101.192.123:18790
 ```
 
 ## disconnect
@@ -37,7 +37,7 @@ ziggystarspider status
 **Output:**
 ```
 Connected: Yes
-Server: ws://100.101.192.123:18790/v2/agents/default/stream
+Server: ws://100.101.192.123:18790
 Project: spiderweb
 Uptime: 45 minutes
 ```

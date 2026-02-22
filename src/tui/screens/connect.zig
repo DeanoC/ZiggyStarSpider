@@ -19,7 +19,7 @@ pub const ConnectScreen = struct {
 
         var url_input = tui.InputField.init(state.allocator);
         url_input.setValue(effective_url) catch {};
-        url_input.placeholder = "ws://127.0.0.1:18790/v2/agents/default/stream";
+        url_input.placeholder = "ws://127.0.0.1:18790";
 
         return .{
             .state = state,

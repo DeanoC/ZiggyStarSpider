@@ -78,13 +78,16 @@ pub const WebSocketClient = struct {
     }
 
     pub fn disconnect(self: *WebSocketClient) void {
+        const was_connected = self.is_connected or self.client != null;
         if (self.client) |*client| {
             client.close(.{}) catch {};
             client.deinit();
             self.client = null;
         }
         self.is_connected = false;
-        logger.info("Disconnected from Spiderweb", .{});
+        if (was_connected) {
+            logger.info("Disconnected from Spiderweb", .{});
+        }
     }
 
     pub fn send(self: *WebSocketClient, message: []const u8) !void {

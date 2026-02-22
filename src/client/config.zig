@@ -25,7 +25,7 @@ pub const Config = struct {
     ui_theme_pack_recent: ?[]const []const u8 = null,
     ui_profile: ?[]const u8 = null,
 
-    pub const default_server_url = "ws://127.0.0.1:18790/v2/agents/default/stream";
+    pub const default_server_url = "ws://127.0.0.1:18790";
 
     pub fn init(allocator: std.mem.Allocator) !Config {
         const server_url = try allocator.dupe(u8, default_server_url);
