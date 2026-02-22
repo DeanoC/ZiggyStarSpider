@@ -5,12 +5,12 @@
 ### `--url <url>`
 Spiderweb server WebSocket URL.
 
-**Default:** `ws://127.0.0.1:18790/v1/agents/default/stream`
+**Default:** `ws://127.0.0.1:18790/v2/agents/default/stream`
 
 **Examples:**
 ```bash
-ziggystarspider --url ws://100.101.192.123:18790/v1/agents/default/stream chat send "Hello"
-ziggystarspider --url ws://localhost:18790/v1/agents/default/stream project list
+ziggystarspider --url ws://100.101.192.123:18790/v2/agents/default/stream chat send "Hello"
+ziggystarspider --url ws://localhost:18790/v2/agents/default/stream project list
 ```
 
 ### `--project <name>`
@@ -30,7 +30,7 @@ Start interactive REPL mode instead of running a single command.
 **Examples:**
 ```bash
 ziggystarspider --interactive
-ziggystarspider --url ws://remote:18790/v1/agents/default/stream --interactive
+ziggystarspider --url ws://remote:18790/v2/agents/default/stream --interactive
 ```
 
 ### `--verbose`

@@ -57,7 +57,7 @@ pub const buildChatSend = buildSessionSend;
 pub fn buildConnect(allocator: std.mem.Allocator, id: []const u8) ![]const u8 {
     return std.fmt.allocPrint(
         allocator,
-        "{{\"type\":\"connect\",\"id\":\"{s}\",\"timestamp\":{d}}}",
+        "{{\"channel\":\"control\",\"type\":\"control.connect\",\"id\":\"{s}\",\"timestamp\":{d}}}",
         .{ id, std.time.milliTimestamp() },
     );
 }
@@ -68,6 +68,21 @@ pub fn buildAgentControl(
     action: []const u8,
     content: ?[]const u8,
 ) ![]const u8 {
+    if (std.mem.eql(u8, action, "debug.subscribe")) {
+        return std.fmt.allocPrint(
+            allocator,
+            "{{\"channel\":\"control\",\"type\":\"control.debug_subscribe\",\"id\":\"{s}\",\"timestamp\":{d}}}",
+            .{ id, std.time.milliTimestamp() },
+        );
+    }
+    if (std.mem.eql(u8, action, "debug.unsubscribe")) {
+        return std.fmt.allocPrint(
+            allocator,
+            "{{\"channel\":\"control\",\"type\":\"control.debug_unsubscribe\",\"id\":\"{s}\",\"timestamp\":{d}}}",
+            .{ id, std.time.milliTimestamp() },
+        );
+    }
+
     var buffer = std.ArrayListUnmanaged(u8).empty;
     defer buffer.deinit(allocator);
 
@@ -123,15 +138,23 @@ pub fn parseMessageType(json: []const u8) ?MessageType {
     if (std.mem.eql(u8, type_str, "session.receive")) return .session_receive;
     if (std.mem.eql(u8, type_str, "chat.receive")) return .session_receive; // legacy
     if (std.mem.eql(u8, type_str, "connect.ack")) return .connect_ack;
+    if (std.mem.eql(u8, type_str, "control.connect_ack")) return .connect_ack;
+    if (std.mem.eql(u8, type_str, "control.session_attach")) return .connect_ack;
+    if (std.mem.eql(u8, type_str, "control.session_resume")) return .connect_ack;
     if (std.mem.eql(u8, type_str, "debug.event")) return .debug_event;
     if (std.mem.eql(u8, type_str, "session.ack")) return .connect_ack; // legacy
     if (std.mem.eql(u8, type_str, "chat_ack")) return .connect_ack; // legacy
     if (std.mem.eql(u8, type_str, "error")) return .error_response;
+    if (std.mem.eql(u8, type_str, "control.error")) return .error_response;
     return .other;
 }
 
 test "protocol_messages: parseMessageType recognizes debug.event" {
     try std.testing.expectEqual(MessageType.debug_event, parseMessageType("{\"type\":\"debug.event\"}").?);
+}
+
+test "protocol_messages: parseMessageType recognizes control.connect_ack" {
+    try std.testing.expectEqual(MessageType.connect_ack, parseMessageType("{\"channel\":\"control\",\"type\":\"control.connect_ack\"}").?);
 }
 
 test "protocol_messages: buildSessionSend escapes mixed text and JSON safely" {
@@ -153,11 +176,20 @@ test "protocol_messages: buildSessionSend escapes mixed text and JSON safely" {
 
 test "protocol_messages: buildAgentControl emits action envelope" {
     const allocator = std.testing.allocator;
-    const payload = try buildAgentControl(allocator, "req-1", "debug.subscribe", null);
+    const payload = try buildAgentControl(allocator, "req-1", "state", null);
     defer allocator.free(payload);
 
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"agent.control\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"action\":\"debug.subscribe\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"action\":\"state\"") != null);
+}
+
+test "protocol_messages: buildAgentControl maps debug subscribe to control channel" {
+    const allocator = std.testing.allocator;
+    const payload = try buildAgentControl(allocator, "req-1", "debug.subscribe", null);
+    defer allocator.free(payload);
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"channel\":\"control\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"control.debug_subscribe\"") != null);
 }
 
 test "protocol_messages: buildAgentControl escapes content safely" {

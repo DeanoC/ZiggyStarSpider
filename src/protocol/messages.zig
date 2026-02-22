@@ -153,8 +153,12 @@ pub const MessageType = enum {
     pub fn fromString(s: []const u8) ?MessageType {
         // Connection
         if (std.mem.eql(u8, s, "connect")) return .connect;
+        if (std.mem.eql(u8, s, "control.connect")) return .connect;
         if (std.mem.eql(u8, s, "connect_ack")) return .connect_ack;
         if (std.mem.eql(u8, s, "connect.ack")) return .connect_ack;
+        if (std.mem.eql(u8, s, "control.connect_ack")) return .connect_ack;
+        if (std.mem.eql(u8, s, "control.session_attach")) return .connect_ack;
+        if (std.mem.eql(u8, s, "control.session_resume")) return .connect_ack;
         if (std.mem.eql(u8, s, "chat_ack")) return .chat_ack;
         if (std.mem.eql(u8, s, "session.ack")) return .chat_ack;
         if (std.mem.eql(u8, s, "disconnect")) return .disconnect;
@@ -224,10 +228,13 @@ pub const MessageType = enum {
 
         // Heartbeat
         if (std.mem.eql(u8, s, "ping")) return .ping;
+        if (std.mem.eql(u8, s, "control.ping")) return .ping;
         if (std.mem.eql(u8, s, "pong")) return .pong;
+        if (std.mem.eql(u8, s, "control.pong")) return .pong;
 
         // Error
         if (std.mem.eql(u8, s, "error")) return .error_response;
+        if (std.mem.eql(u8, s, "control.error")) return .error_response;
 
         return null;
     }

@@ -50,7 +50,7 @@ Built GUI binary:
 
 ### Settings / Auth Screen
 
-- Server URL input (default `ws://127.0.0.1:18790/v1/agents/default/stream`)
+- Server URL input (default `ws://127.0.0.1:18790/v2/agents/default/stream`)
 - Connect button
 - Connection status indicator
 
