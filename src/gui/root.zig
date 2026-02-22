@@ -4803,7 +4803,7 @@ const App = struct {
                 defer std.heap.page_allocator.free(pending_debug_frames);
                 for (pending_debug_frames) |raw| {
                     defer std.heap.page_allocator.free(raw);
-                    self.handleIncomingMessage(raw) catch |err| {
+                    self.handleWorkerDebugFrame(raw) catch |err| {
                         std.log.warn("[GUI] dropped worker debug frame: {s}", .{@errorName(err)});
                     };
                 }
@@ -4823,7 +4823,7 @@ const App = struct {
             defer std.heap.page_allocator.free(pending_debug_frames);
             for (pending_debug_frames) |raw| {
                 defer std.heap.page_allocator.free(raw);
-                self.handleIncomingMessage(raw) catch |err| {
+                self.handleWorkerDebugFrame(raw) catch |err| {
                     std.log.warn("[GUI] dropped worker debug frame: {s}", .{@errorName(err)});
                 };
             }
@@ -5690,6 +5690,14 @@ const App = struct {
     }
 
     fn handleDebugEventMessage(self: *App, root: std.json.ObjectMap) !void {
+        try self.handleDebugEventMessageWithStateSync(root, true);
+    }
+
+    fn handleDebugEventMessageWithStateSync(
+        self: *App,
+        root: std.json.ObjectMap,
+        apply_subscription_state: bool,
+    ) !void {
         const timestamp = if (root.get("timestamp")) |value| switch (value) {
             .integer => value.integer,
             else => std.time.milliTimestamp(),
@@ -5707,7 +5715,7 @@ const App = struct {
         } else try self.allocator.dupe(u8, "{}");
         defer self.allocator.free(payload_json);
 
-        if (std.mem.eql(u8, category, "control.subscription")) {
+        if (apply_subscription_state and std.mem.eql(u8, category, "control.subscription")) {
             const payload_obj = if (root.get("payload")) |payload| switch (payload) {
                 .object => payload.object,
                 else => null,
@@ -5729,6 +5737,23 @@ const App = struct {
         }
 
         try self.appendDebugEvent(timestamp, category, payload_json);
+    }
+
+    fn handleWorkerDebugFrame(self: *App, msg: []const u8) !void {
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch |err| {
+            self.recordDecodeError(@errorName(err), msg) catch {};
+            return;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value != .object) {
+            self.recordDecodeError("non-object json", msg) catch {};
+            return;
+        }
+
+        const mt = protocol_messages.parseMessageType(msg) orelse return;
+        if (mt != .debug_event) return;
+        try self.handleDebugEventMessageWithStateSync(parsed.value.object, false);
     }
 
     fn handleIncomingMessage(self: *App, msg: []const u8) !void {
