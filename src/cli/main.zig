@@ -47,7 +47,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
         return error.TuiNotAvailable;
     }
 
-    logger.info("ZiggyStarSpider v0.1.0", .{});
+    if (std.mem.eql(u8, args.gitRevision(), "unknown")) {
+        logger.info("ZiggyStarSpider v{s}", .{args.appVersion()});
+    } else {
+        logger.info("ZiggyStarSpider v{s} ({s})", .{ args.appVersion(), args.gitRevision() });
+    }
     logger.info("Server: {s}", .{options.url});
     if (options.project) |p| {
         logger.info("Project: {s}", .{p});
@@ -583,7 +587,12 @@ fn sendAndAwaitFsrpc(allocator: std.mem.Allocator, client: *WebSocketClient, req
 
     const started = std.time.milliTimestamp();
     while (std.time.milliTimestamp() - started < 15_000) {
-        const maybe_raw = try client.readTimeout(2_000);
+        const maybe_raw = client.readTimeout(2_000) catch |err| {
+            if (err == error.Closed or err == error.ConnectionResetByPeer or err == error.EndOfStream) {
+                logger.err("Connection closed while waiting for FS-RPC response; ensure URL path is /v2/agents/<agent>/stream", .{});
+            }
+            return err;
+        };
         if (maybe_raw) |raw| {
             const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch {
                 allocator.free(raw);

@@ -5,6 +5,27 @@ const GuiArtifact = struct {
     install: *std.Build.Step.InstallArtifact,
 };
 
+fn detectGitRevision(b: *std.Build) []const u8 {
+    const result = std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &.{ "git", "rev-parse", "--short=12", "HEAD" },
+        .cwd = b.pathFromRoot("."),
+    }) catch return "unknown";
+    defer b.allocator.free(result.stdout);
+    defer b.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| {
+            if (code != 0) return "unknown";
+        },
+        else => return "unknown",
+    }
+
+    const trimmed = std.mem.trim(u8, result.stdout, " \r\n\t");
+    if (trimmed.len == 0) return "unknown";
+    return b.allocator.dupe(u8, trimmed) catch "unknown";
+}
+
 fn addGuiArtifact(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
@@ -131,6 +152,11 @@ fn addGuiArtifact(
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const git_revision = detectGitRevision(b);
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "app_version", "0.1.0");
+    build_options.addOption([]const u8, "git_revision", git_revision);
+    const build_options_module = build_options.createModule();
 
     const websocket = b.dependency("websocket", .{
         .target = target,
@@ -186,6 +212,7 @@ pub fn build(b: *std.Build) void {
     cli_module.addImport("websocket", websocket.module("websocket"));
     cli_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     cli_module.addImport("ziggy-spider-protocol", ziggy_spider_protocol_module);
+    cli_module.addImport("build_options", build_options_module);
 
     const cli_exe = b.addExecutable(.{
         .name = "zss",
@@ -248,6 +275,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         cli_args_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        cli_args_module.addImport("build_options", build_options_module);
         tui_module.addImport("cli_args", cli_args_module);
 
         const client_config_module = b.createModule(.{
@@ -296,6 +324,7 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("websocket", websocket.module("websocket"));
     test_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     test_module.addImport("ziggy-spider-protocol", ziggy_spider_protocol_module);
+    test_module.addImport("build_options", build_options_module);
 
     const unit_tests = b.addTest(.{
         .root_module = test_module,
@@ -327,6 +356,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         cli_args_module_test.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        cli_args_module_test.addImport("build_options", build_options_module);
         tui_test_module.addImport("cli_args", cli_args_module_test);
 
         const client_config_module_test = b.createModule(.{
@@ -385,6 +415,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     cli_args_module_diag.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    cli_args_module_diag.addImport("build_options", build_options_module);
     tui_diagnostic_module.addImport("cli_args", cli_args_module_diag);
 
     const client_config_module_diag = b.createModule(.{
@@ -423,6 +454,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         cli_args_module_testing.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+        cli_args_module_testing.addImport("build_options", build_options_module);
         tui_testing_module.addImport("cli_args", cli_args_module_testing);
 
         const client_config_module_testing = b.createModule(.{
