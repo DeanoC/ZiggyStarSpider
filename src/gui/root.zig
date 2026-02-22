@@ -340,6 +340,7 @@ const App = struct {
 
     message_counter: u64 = 0,
     next_fsrpc_tag: u32 = 1,
+    next_fsrpc_fid: u32 = 2,
     debug_frame_counter: u64 = 0,
     frame_clock: zapp.frame_clock.FrameClock,
     workspace_recovery_blocked_until: u64 = 0,
@@ -4449,6 +4450,13 @@ const App = struct {
         return tag;
     }
 
+    fn nextFsrpcFid(self: *App) u32 {
+        const fid = self.next_fsrpc_fid;
+        self.next_fsrpc_fid +%= 1;
+        if (self.next_fsrpc_fid == 0 or self.next_fsrpc_fid == 1) self.next_fsrpc_fid = 2;
+        return fid;
+    }
+
     fn sendAndAwaitFsrpc(
         self: *App,
         client: *ws_client_mod.WebSocketClient,
@@ -4564,8 +4572,10 @@ const App = struct {
     fn sendChatViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
         try self.fsrpcBootstrapGui(client);
 
-        const input_fid: u32 = 2;
-        const result_fid: u32 = 3;
+        const input_fid = self.nextFsrpcFid();
+        const result_fid = self.nextFsrpcFid();
+        defer self.fsrpcClunkBestEffort(client, input_fid);
+        defer self.fsrpcClunkBestEffort(client, result_fid);
 
         const walk_input_tag = self.nextFsrpcTag();
         const walk_input_req = try std.fmt.allocPrint(
@@ -4606,8 +4616,6 @@ const App = struct {
         const job_value = write_payload.get("job") orelse return error.InvalidResponse;
         if (job_value != .string) return error.InvalidResponse;
         const job_name = job_value.string;
-
-        self.fsrpcClunkBestEffort(client, input_fid);
 
         const escaped_job = try jsonEscape(self.allocator, job_name);
         defer self.allocator.free(escaped_job);
@@ -4653,7 +4661,6 @@ const App = struct {
         errdefer self.allocator.free(decoded);
         _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
 
-        self.fsrpcClunkBestEffort(client, result_fid);
         return decoded;
     }
 

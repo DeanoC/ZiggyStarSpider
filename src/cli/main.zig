@@ -9,6 +9,7 @@ const unified = @import("ziggy-spider-protocol").unified;
 var g_client: ?WebSocketClient = null;
 var g_connected: bool = false;
 var g_fsrpc_tag: u32 = 1;
+var g_fsrpc_fid: u32 = 2;
 
 pub fn run(allocator: std.mem.Allocator) !void {
     // Parse arguments
@@ -279,6 +280,13 @@ fn nextFsrpcTag() u32 {
     return tag;
 }
 
+fn nextFsrpcFid() u32 {
+    const fid = g_fsrpc_fid;
+    g_fsrpc_fid +%= 1;
+    if (g_fsrpc_fid == 0 or g_fsrpc_fid == 1) g_fsrpc_fid = 2;
+    return fid;
+}
+
 fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     if (cmd.args.len == 0) {
         logger.err("chat send requires a message", .{});
@@ -442,18 +450,19 @@ fn fsrpcWalkPath(allocator: std.mem.Allocator, client: *WebSocketClient, path: [
     const path_json = try buildPathArrayJson(allocator, segments);
     defer allocator.free(path_json);
 
+    const new_fid = nextFsrpcFid();
     const tag = nextFsrpcTag();
     const req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":2,\"path\":{s}}}",
-        .{ tag, path_json },
+        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+        .{ tag, new_fid, path_json },
     );
     defer allocator.free(req);
 
     var response = try sendAndAwaitFsrpc(allocator, client, req, tag);
     defer response.deinit(allocator);
     try ensureFsrpcOk(&response);
-    return 2;
+    return new_fid;
 }
 
 fn fsrpcOpen(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32, mode: []const u8) !void {
