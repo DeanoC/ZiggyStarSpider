@@ -13,7 +13,8 @@
             .hash = "ziggy_core-0.1.0-q2d-rGiFAAA8ZiSbvWysW_gbVUJMoh-fGGn8PINTljE6",
         },
         .ziggy_spider_protocol = .{
-            .path = "../ZiggySpiderProtocol",
+            .url = "https://github.com/DeanoC/ZiggySpiderProtocol/archive/5c5a4973e73882239807717391dd83ef2cfbbbcc.tar.gz",
+            .hash = "ziggy_spider_protocol-0.1.0-Tn7uq2C2AADZn3E_CeiwcQ9mRDQHwg7oi-0P-vK-xtOX",
         },
         .ziggy_ui = .{
             .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/heads/main.tar.gz",
