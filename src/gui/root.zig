@@ -229,12 +229,86 @@ fn sendAndAwaitFsrpcBlocking(
     return error.Timeout;
 }
 
-fn ensureFsrpcOkBlocking(envelope: *FsrpcEnvelope) !void {
+fn setOptionalOwnedMessage(
+    allocator: std.mem.Allocator,
+    slot: *?[]u8,
+    message: ?[]const u8,
+) void {
+    if (slot.*) |value| allocator.free(value);
+    slot.* = null;
+    if (message) |value| {
+        slot.* = allocator.dupe(u8, value) catch null;
+    }
+}
+
+fn buildSendFailedErrorText(
+    allocator: std.mem.Allocator,
+    err: anyerror,
+    fsrpc_remote_error: ?[]const u8,
+) ?[]u8 {
+    if (err == error.RemoteError) {
+        if (fsrpc_remote_error) |value| {
+            return std.fmt.allocPrint(allocator, "Send failed: {s}", .{value}) catch null;
+        }
+        if (control_plane.lastRemoteError()) |value| {
+            return std.fmt.allocPrint(allocator, "Send failed: {s}", .{value}) catch null;
+        }
+    }
+    return std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+}
+
+fn ensureFsrpcOkBlocking(
+    allocator: std.mem.Allocator,
+    envelope: *FsrpcEnvelope,
+    remote_error_detail: *?[]u8,
+) !void {
     if (envelope.parsed.value != .object) return error.InvalidResponse;
     const obj = envelope.parsed.value.object;
     const ok_value = obj.get("ok") orelse return error.InvalidResponse;
     if (ok_value != .bool) return error.InvalidResponse;
-    if (!ok_value.bool) return error.RemoteError;
+    if (ok_value.bool) {
+        setOptionalOwnedMessage(allocator, remote_error_detail, null);
+        return;
+    }
+
+    var detail: ?[]u8 = null;
+    if (obj.get("error")) |err_value| {
+        if (err_value == .object) {
+            const err_obj = err_value.object;
+            const message = if (err_obj.get("message")) |value|
+                if (value == .string) value.string else null
+            else
+                null;
+            const code = if (err_obj.get("code")) |value|
+                if (value == .string) value.string else null
+            else
+                null;
+            const errno = if (err_obj.get("errno")) |value|
+                if (value == .integer) value.integer else null
+            else
+                null;
+
+            if (message != null and code != null and errno != null) {
+                detail = std.fmt.allocPrint(allocator, "{s} [{s}] (errno={d})", .{ message.?, code.?, errno.? }) catch null;
+            } else if (message != null and errno != null) {
+                detail = std.fmt.allocPrint(allocator, "{s} (errno={d})", .{ message.?, errno.? }) catch null;
+            } else if (message != null and code != null) {
+                detail = std.fmt.allocPrint(allocator, "{s} [{s}]", .{ message.?, code.? }) catch null;
+            } else if (message) |value| {
+                detail = allocator.dupe(u8, value) catch null;
+            } else if (code) |value| {
+                detail = std.fmt.allocPrint(allocator, "remote fsrpc error [{s}]", .{value}) catch null;
+            } else if (errno) |value| {
+                detail = std.fmt.allocPrint(allocator, "remote fsrpc error (errno={d})", .{value}) catch null;
+            }
+        } else if (err_value == .string) {
+            detail = allocator.dupe(u8, err_value.string) catch null;
+        }
+    }
+
+    setOptionalOwnedMessage(allocator, remote_error_detail, if (detail) |value| value else "remote fsrpc error");
+    if (detail) |value| allocator.free(value);
+    return error.RemoteError;
 }
 
 fn getFsrpcPayloadObjectBlocking(root: std.json.ObjectMap) !std.json.ObjectMap {
@@ -249,6 +323,7 @@ fn fsrpcBootstrapBlocking(
     next_tag: *u32,
     debug_state: ?*AsyncChatWorkerState,
     subscribe_debug: bool,
+    remote_error_detail: *?[]u8,
 ) !void {
     if (subscribe_debug) {
         const debug_id = try std.fmt.allocPrint(allocator, "debug-worker-{d}", .{std.time.milliTimestamp()});
@@ -271,7 +346,7 @@ fn fsrpcBootstrapBlocking(
     defer allocator.free(version_req);
     var version = try sendAndAwaitFsrpcBlocking(allocator, client, version_req, version_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer version.deinit(allocator);
-    try ensureFsrpcOkBlocking(&version);
+    try ensureFsrpcOkBlocking(allocator, &version, remote_error_detail);
 
     const attach_tag = nextCounter(next_tag, 1);
     const attach_req = try std.fmt.allocPrint(
@@ -282,7 +357,7 @@ fn fsrpcBootstrapBlocking(
     defer allocator.free(attach_req);
     var attach = try sendAndAwaitFsrpcBlocking(allocator, client, attach_req, attach_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer attach.deinit(allocator);
-    try ensureFsrpcOkBlocking(&attach);
+    try ensureFsrpcOkBlocking(allocator, &attach, remote_error_detail);
 }
 
 fn fsrpcClunkBestEffortBlocking(
@@ -310,11 +385,12 @@ fn sendChatViaFsrpcBlocking(
     debug_state: ?*AsyncChatWorkerState,
     subscribe_debug: bool,
     job_meta: ?*PendingJobMetadata,
+    remote_error_detail: *?[]u8,
 ) ![]u8 {
     var next_tag: u32 = 1;
     var next_fid: u32 = 2;
 
-    try fsrpcBootstrapBlocking(allocator, client, &next_tag, debug_state, subscribe_debug);
+    try fsrpcBootstrapBlocking(allocator, client, &next_tag, debug_state, subscribe_debug, remote_error_detail);
 
     const input_fid = nextCounter(&next_fid, 2);
     const result_fid = nextCounter(&next_fid, 2);
@@ -330,7 +406,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(walk_input_req);
     var walk_input = try sendAndAwaitFsrpcBlocking(allocator, client, walk_input_req, walk_input_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer walk_input.deinit(allocator);
-    try ensureFsrpcOkBlocking(&walk_input);
+    try ensureFsrpcOkBlocking(allocator, &walk_input, remote_error_detail);
 
     const open_input_tag = nextCounter(&next_tag, 1);
     const open_input_req = try std.fmt.allocPrint(
@@ -341,7 +417,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(open_input_req);
     var open_input = try sendAndAwaitFsrpcBlocking(allocator, client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer open_input.deinit(allocator);
-    try ensureFsrpcOkBlocking(&open_input);
+    try ensureFsrpcOkBlocking(allocator, &open_input, remote_error_detail);
 
     const encoded = try encodeDataB64(allocator, text);
     defer allocator.free(encoded);
@@ -354,7 +430,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(write_req);
     var write = try sendAndAwaitFsrpcBlocking(allocator, client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS, debug_state);
     defer write.deinit(allocator);
-    try ensureFsrpcOkBlocking(&write);
+    try ensureFsrpcOkBlocking(allocator, &write, remote_error_detail);
 
     const write_payload = try getFsrpcPayloadObjectBlocking(write.parsed.value.object);
     const job_value = write_payload.get("job") orelse return error.InvalidResponse;
@@ -384,7 +460,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(walk_result_req);
     var walk_result = try sendAndAwaitFsrpcBlocking(allocator, client, walk_result_req, walk_result_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer walk_result.deinit(allocator);
-    try ensureFsrpcOkBlocking(&walk_result);
+    try ensureFsrpcOkBlocking(allocator, &walk_result, remote_error_detail);
 
     const open_result_tag = nextCounter(&next_tag, 1);
     const open_result_req = try std.fmt.allocPrint(
@@ -395,7 +471,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(open_result_req);
     var open_result = try sendAndAwaitFsrpcBlocking(allocator, client, open_result_req, open_result_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer open_result.deinit(allocator);
-    try ensureFsrpcOkBlocking(&open_result);
+    try ensureFsrpcOkBlocking(allocator, &open_result, remote_error_detail);
 
     const read_tag = nextCounter(&next_tag, 1);
     const read_req = try std.fmt.allocPrint(
@@ -406,7 +482,7 @@ fn sendChatViaFsrpcBlocking(
     defer allocator.free(read_req);
     var read = try sendAndAwaitFsrpcBlocking(allocator, client, read_req, read_tag, FSRPC_DEFAULT_TIMEOUT_MS, debug_state);
     defer read.deinit(allocator);
-    try ensureFsrpcOkBlocking(&read);
+    try ensureFsrpcOkBlocking(allocator, &read, remote_error_detail);
 
     const read_payload = try getFsrpcPayloadObjectBlocking(read.parsed.value.object);
     const data_b64 = read_payload.get("data_b64") orelse return error.InvalidResponse;
@@ -432,9 +508,11 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
 
     var response: ?[]u8 = null;
     var error_text: ?[]u8 = null;
+    var fsrpc_error_detail: ?[]u8 = null;
+    defer if (fsrpc_error_detail) |value| allocator.free(value);
 
     var client = ws_client_mod.WebSocketClient.init(allocator, ctx.url, ctx.token) catch |err| {
-        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+        error_text = buildSendFailedErrorText(allocator, err, null);
         ctx.state.mutex.lock();
         defer ctx.state.mutex.unlock();
         ctx.state.response = null;
@@ -446,7 +524,7 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
     defer client.deinit();
 
     client.connect() catch |err| {
-        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+        error_text = buildSendFailedErrorText(allocator, err, null);
         ctx.state.mutex.lock();
         defer ctx.state.mutex.unlock();
         ctx.state.response = null;
@@ -458,7 +536,7 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
 
     var control_counter: u64 = 0;
     control_plane.ensureUnifiedV2Connection(allocator, &client, &control_counter) catch |err| {
-        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+        error_text = buildSendFailedErrorText(allocator, err, null);
         ctx.state.mutex.lock();
         defer ctx.state.mutex.unlock();
         ctx.state.response = null;
@@ -469,49 +547,30 @@ fn runAsyncChatSendWorker(ctx: *AsyncChatWorkerContext) void {
     };
 
     if (ctx.project_id) |project_id| {
-        if (ctx.project_token) |project_token| {
-            var status = control_plane.activateProject(
-                allocator,
-                &client,
-                &control_counter,
-                project_id,
-                project_token,
-            ) catch |err| {
-                error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
-                ctx.state.mutex.lock();
-                defer ctx.state.mutex.unlock();
-                ctx.state.response = null;
-                ctx.state.error_text = error_text;
-                ctx.state.done = true;
-                ctx.state.in_flight = false;
-                return;
-            };
-            status.deinit(allocator);
-        } else {
-            var status = control_plane.workspaceStatus(
-                allocator,
-                &client,
-                &control_counter,
-                project_id,
-            ) catch |err| {
-                error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
-                ctx.state.mutex.lock();
-                defer ctx.state.mutex.unlock();
-                ctx.state.response = null;
-                ctx.state.error_text = error_text;
-                ctx.state.done = true;
-                ctx.state.in_flight = false;
-                return;
-            };
-            status.deinit(allocator);
-        }
+        var status = control_plane.activateProject(
+            allocator,
+            &client,
+            &control_counter,
+            project_id,
+            ctx.project_token,
+        ) catch |err| {
+            error_text = buildSendFailedErrorText(allocator, err, null);
+            ctx.state.mutex.lock();
+            defer ctx.state.mutex.unlock();
+            ctx.state.response = null;
+            ctx.state.error_text = error_text;
+            ctx.state.done = true;
+            ctx.state.in_flight = false;
+            return;
+        };
+        status.deinit(allocator);
     }
 
     var job_meta = PendingJobMetadata{};
     defer job_meta.deinit(allocator);
 
-    response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message, ctx.state, ctx.subscribe_debug, &job_meta) catch |err| blk: {
-        error_text = std.fmt.allocPrint(allocator, "Send failed: {s}", .{@errorName(err)}) catch null;
+    response = sendChatViaFsrpcBlocking(allocator, &client, ctx.message, ctx.state, ctx.subscribe_debug, &job_meta, &fsrpc_error_detail) catch |err| blk: {
+        error_text = buildSendFailedErrorText(allocator, err, fsrpc_error_detail);
         break :blk null;
     };
 
@@ -783,6 +842,7 @@ const App = struct {
     workspace_last_error: ?[]u8 = null,
     workspace_last_refresh_ms: i64 = 0,
     project_panel_id: ?workspace.PanelId = null,
+    project_selector_open: bool = false,
     filesystem_panel_id: ?workspace.PanelId = null,
     filesystem_path: std.ArrayList(u8) = .empty,
     filesystem_entries: std.ArrayListUnmanaged(FilesystemEntry) = .{},
@@ -3266,6 +3326,7 @@ const App = struct {
     fn clearWorkspaceData(self: *App) void {
         workspace_types.deinitProjectList(self.allocator, &self.projects);
         workspace_types.deinitNodeList(self.allocator, &self.nodes);
+        self.project_selector_open = false;
         if (self.workspace_state) |*status| {
             status.deinit(self.allocator);
             self.workspace_state = null;
@@ -3331,6 +3392,40 @@ const App = struct {
         return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
     }
 
+    fn controlAuthHintForRemote(self: *App, remote: []const u8) ?[]u8 {
+        if (std.mem.indexOf(u8, remote, "project_auth_failed") != null) {
+            return self.allocator.dupe(
+                u8,
+                "Set Project Token in Project panel (token is returned when project is created/project_up).",
+            ) catch null;
+        }
+        if (std.mem.indexOf(u8, remote, "project_assignment_forbidden") != null) {
+            return self.allocator.dupe(
+                u8,
+                "This agent is not allowed on that project (Spider Web is primary-agent only).",
+            ) catch null;
+        }
+        return null;
+    }
+
+    fn formatControlRemoteMessage(self: *App, operation: []const u8, remote: []const u8) ?[]u8 {
+        const hint = self.controlAuthHintForRemote(remote);
+        defer if (hint) |value| self.allocator.free(value);
+        if (hint) |value| {
+            return std.fmt.allocPrint(self.allocator, "{s}: {s} {s}", .{ operation, remote, value }) catch null;
+        }
+        return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
+    }
+
+    fn formatControlOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
+        if (err == error.RemoteError) {
+            if (control_plane.lastRemoteError()) |remote| {
+                return self.formatControlRemoteMessage(operation, remote);
+            }
+        }
+        return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
+    }
+
     fn setWorkspaceError(self: *App, message: []const u8) void {
         if (self.workspace_last_error) |value| {
             self.allocator.free(value);
@@ -3354,6 +3449,7 @@ const App = struct {
     fn selectProjectInSettings(self: *App, project_id: []const u8) !void {
         self.settings_panel.project_id.clearRetainingCapacity();
         try self.settings_panel.project_id.appendSlice(self.allocator, project_id);
+        self.project_selector_open = false;
         self.settings_panel.project_token.clearRetainingCapacity();
         if (self.config.getProjectToken(project_id)) |token| {
             try self.settings_panel.project_token.appendSlice(self.allocator, token);
@@ -3369,12 +3465,41 @@ const App = struct {
         errdefer workspace_types.deinitProjectList(self.allocator, &projects);
         var nodes = try control_plane.listNodes(self.allocator, client, &self.message_counter);
         errdefer workspace_types.deinitNodeList(self.allocator, &nodes);
-        var workspace_status = try control_plane.workspaceStatus(
+        const selected_project_id = self.selectedProjectId();
+        const selected_project_token = if (selected_project_id) |project_id|
+            if (self.settings_panel.project_token.items.len > 0)
+                self.settings_panel.project_token.items
+            else
+                self.config.getProjectToken(project_id)
+        else
+            null;
+
+        var selected_project_warning: ?[]u8 = null;
+        defer if (selected_project_warning) |value| self.allocator.free(value);
+
+        var workspace_status = control_plane.workspaceStatus(
             self.allocator,
             client,
             &self.message_counter,
-            self.selectedProjectId(),
-        );
+            selected_project_id,
+            selected_project_token,
+        ) catch |err| blk: {
+            if (selected_project_id != null and err == error.RemoteError) {
+                if (control_plane.lastRemoteError()) |remote| {
+                    selected_project_warning = self.formatControlRemoteMessage("Selected project unavailable", remote);
+                } else {
+                    selected_project_warning = std.fmt.allocPrint(self.allocator, "Selected project unavailable: {s}", .{@errorName(err)}) catch null;
+                }
+                break :blk try control_plane.workspaceStatus(
+                    self.allocator,
+                    client,
+                    &self.message_counter,
+                    null,
+                    null,
+                );
+            }
+            return err;
+        };
         errdefer workspace_status.deinit(self.allocator);
 
         workspace_types.deinitProjectList(self.allocator, &self.projects);
@@ -3385,7 +3510,11 @@ const App = struct {
         self.nodes = nodes;
         self.workspace_state = workspace_status;
         self.workspace_last_refresh_ms = std.time.milliTimestamp();
-        self.clearWorkspaceError();
+        if (selected_project_warning) |message| {
+            self.setWorkspaceError(message);
+        } else {
+            self.clearWorkspaceError();
+        }
     }
 
     fn activateSelectedProject(self: *App) !void {
@@ -3397,7 +3526,7 @@ const App = struct {
         else if (self.config.getProjectToken(project_id)) |value|
             value
         else
-            return error.MissingField;
+            null;
 
         var status = try control_plane.activateProject(
             self.allocator,
@@ -3414,7 +3543,9 @@ const App = struct {
         self.clearWorkspaceError();
 
         if (self.settings_panel.project_token.items.len == 0) {
-            try self.settings_panel.project_token.appendSlice(self.allocator, token);
+            if (token) |value| {
+                try self.settings_panel.project_token.appendSlice(self.allocator, value);
+            }
         }
         try self.syncSettingsToConfig();
     }
@@ -3453,9 +3584,7 @@ const App = struct {
         }
         try self.syncSettingsToConfig();
         self.settings_panel.project_create_name.clearRetainingCapacity();
-        if (created.project_token != null) {
-            self.activateSelectedProject() catch {};
-        }
+        self.activateSelectedProject() catch {};
         self.refreshWorkspaceData() catch {};
         self.clearWorkspaceError();
     }
@@ -4258,7 +4387,11 @@ const App = struct {
         self.drawLabel(rect.min[0] + pad, y, "Project Workspace", self.theme.colors.text_primary);
         y += 26.0 * self.ui_scale;
 
-        self.drawLabel(rect.min[0] + pad, y, "Selected Project ID", self.theme.colors.text_primary);
+        if (self.settings_panel.focused_field == .project_id) {
+            self.settings_panel.focused_field = .none;
+        }
+
+        self.drawLabel(rect.min[0] + pad, y, "Selected Project", self.theme.colors.text_primary);
         y += 20.0 * self.ui_scale;
         const project_rect = Rect.fromXYWH(
             rect.min[0] + pad,
@@ -4266,16 +4399,110 @@ const App = struct {
             @max(220.0, rect_width - pad * 2.0),
             input_height,
         );
-        const project_focused = self.drawTextInputWidget(
-            project_rect,
-            self.settings_panel.project_id.items,
-            self.settings_panel.focused_field == .project_id,
-            .{ .placeholder = "proj-1" },
-        );
-        if (project_focused) self.settings_panel.focused_field = .project_id;
+        if (self.projects.items.len == 0) self.project_selector_open = false;
 
-        y += input_height + pad * 0.5;
-        self.drawLabel(rect.min[0] + pad, y, "Project Token", self.theme.colors.text_primary);
+        var selected_project_label_buf: ?[]u8 = null;
+        defer if (selected_project_label_buf) |value| self.allocator.free(value);
+        const selected_project_label: []const u8 = blk: {
+            if (self.settings_panel.project_id.items.len == 0) break :blk "Select project";
+            const selected_id = self.settings_panel.project_id.items;
+            for (self.projects.items) |project| {
+                if (std.mem.eql(u8, project.id, selected_id)) {
+                    selected_project_label_buf = std.fmt.allocPrint(
+                        self.allocator,
+                        "{s} ({s})",
+                        .{ project.name, project.id },
+                    ) catch null;
+                    if (selected_project_label_buf) |label| break :blk label;
+                    break :blk selected_id;
+                }
+            }
+            break :blk selected_id;
+        };
+
+        var selector_label_buf: ?[]u8 = null;
+        defer if (selector_label_buf) |value| self.allocator.free(value);
+        const selector_label: []const u8 = blk: {
+            const suffix = if (self.project_selector_open) "[^]" else "[v]";
+            selector_label_buf = std.fmt.allocPrint(
+                self.allocator,
+                "{s} {s}",
+                .{ selected_project_label, suffix },
+            ) catch null;
+            if (selector_label_buf) |value| break :blk value;
+            break :blk selected_project_label;
+        };
+
+        if (self.drawButtonWidget(
+            project_rect,
+            selector_label,
+            .{ .variant = .secondary, .disabled = self.projects.items.len == 0 },
+        )) {
+            self.project_selector_open = !self.project_selector_open;
+            self.settings_panel.focused_field = .none;
+        }
+
+        y += input_height;
+        var project_dropdown_rect: ?Rect = null;
+        if (self.project_selector_open and self.projects.items.len > 0) {
+            const row_height = input_height;
+            const dropdown_project_count: usize = self.projects.items.len;
+            const dropdown_height = row_height * @as(f32, @floatFromInt(dropdown_project_count));
+            const dropdown_y = y + 2.0 * self.ui_scale;
+            const dropdown_rect = Rect.fromXYWH(
+                project_rect.min[0],
+                dropdown_y,
+                project_rect.width(),
+                dropdown_height,
+            );
+            project_dropdown_rect = dropdown_rect;
+            self.drawSurfacePanel(dropdown_rect);
+            self.drawRect(dropdown_rect, self.theme.colors.border);
+
+            var idx: usize = 0;
+            while (idx < dropdown_project_count) : (idx += 1) {
+                const project = self.projects.items[idx];
+                const row_rect = Rect.fromXYWH(
+                    dropdown_rect.min[0],
+                    dropdown_rect.min[1] + row_height * @as(f32, @floatFromInt(idx)),
+                    dropdown_rect.width(),
+                    row_height,
+                );
+                const is_selected = self.settings_panel.project_id.items.len > 0 and
+                    std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
+
+                const row_label_buf: ?[]u8 = std.fmt.allocPrint(
+                    self.allocator,
+                    "{s} ({s})",
+                    .{ project.name, project.id },
+                ) catch null;
+                const row_label = if (row_label_buf) |value| value else project.id;
+                defer if (row_label_buf) |value| self.allocator.free(value);
+
+                if (self.drawButtonWidget(
+                    row_rect,
+                    row_label,
+                    .{
+                        .variant = if (is_selected) .primary else .secondary,
+                        .disabled = false,
+                    },
+                )) {
+                    self.selectProjectInSettings(project.id) catch |err| {
+                        const msg = std.fmt.allocPrint(self.allocator, "Project select failed: {s}", .{@errorName(err)}) catch null;
+                        if (msg) |text| {
+                            defer self.allocator.free(text);
+                            self.setWorkspaceError(text);
+                        }
+                    };
+                    self.project_selector_open = false;
+                }
+            }
+
+            y = dropdown_rect.max[1];
+        }
+
+        y += pad * 0.5;
+        self.drawLabel(rect.min[0] + pad, y, "Project Token (required unless primary agent)", self.theme.colors.text_primary);
         y += 20.0 * self.ui_scale;
         const project_token_rect = Rect.fromXYWH(
             rect.min[0] + pad,
@@ -4358,7 +4585,7 @@ const App = struct {
             },
         )) {
             self.createProjectFromPanel() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Project create failed: {s}", .{@errorName(err)}) catch null;
+                const msg = self.formatControlOpError("Project create failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
                     self.setWorkspaceError(text);
@@ -4372,7 +4599,7 @@ const App = struct {
             .{ .variant = .secondary, .disabled = self.connection_state != .connected },
         )) {
             self.refreshWorkspaceData() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
+                const msg = self.formatControlOpError("Workspace refresh failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
                     self.setWorkspaceError(text);
@@ -4386,7 +4613,7 @@ const App = struct {
             .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.settings_panel.project_id.items.len == 0 },
         )) {
             self.activateSelectedProject() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Project activate failed: {s}", .{@errorName(err)}) catch null;
+                const msg = self.formatControlOpError("Project activate failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
                     self.setWorkspaceError(text);
@@ -4540,8 +4767,15 @@ const App = struct {
             }
         }
 
+        const clicked_outside_project_selector = !project_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !(project_dropdown_rect != null and project_dropdown_rect.?.contains(.{ self.mouse_x, self.mouse_y }));
+
+        if (self.mouse_clicked and clicked_outside_project_selector) {
+            self.project_selector_open = false;
+        }
+
         if (self.mouse_clicked and
-            !project_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            clicked_outside_project_selector and
             !project_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !create_name_rect.contains(.{ self.mouse_x, self.mouse_y }) and
             !create_vision_rect.contains(.{ self.mouse_x, self.mouse_y }) and
@@ -5713,7 +5947,7 @@ const App = struct {
             std.log.warn("Failed to save config on connect: {s}", .{@errorName(err)});
         };
         self.refreshWorkspaceData() catch |err| {
-            const msg = std.fmt.allocPrint(self.allocator, "Workspace refresh failed: {s}", .{@errorName(err)}) catch null;
+            const msg = self.formatControlOpError("Workspace refresh failed", err);
             if (msg) |text| {
                 defer self.allocator.free(text);
                 self.setWorkspaceError(text);
@@ -6006,6 +6240,16 @@ const App = struct {
                 self.pending_send_resume_notified = true;
             }
             return;
+        }
+
+        const escaped_error = jsonEscape(self.allocator, err_text) catch null;
+        defer if (escaped_error) |value| self.allocator.free(value);
+        if (escaped_error) |encoded| {
+            const payload = std.fmt.allocPrint(self.allocator, "{{\"message\":\"{s}\"}}", .{encoded}) catch null;
+            if (payload) |value| {
+                defer self.allocator.free(value);
+                self.appendDebugEvent(std.time.milliTimestamp(), "client.send_error", null, value) catch {};
+            }
         }
 
         try self.appendMessage("system", err_text, null);

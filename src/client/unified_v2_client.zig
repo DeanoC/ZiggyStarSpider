@@ -13,6 +13,67 @@ pub const JsonEnvelope = struct {
     }
 };
 
+const MAX_REMOTE_ERROR_LEN: usize = 512;
+threadlocal var last_remote_error_len: usize = 0;
+threadlocal var last_remote_error_buf: [MAX_REMOTE_ERROR_LEN]u8 = [_]u8{0} ** MAX_REMOTE_ERROR_LEN;
+
+pub fn clearLastRemoteError() void {
+    last_remote_error_len = 0;
+}
+
+pub fn lastRemoteError() ?[]const u8 {
+    if (last_remote_error_len == 0) return null;
+    return last_remote_error_buf[0..last_remote_error_len];
+}
+
+fn setLastRemoteError(message: []const u8) void {
+    if (message.len == 0) {
+        clearLastRemoteError();
+        return;
+    }
+    const len = @min(message.len, MAX_REMOTE_ERROR_LEN);
+    @memcpy(last_remote_error_buf[0..len], message[0..len]);
+    last_remote_error_len = len;
+}
+
+fn controlErrorMessageFromRoot(root: std.json.ObjectMap) ?[]const u8 {
+    if (root.get("error")) |error_value| {
+        if (error_value == .object) {
+            if (error_value.object.get("message")) |message| {
+                if (message == .string and message.string.len > 0) return message.string;
+            }
+        } else if (error_value == .string and error_value.string.len > 0) {
+            return error_value.string;
+        }
+    }
+    if (root.get("payload")) |payload_value| {
+        if (payload_value == .object) {
+            if (payload_value.object.get("message")) |message| {
+                if (message == .string and message.string.len > 0) return message.string;
+            }
+        }
+    }
+    return null;
+}
+
+fn controlErrorCodeFromRoot(root: std.json.ObjectMap) ?[]const u8 {
+    if (root.get("error")) |error_value| {
+        if (error_value == .object) {
+            if (error_value.object.get("code")) |code| {
+                if (code == .string and code.string.len > 0) return code.string;
+            }
+        }
+    }
+    if (root.get("payload")) |payload_value| {
+        if (payload_value == .object) {
+            if (payload_value.object.get("code")) |code| {
+                if (code == .string and code.string.len > 0) return code.string;
+            }
+        }
+    }
+    return null;
+}
+
 pub fn sendControlVersionAndConnect(
     allocator: std.mem.Allocator,
     client: anytype,
@@ -52,6 +113,7 @@ pub fn sendControlRequest(
     payload_json: ?[]const u8,
     timeout_ms: i64,
 ) !JsonEnvelope {
+    clearLastRemoteError();
     const request_json = try buildControlRequestJson(allocator, control_type, request_id, payload_json);
     defer allocator.free(request_json);
 
@@ -153,10 +215,24 @@ fn awaitControlReply(
             if (parsed.value == .object) {
                 const obj = parsed.value.object;
                 if (matchesControlReply(obj, request_id, expected_type)) {
+                    clearLastRemoteError();
                     return .{ .raw = raw, .parsed = parsed };
                 }
 
                 if (matchesControlReplyType(obj, request_id, "control.error")) {
+                    const message = controlErrorMessageFromRoot(obj);
+                    const code = controlErrorCodeFromRoot(obj);
+                    if (message != null and code != null) {
+                        var detail_buf: [MAX_REMOTE_ERROR_LEN]u8 = undefined;
+                        const detail = std.fmt.bufPrint(&detail_buf, "{s} [{s}]", .{ message.?, code.? }) catch message.?;
+                        setLastRemoteError(detail);
+                    } else if (message) |value| {
+                        setLastRemoteError(value);
+                    } else if (code) |value| {
+                        setLastRemoteError(value);
+                    } else {
+                        setLastRemoteError("remote control error");
+                    }
                     parsed.deinit();
                     allocator.free(raw);
                     return error.RemoteError;

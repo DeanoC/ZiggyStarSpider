@@ -4,6 +4,10 @@ pub const workspace_types = @import("workspace_types.zig");
 
 pub const default_timeout_ms: i64 = unified_v2.default_control_timeout_ms;
 
+pub fn lastRemoteError() ?[]const u8 {
+    return unified_v2.lastRemoteError();
+}
+
 pub fn ensureUnifiedV2Connection(
     allocator: std.mem.Allocator,
     client: anytype,
@@ -148,17 +152,22 @@ pub fn activateProject(
     client: anytype,
     message_counter: *u64,
     project_id: []const u8,
-    project_token: []const u8,
+    project_token: ?[]const u8,
 ) !workspace_types.WorkspaceStatus {
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
-    const escaped_token = try unified_v2.jsonEscape(allocator, project_token);
-    defer allocator.free(escaped_token);
-
-    const payload_req = try std.fmt.allocPrint(
+    const payload_req = if (project_token) |token| blk: {
+        const escaped_token = try unified_v2.jsonEscape(allocator, token);
+        defer allocator.free(escaped_token);
+        break :blk try std.fmt.allocPrint(
+            allocator,
+            "{{\"project_id\":\"{s}\",\"project_token\":\"{s}\"}}",
+            .{ escaped_project, escaped_token },
+        );
+    } else try std.fmt.allocPrint(
         allocator,
-        "{{\"project_id\":\"{s}\",\"project_token\":\"{s}\"}}",
-        .{ escaped_project, escaped_token },
+        "{{\"project_id\":\"{s}\"}}",
+        .{escaped_project},
     );
     defer allocator.free(payload_req);
 
@@ -242,14 +251,25 @@ pub fn workspaceStatus(
     client: anytype,
     message_counter: *u64,
     project_id: ?[]const u8,
+    project_token: ?[]const u8,
 ) !workspace_types.WorkspaceStatus {
     var payload_req: ?[]u8 = null;
     defer if (payload_req) |value| allocator.free(value);
 
-    if (project_id) |value| {
-        const escaped_project = try unified_v2.jsonEscape(allocator, value);
+    if (project_id) |project| {
+        const escaped_project = try unified_v2.jsonEscape(allocator, project);
         defer allocator.free(escaped_project);
-        payload_req = try std.fmt.allocPrint(allocator, "{{\"project_id\":\"{s}\"}}", .{escaped_project});
+        if (project_token) |token| {
+            const escaped_token = try unified_v2.jsonEscape(allocator, token);
+            defer allocator.free(escaped_token);
+            payload_req = try std.fmt.allocPrint(
+                allocator,
+                "{{\"project_id\":\"{s}\",\"project_token\":\"{s}\"}}",
+                .{ escaped_project, escaped_token },
+            );
+        } else {
+            payload_req = try std.fmt.allocPrint(allocator, "{{\"project_id\":\"{s}\"}}", .{escaped_project});
+        }
     }
 
     const payload_json = try requestControlPayloadJson(
@@ -307,6 +327,8 @@ fn parseProjectSummary(
         .name = try dupRequiredString(allocator, obj, "name"),
         .vision = try dupOptionalString(allocator, obj, "vision") orelse try allocator.dupe(u8, ""),
         .status = try dupOptionalString(allocator, obj, "status") orelse try allocator.dupe(u8, "active"),
+        .kind = try dupOptionalString(allocator, obj, "kind"),
+        .is_delete_protected = try getOptionalBool(obj, "is_delete_protected", false),
         .mount_count = @intCast(try getOptionalU64(obj, "mount_count", 0)),
         .created_at_ms = try getOptionalI64(obj, "created_at_ms", 0),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
@@ -322,6 +344,8 @@ fn parseProjectDetail(
         .name = try dupRequiredString(allocator, obj, "name"),
         .vision = try dupOptionalString(allocator, obj, "vision") orelse try allocator.dupe(u8, ""),
         .status = try dupOptionalString(allocator, obj, "status") orelse try allocator.dupe(u8, "active"),
+        .kind = try dupOptionalString(allocator, obj, "kind"),
+        .is_delete_protected = try getOptionalBool(obj, "is_delete_protected", false),
         .created_at_ms = try getOptionalI64(obj, "created_at_ms", 0),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
         .project_token = try dupOptionalString(allocator, obj, "project_token"),
@@ -519,6 +543,12 @@ fn getOptionalU64(obj: std.json.ObjectMap, name: []const u8, default_value: u64)
     const value = obj.get(name) orelse return default_value;
     if (value != .integer or value.integer < 0) return error.InvalidResponse;
     return @intCast(value.integer);
+}
+
+fn getOptionalBool(obj: std.json.ObjectMap, name: []const u8, default_value: bool) !bool {
+    const value = obj.get(name) orelse return default_value;
+    if (value != .bool) return error.InvalidResponse;
+    return value.bool;
 }
 
 fn getOptionalI64(obj: std.json.ObjectMap, name: []const u8, default_value: i64) !i64 {
