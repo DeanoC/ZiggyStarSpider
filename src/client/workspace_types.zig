@@ -75,6 +75,8 @@ pub const ProjectSummary = struct {
     name: []u8,
     vision: []u8,
     status: []u8,
+    kind: ?[]u8 = null,
+    is_delete_protected: bool = false,
     mount_count: usize,
     created_at_ms: i64,
     updated_at_ms: i64,
@@ -84,6 +86,7 @@ pub const ProjectSummary = struct {
         allocator.free(self.name);
         allocator.free(self.vision);
         allocator.free(self.status);
+        if (self.kind) |value| allocator.free(value);
         self.* = undefined;
     }
 };
@@ -93,6 +96,8 @@ pub const ProjectDetail = struct {
     name: []u8,
     vision: []u8,
     status: []u8,
+    kind: ?[]u8 = null,
+    is_delete_protected: bool = false,
     created_at_ms: i64,
     updated_at_ms: i64,
     project_token: ?[]u8 = null,
@@ -103,6 +108,7 @@ pub const ProjectDetail = struct {
         allocator.free(self.name);
         allocator.free(self.vision);
         allocator.free(self.status);
+        if (self.kind) |value| allocator.free(value);
         if (self.project_token) |value| allocator.free(value);
         for (self.mounts.items) |*mount| mount.deinit(allocator);
         self.mounts.deinit(allocator);

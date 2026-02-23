@@ -307,6 +307,8 @@ fn parseProjectSummary(
         .name = try dupRequiredString(allocator, obj, "name"),
         .vision = try dupOptionalString(allocator, obj, "vision") orelse try allocator.dupe(u8, ""),
         .status = try dupOptionalString(allocator, obj, "status") orelse try allocator.dupe(u8, "active"),
+        .kind = try dupOptionalString(allocator, obj, "kind"),
+        .is_delete_protected = try getOptionalBool(obj, "is_delete_protected", false),
         .mount_count = @intCast(try getOptionalU64(obj, "mount_count", 0)),
         .created_at_ms = try getOptionalI64(obj, "created_at_ms", 0),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
@@ -322,6 +324,8 @@ fn parseProjectDetail(
         .name = try dupRequiredString(allocator, obj, "name"),
         .vision = try dupOptionalString(allocator, obj, "vision") orelse try allocator.dupe(u8, ""),
         .status = try dupOptionalString(allocator, obj, "status") orelse try allocator.dupe(u8, "active"),
+        .kind = try dupOptionalString(allocator, obj, "kind"),
+        .is_delete_protected = try getOptionalBool(obj, "is_delete_protected", false),
         .created_at_ms = try getOptionalI64(obj, "created_at_ms", 0),
         .updated_at_ms = try getOptionalI64(obj, "updated_at_ms", 0),
         .project_token = try dupOptionalString(allocator, obj, "project_token"),
@@ -519,6 +523,12 @@ fn getOptionalU64(obj: std.json.ObjectMap, name: []const u8, default_value: u64)
     const value = obj.get(name) orelse return default_value;
     if (value != .integer or value.integer < 0) return error.InvalidResponse;
     return @intCast(value.integer);
+}
+
+fn getOptionalBool(obj: std.json.ObjectMap, name: []const u8, default_value: bool) !bool {
+    const value = obj.get(name) orelse return default_value;
+    if (value != .bool) return error.InvalidResponse;
+    return value.bool;
 }
 
 fn getOptionalI64(obj: std.json.ObjectMap, name: []const u8, default_value: i64) !i64 {
