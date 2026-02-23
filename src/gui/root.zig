@@ -789,6 +789,7 @@ const App = struct {
     filesystem_preview_path: ?[]u8 = null,
     filesystem_preview_text: ?[]u8 = null,
     filesystem_error: ?[]u8 = null,
+    fsrpc_last_remote_error: ?[]u8 = null,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
     async_chat_worker: AsyncChatWorkerState = .{},
@@ -1004,6 +1005,7 @@ const App = struct {
             self.allocator.free(value);
             self.workspace_last_error = null;
         }
+        self.clearFsrpcRemoteError();
         self.clearDebugEvents();
         self.debug_events.deinit(self.allocator);
         self.debug_folded_blocks.deinit();
@@ -3308,6 +3310,27 @@ const App = struct {
         }
     }
 
+    fn setFsrpcRemoteError(self: *App, message: []const u8) void {
+        self.clearFsrpcRemoteError();
+        self.fsrpc_last_remote_error = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearFsrpcRemoteError(self: *App) void {
+        if (self.fsrpc_last_remote_error) |value| {
+            self.allocator.free(value);
+            self.fsrpc_last_remote_error = null;
+        }
+    }
+
+    fn formatFilesystemOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
+        if (err == error.RemoteError) {
+            if (self.fsrpc_last_remote_error) |remote| {
+                return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
+            }
+        }
+        return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
+    }
+
     fn setWorkspaceError(self: *App, message: []const u8) void {
         if (self.workspace_last_error) |value| {
             self.allocator.free(value);
@@ -4568,8 +4591,29 @@ const App = struct {
         }
     }
 
+    fn mapWorkspaceRootToFilesystemPath(self: *App, workspace_root: []const u8) ![]u8 {
+        const trimmed = std.mem.trim(u8, workspace_root, " \t\r\n");
+        if (trimmed.len == 0) return self.allocator.dupe(u8, "/");
+
+        const legacy_prefix = "/spiderweb/projects/";
+        if (std.mem.startsWith(u8, trimmed, legacy_prefix)) {
+            const marker = "/workspace";
+            if (std.mem.indexOf(u8, trimmed, marker)) |idx| {
+                const suffix_idx = idx + marker.len;
+                if (suffix_idx < trimmed.len and trimmed[suffix_idx] == '/') {
+                    return std.fmt.allocPrint(self.allocator, "/workspace{s}", .{trimmed[suffix_idx..]});
+                }
+                return self.allocator.dupe(u8, "/workspace");
+            }
+            return self.allocator.dupe(u8, "/workspace");
+        }
+
+        return self.allocator.dupe(u8, trimmed);
+    }
+
     fn refreshFilesystemBrowser(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        self.clearFsrpcRemoteError();
         self.clearFilesystemData();
         self.clearFilesystemError();
         if (self.filesystem_path.items.len == 0) {
@@ -4611,6 +4655,7 @@ const App = struct {
     }
 
     fn openFilesystemEntry(self: *App, entry: *const FilesystemEntry) !void {
+        self.clearFsrpcRemoteError();
         if (entry.is_dir) {
             try self.setFilesystemPath(entry.path);
             try self.refreshFilesystemBrowser();
@@ -4671,7 +4716,7 @@ const App = struct {
             .{ .variant = .secondary, .disabled = self.connection_state != .connected },
         )) {
             self.refreshFilesystemBrowser() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Filesystem refresh failed: {s}", .{@errorName(err)}) catch null;
+                const msg = self.formatFilesystemOpError("Filesystem refresh failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
                     self.setFilesystemError(text);
@@ -4688,7 +4733,7 @@ const App = struct {
                 defer self.allocator.free(value);
                 self.setFilesystemPath(value) catch {};
                 self.refreshFilesystemBrowser() catch |err| {
-                    const msg = std.fmt.allocPrint(self.allocator, "Filesystem refresh failed: {s}", .{@errorName(err)}) catch null;
+                    const msg = self.formatFilesystemOpError("Filesystem refresh failed", err);
                     if (msg) |text| {
                         defer self.allocator.free(text);
                         self.setFilesystemError(text);
@@ -4703,7 +4748,13 @@ const App = struct {
         )) {
             if (self.workspace_state) |*status| {
                 if (status.workspace_root) |root| {
-                    self.setFilesystemPath(root) catch {};
+                    const mapped = self.mapWorkspaceRootToFilesystemPath(root) catch null;
+                    if (mapped) |value| {
+                        defer self.allocator.free(value);
+                        self.setFilesystemPath(value) catch {};
+                    } else {
+                        self.setFilesystemPath("/") catch {};
+                    }
                 } else {
                     self.setFilesystemPath("/") catch {};
                 }
@@ -4711,7 +4762,7 @@ const App = struct {
                 self.setFilesystemPath("/") catch {};
             }
             self.refreshFilesystemBrowser() catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Filesystem refresh failed: {s}", .{@errorName(err)}) catch null;
+                const msg = self.formatFilesystemOpError("Filesystem refresh failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
                     self.setFilesystemError(text);
@@ -4754,7 +4805,7 @@ const App = struct {
             } else false;
             if (clicked) {
                 self.openFilesystemEntry(&entry) catch |err| {
-                    const msg = std.fmt.allocPrint(self.allocator, "Filesystem open failed: {s}", .{@errorName(err)}) catch null;
+                    const msg = self.formatFilesystemOpError("Filesystem open failed", err);
                     if (msg) |text| {
                         defer self.allocator.free(text);
                         self.setFilesystemError(text);
@@ -6093,12 +6144,57 @@ const App = struct {
     }
 
     fn ensureFsrpcOk(self: *App, envelope: *FsrpcEnvelope) !void {
-        _ = self;
         if (envelope.parsed.value != .object) return error.InvalidResponse;
         const obj = envelope.parsed.value.object;
         const ok_value = obj.get("ok") orelse return error.InvalidResponse;
         if (ok_value != .bool) return error.InvalidResponse;
-        if (!ok_value.bool) return error.RemoteError;
+        if (ok_value.bool) {
+            self.clearFsrpcRemoteError();
+            return;
+        }
+
+        var detail: ?[]u8 = null;
+        if (obj.get("error")) |err_value| {
+            if (err_value == .object) {
+                const err_obj = err_value.object;
+                const message = if (err_obj.get("message")) |value|
+                    if (value == .string) value.string else null
+                else
+                    null;
+                const code = if (err_obj.get("code")) |value|
+                    if (value == .string) value.string else null
+                else
+                    null;
+                const errno = if (err_obj.get("errno")) |value|
+                    if (value == .integer) value.integer else null
+                else
+                    null;
+
+                if (message != null and code != null and errno != null) {
+                    detail = std.fmt.allocPrint(self.allocator, "{s} [{s}] (errno={d})", .{ message.?, code.?, errno.? }) catch null;
+                } else if (message != null and errno != null) {
+                    detail = std.fmt.allocPrint(self.allocator, "{s} (errno={d})", .{ message.?, errno.? }) catch null;
+                } else if (message != null and code != null) {
+                    detail = std.fmt.allocPrint(self.allocator, "{s} [{s}]", .{ message.?, code.? }) catch null;
+                } else if (message) |value| {
+                    detail = self.allocator.dupe(u8, value) catch null;
+                } else if (code) |value| {
+                    detail = std.fmt.allocPrint(self.allocator, "remote fsrpc error [{s}]", .{value}) catch null;
+                } else if (errno) |value| {
+                    detail = std.fmt.allocPrint(self.allocator, "remote fsrpc error (errno={d})", .{value}) catch null;
+                }
+            } else if (err_value == .string) {
+                detail = self.allocator.dupe(u8, err_value.string) catch null;
+            }
+        }
+
+        if (detail) |value| {
+            defer self.allocator.free(value);
+            self.setFsrpcRemoteError(value);
+        } else {
+            self.setFsrpcRemoteError("remote fsrpc error");
+        }
+        return error.RemoteError;
     }
 
     fn getFsrpcPayloadObject(self: *App, root: std.json.ObjectMap) !std.json.ObjectMap {
