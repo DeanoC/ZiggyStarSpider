@@ -4574,7 +4574,7 @@ const App = struct {
     }
 
     fn refreshFilesystemBrowser(self: *App) !void {
-        const client = self.ws_client orelse return error.NotConnected;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
         self.clearFilesystemData();
         self.clearFilesystemError();
         if (self.filesystem_path.items.len == 0) {
@@ -4600,8 +4600,7 @@ const App = struct {
             const child_path = try self.joinFilesystemPath(current_path, entry_name);
             errdefer self.allocator.free(child_path);
 
-            const child_fid = self.fsrpcWalkPathGui(client, child_path) catch |err| {
-                _ = err;
+            const child_fid = self.fsrpcWalkPathGui(client, child_path) catch {
                 self.allocator.free(child_path);
                 continue;
             };
@@ -4623,7 +4622,7 @@ const App = struct {
             return;
         }
 
-        const client = self.ws_client orelse return error.NotConnected;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
         try self.fsrpcBootstrapGui(client);
         const raw = try self.readFsPathTextGui(client, entry.path);
         defer self.allocator.free(raw);
@@ -6377,14 +6376,12 @@ const App = struct {
     }
 
     fn joinFilesystemPath(self: *App, parent: []const u8, child: []const u8) ![]u8 {
-        _ = self;
         if (std.mem.eql(u8, parent, "/")) return std.fmt.allocPrint(self.allocator, "/{s}", .{child});
         if (std.mem.endsWith(u8, parent, "/")) return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ parent, child });
         return std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ parent, child });
     }
 
     fn parentFilesystemPath(self: *App, path: []const u8) ![]u8 {
-        _ = self;
         const trimmed = std.mem.trimRight(u8, path, "/");
         if (trimmed.len == 0) return std.fmt.allocPrint(self.allocator, "/", .{});
         const idx = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return std.fmt.allocPrint(self.allocator, "/", .{});
@@ -8032,7 +8029,7 @@ fn extractCorrelationId(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) 
             if (value == .string and value.string.len > 0) return value.string;
         }
     }
-    return extractRequestId(root, payload);
+    return App.extractRequestId(root, payload);
 }
 
 pub export fn zsc_free_icon(pixels: ?*anyopaque) void {
