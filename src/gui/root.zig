@@ -1508,7 +1508,10 @@ const App = struct {
                 else => {},
             }
         }
-        if (!self.mouse_down) {
+        // Only clear active form-scroll drag while processing the main window.
+        // Secondary windows can report mouse-up while the drag is still active
+        // in the source window.
+        if (!self.mouse_down and ui_window.id == self.main_window_id) {
             self.form_scroll_drag_target = .none;
         }
 
@@ -4759,9 +4762,33 @@ const App = struct {
         if (self.projects.items.len > 0) {
             self.drawLabel(rect.min[0] + pad, y, "Project List:", self.theme.colors.text_primary);
             y += layout.label_to_input_gap;
+            const row_h = @max(layout.button_height * 0.86, layout.line_height + layout.inner_inset);
+            const row_gap = @max(1.0, layout.inner_inset * 0.3);
+            const row_step = row_h + row_gap;
+            const list_top = y;
+            const list_bottom = rect.max[1] + self.settings_panel.projects_scroll_y;
+            const visible_start_idx: usize = @intFromFloat(@max(
+                0.0,
+                @floor((rect.min[1] - list_top) / row_step),
+            ));
+            const visible_end_idx_unclamped: usize = @intFromFloat(@max(
+                0.0,
+                @ceil((list_bottom - list_top) / row_step),
+            ));
             const max_projects: usize = self.projects.items.len;
-            var idx: usize = 0;
+            const visible_end_idx = @min(max_projects, visible_end_idx_unclamped + 1);
+
+            if (visible_start_idx > 0) {
+                y += row_step * @as(f32, @floatFromInt(visible_start_idx));
+            }
+
+            var idx: usize = visible_start_idx;
             while (idx < max_projects) : (idx += 1) {
+                if (idx >= visible_end_idx) {
+                    const remaining = max_projects - idx;
+                    y += row_step * @as(f32, @floatFromInt(remaining));
+                    break;
+                }
                 const project = self.projects.items[idx];
                 const line = std.fmt.allocPrint(
                     self.allocator,
@@ -4770,7 +4797,6 @@ const App = struct {
                 ) catch null;
                 if (line) |value| {
                     defer self.allocator.free(value);
-                    const row_h = @max(layout.button_height * 0.86, layout.line_height + layout.inner_inset);
                     const button_w = @max(90.0 * self.ui_scale, rect_width * 0.17);
                     const text_max_w = @max(120.0, rect_width - (pad * 2.0) - button_w - pad);
                     const text_y = y + @max(0.0, (row_h - layout.line_height) * 0.5);
@@ -4802,7 +4828,7 @@ const App = struct {
                             }
                         };
                     }
-                    y += row_h + @max(1.0, layout.inner_inset * 0.3);
+                    y += row_step;
                 }
             }
         }
