@@ -6036,6 +6036,17 @@ const App = struct {
         self.clearPendingDebugRequest();
 
         const effective_url = self.settings_panel.server_url.items;
+
+        // Keep the Project panel operator token authoritative for admin auth:
+        // if the user typed one, sync it into config before selecting connect token.
+        if (self.settings_panel.project_operator_token.items.len > 0) {
+            const entered_admin_token = std.mem.trim(u8, self.settings_panel.project_operator_token.items, " \t");
+            if (entered_admin_token.len > 0 and !std.mem.eql(u8, self.config.getRoleToken(.admin), entered_admin_token)) {
+                self.config.setRoleToken(.admin, entered_admin_token) catch {};
+                self.config.save() catch {};
+            }
+        }
+
         const connect_token = if (self.config.activeRoleToken().len > 0)
             self.config.activeRoleToken()
         else
