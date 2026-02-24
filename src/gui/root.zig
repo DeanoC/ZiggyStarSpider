@@ -6224,11 +6224,6 @@ const App = struct {
                 self.config.setRoleToken(.admin, entered_admin_token) catch {};
                 self.config.save() catch {};
             }
-            // Operator token in Project panel is an admin credential; prefer admin connect role.
-            if (entered_admin_token.len > 0 and self.config.active_role != .admin) {
-                self.config.setActiveRole(.admin) catch {};
-                self.config.save() catch {};
-            }
         }
 
         const selected_role_token = self.config.getRoleToken(self.config.active_role);
