@@ -52,6 +52,7 @@ const FSRPC_DEFAULT_TIMEOUT_MS: u32 = 15_000;
 const FSRPC_CHAT_WRITE_TIMEOUT_MS: u32 = 180_000;
 const FSRPC_CLUNK_TIMEOUT_MS: u32 = 1_000;
 const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 45_000;
+const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
 
 const ChatAttachment = zui.protocol.types.ChatAttachment;
 const ChatMessage = zui.protocol.types.ChatMessage;
@@ -75,6 +76,13 @@ const FormScrollTarget = enum {
     projects,
 };
 
+const SessionAttachUiState = enum {
+    unknown,
+    warming,
+    ready,
+    err,
+};
+
 const FsrpcEnvelope = struct {
     raw: []u8,
     parsed: std.json.Parsed(std.json.Value),
@@ -86,10 +94,16 @@ const FsrpcEnvelope = struct {
     }
 };
 
+const FilesystemEntryKind = enum {
+    unknown,
+    directory,
+    file,
+};
+
 const FilesystemEntry = struct {
     name: []u8,
     path: []u8,
-    is_dir: bool,
+    kind: FilesystemEntryKind = .unknown,
 
     fn deinit(self: *FilesystemEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -462,6 +476,7 @@ const App = struct {
     filesystem_preview_text: ?[]u8 = null,
     filesystem_error: ?[]u8 = null,
     fsrpc_last_remote_error: ?[]u8 = null,
+    session_attach_state: SessionAttachUiState = .unknown,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
 
@@ -2627,6 +2642,7 @@ const App = struct {
 
                 client.deinit();
                 self.ws_client = null;
+                self.session_attach_state = .unknown;
                 self.setConnectionState(.error_state, "Connection lost. Please reconnect.");
                 if (has_pending_send) {
                     if (!self.pending_send_resume_notified) {
@@ -2961,7 +2977,7 @@ const App = struct {
     }
 
     fn formatFilesystemOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
-        if (err == error.RemoteError) {
+        if (err == error.RemoteError or err == error.RuntimeWarming) {
             if (self.fsrpc_last_remote_error) |remote| {
                 return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
             }
@@ -4940,24 +4956,26 @@ const App = struct {
             const child_path = try self.joinFilesystemPath(current_path, entry_name);
             errdefer self.allocator.free(child_path);
 
-            const child_fid = self.fsrpcWalkPathGui(client, child_path) catch {
-                self.allocator.free(child_path);
-                continue;
-            };
-            defer self.fsrpcClunkBestEffort(client, child_fid);
-            const child_is_dir = self.fsrpcFidIsDirGui(client, child_fid) catch false;
-
             try self.filesystem_entries.append(self.allocator, .{
                 .name = try self.allocator.dupe(u8, entry_name),
                 .path = child_path,
-                .is_dir = child_is_dir,
+                .kind = .unknown,
             });
         }
     }
 
     fn openFilesystemEntry(self: *App, entry: *const FilesystemEntry) !void {
         self.clearFsrpcRemoteError();
-        if (entry.is_dir) {
+        const kind = switch (entry.kind) {
+            .unknown => blk: {
+                const resolved = try self.resolveFilesystemEntryKind(entry.path);
+                self.updateFilesystemEntryKind(entry.path, resolved);
+                break :blk resolved;
+            },
+            else => entry.kind,
+        };
+
+        if (kind == .directory) {
             try self.setFilesystemPath(entry.path);
             try self.refreshFilesystemBrowser();
             return;
@@ -4983,6 +5001,23 @@ const App = struct {
             self.filesystem_preview_text = try self.allocator.dupe(u8, raw);
         }
         self.clearFilesystemError();
+    }
+
+    fn resolveFilesystemEntryKind(self: *App, path: []const u8) !FilesystemEntryKind {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        const fid = try self.fsrpcWalkPathGui(client, path);
+        defer self.fsrpcClunkBestEffort(client, fid);
+        const is_dir = try self.fsrpcFidIsDirGui(client, fid);
+        return if (is_dir) .directory else .file;
+    }
+
+    fn updateFilesystemEntryKind(self: *App, path: []const u8, kind: FilesystemEntryKind) void {
+        for (self.filesystem_entries.items) |*item| {
+            if (!std.mem.eql(u8, item.path, path)) continue;
+            item.kind = kind;
+            return;
+        }
     }
 
     fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
@@ -5103,7 +5138,11 @@ const App = struct {
                 listing_rect.width() - inner * 2.0,
                 list_row_h,
             );
-            const prefix = if (entry.is_dir) "[dir]" else "[file]";
+            const prefix = switch (entry.kind) {
+                .unknown => "[?]",
+                .directory => "[dir]",
+                .file => "[file]",
+            };
             const label = std.fmt.allocPrint(self.allocator, "{s} {s}", .{ prefix, entry.name }) catch null;
             const clicked = if (label) |text| blk: {
                 defer self.allocator.free(text);
@@ -6146,6 +6185,50 @@ const App = struct {
         }
     }
 
+    fn refreshSessionAttachStatusOnce(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        session_key: []const u8,
+    ) void {
+        var status = control_plane.sessionStatusWithTimeout(
+            self.allocator,
+            client,
+            &self.message_counter,
+            session_key,
+            CONTROL_SESSION_STATUS_TIMEOUT_MS,
+        ) catch return;
+        defer status.deinit(self.allocator);
+
+        if (std.mem.eql(u8, status.state, "ready")) {
+            self.session_attach_state = .ready;
+            if (self.connection_state == .connected) {
+                self.setConnectionState(.connected, "Connected");
+            }
+            return;
+        }
+        if (std.mem.eql(u8, status.state, "warming")) {
+            self.session_attach_state = .warming;
+            self.setConnectionState(.connected, "Connected (sandbox warming...)");
+            self.setWorkspaceError("Sandbox runtime is warming. Retry filesystem/chat in a moment.");
+            return;
+        }
+        if (std.mem.eql(u8, status.state, "error")) {
+            self.session_attach_state = .err;
+            const code = status.error_code orelse "runtime_unavailable";
+            const message = status.error_message orelse "runtime unavailable";
+            const formatted = std.fmt.allocPrint(
+                self.allocator,
+                "Sandbox attach error: {s} [{s}]",
+                .{ message, code },
+            ) catch return;
+            defer self.allocator.free(formatted);
+            self.setWorkspaceError(formatted);
+            self.setConnectionState(.connected, "Connected (sandbox error)");
+            return;
+        }
+        self.session_attach_state = .unknown;
+    }
+
     fn attachSessionBindingWithProject(
         self: *App,
         client: *ws_client_mod.WebSocketClient,
@@ -6205,6 +6288,7 @@ const App = struct {
 
         const had_pending_send = self.pending_send_message_id != null;
         self.setConnectionState(.connecting, "Connecting...");
+        self.session_attach_state = .unknown;
         if (self.ws_client) |*existing| {
             while (existing.tryReceive()) |msg| self.allocator.free(msg);
             existing.deinit();
@@ -6324,6 +6408,13 @@ const App = struct {
 
         self.setConnectionState(.connected, "Connected");
         self.settings_panel.focused_field = .none;
+        if (self.ws_client) |*client| {
+            const session_key_for_status = if (self.settings_panel.default_session.items.len > 0)
+                self.settings_panel.default_session.items
+            else
+                "main";
+            self.refreshSessionAttachStatusOnce(client, session_key_for_status);
+        }
 
         // Save URL to config on successful connect.
         // Do not persist fallback tokens into the selected role.
@@ -6429,6 +6520,7 @@ const App = struct {
         self.clearSessions();
         self.debug_stream_enabled = false;
         self.debug_stream_pending = false;
+        self.session_attach_state = .unknown;
         self.clearPendingDebugRequest();
         self.clearWorkspaceData();
         self.clearFilesystemData();
@@ -6491,6 +6583,15 @@ const App = struct {
             try self.appendMessage("system", err_text, null);
             return err;
         };
+        self.refreshSessionAttachStatusOnce(client, session_key);
+        if (self.session_attach_state == .warming) {
+            try self.appendMessage("system", "Sandbox runtime is warming. Retry in a moment.", null);
+            return error.RuntimeWarming;
+        }
+        if (self.session_attach_state == .err) {
+            try self.appendMessage("system", "Sandbox runtime is unavailable for this session.", null);
+            return error.RemoteError;
+        }
 
         const user_msg_id = try self.nextMessageId("msg");
         const appended_user_msg_id = try self.appendMessageWithIdForSession(session_key, "user", text, .sending, user_msg_id);
@@ -6593,11 +6694,13 @@ const App = struct {
         const ok_value = obj.get("ok") orelse return error.InvalidResponse;
         if (ok_value != .bool) return error.InvalidResponse;
         if (ok_value.bool) {
+            self.session_attach_state = .ready;
             self.clearFsrpcRemoteError();
             return;
         }
 
         var detail: ?[]u8 = null;
+        var runtime_warming = false;
         if (obj.get("error")) |err_value| {
             if (err_value == .object) {
                 const err_obj = err_value.object;
@@ -6609,6 +6712,9 @@ const App = struct {
                     if (value == .string) value.string else null
                 else
                     null;
+                if (code) |value| {
+                    if (std.mem.eql(u8, value, "runtime_warming")) runtime_warming = true;
+                }
                 const errno = if (err_obj.get("errno")) |value|
                     if (value == .integer) value.integer else null
                 else
@@ -6637,6 +6743,11 @@ const App = struct {
             self.setFsrpcRemoteError(value);
         } else {
             self.setFsrpcRemoteError("remote fsrpc error");
+        }
+        if (runtime_warming) {
+            self.session_attach_state = .warming;
+            self.setConnectionState(.connected, "Connected (sandbox warming...)");
+            return error.RuntimeWarming;
         }
         return error.RemoteError;
     }

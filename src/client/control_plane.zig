@@ -306,6 +306,56 @@ pub fn workspaceStatus(
     return parseWorkspaceStatus(allocator, parsed.value.object);
 }
 
+pub fn sessionStatus(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    session_key: ?[]const u8,
+) !workspace_types.SessionAttachStatus {
+    return sessionStatusWithTimeout(
+        allocator,
+        client,
+        message_counter,
+        session_key,
+        default_timeout_ms,
+    );
+}
+
+pub fn sessionStatusWithTimeout(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    session_key: ?[]const u8,
+    timeout_ms: i64,
+) !workspace_types.SessionAttachStatus {
+    var payload_req: ?[]u8 = null;
+    defer if (payload_req) |value| allocator.free(value);
+    if (session_key) |value| {
+        const escaped_session = try unified_v2.jsonEscape(allocator, value);
+        defer allocator.free(escaped_session);
+        payload_req = try std.fmt.allocPrint(
+            allocator,
+            "{{\"session_key\":\"{s}\"}}",
+            .{escaped_session},
+        );
+    }
+
+    const payload_json = try requestControlPayloadJsonWithTimeout(
+        allocator,
+        client,
+        message_counter,
+        "control.session_status",
+        if (payload_req) |value| value else null,
+        timeout_ms,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseSessionAttachStatus(allocator, parsed.value.object);
+}
+
 pub fn reconcileStatus(
     allocator: std.mem.Allocator,
     client: anytype,
@@ -447,6 +497,36 @@ fn parseWorkspaceStatus(
     status.last_error = try dupOptionalNullableString(allocator, obj, "last_error");
     status.queue_depth = @intCast(try getOptionalU64(obj, "queue_depth", 0));
 
+    return status;
+}
+
+fn parseSessionAttachStatus(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !workspace_types.SessionAttachStatus {
+    var status = workspace_types.SessionAttachStatus{
+        .session_key = try dupRequiredString(allocator, obj, "session_key"),
+        .agent_id = try dupRequiredString(allocator, obj, "agent_id"),
+        .project_id = try dupOptionalNullableString(allocator, obj, "project_id"),
+        .state = try allocator.dupe(u8, ""),
+        .runtime_ready = false,
+        .mount_ready = false,
+        .error_code = null,
+        .error_message = null,
+        .updated_at_ms = 0,
+    };
+    errdefer status.deinit(allocator);
+
+    const attach_val = obj.get("attach") orelse return error.InvalidResponse;
+    if (attach_val != .object) return error.InvalidResponse;
+    const attach_state = try dupRequiredString(allocator, attach_val.object, "state");
+    allocator.free(status.state);
+    status.state = attach_state;
+    status.runtime_ready = try getOptionalBool(attach_val.object, "runtime_ready", false);
+    status.mount_ready = try getOptionalBool(attach_val.object, "mount_ready", false);
+    status.error_code = try dupOptionalNullableString(allocator, attach_val.object, "error_code");
+    status.error_message = try dupOptionalNullableString(allocator, attach_val.object, "error_message");
+    status.updated_at_ms = try getOptionalI64(attach_val.object, "updated_at_ms", 0);
     return status;
 }
 

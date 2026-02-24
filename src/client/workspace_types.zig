@@ -165,6 +165,28 @@ pub const WorkspaceStatus = struct {
     }
 };
 
+pub const SessionAttachStatus = struct {
+    session_key: []u8,
+    agent_id: []u8,
+    project_id: ?[]u8 = null,
+    state: []u8,
+    runtime_ready: bool = false,
+    mount_ready: bool = false,
+    error_code: ?[]u8 = null,
+    error_message: ?[]u8 = null,
+    updated_at_ms: i64 = 0,
+
+    pub fn deinit(self: *SessionAttachStatus, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_key);
+        allocator.free(self.agent_id);
+        if (self.project_id) |value| allocator.free(value);
+        allocator.free(self.state);
+        if (self.error_code) |value| allocator.free(value);
+        if (self.error_message) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
 pub fn deinitProjectList(allocator: std.mem.Allocator, projects: *std.ArrayListUnmanaged(ProjectSummary)) void {
     for (projects.items) |*project| project.deinit(allocator);
     projects.deinit(allocator);
