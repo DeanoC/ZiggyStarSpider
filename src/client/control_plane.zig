@@ -23,6 +23,24 @@ pub fn requestControlPayloadJson(
     control_type: []const u8,
     payload_json: ?[]const u8,
 ) ![]u8 {
+    return requestControlPayloadJsonWithTimeout(
+        allocator,
+        client,
+        message_counter,
+        control_type,
+        payload_json,
+        default_timeout_ms,
+    );
+}
+
+pub fn requestControlPayloadJsonWithTimeout(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    control_type: []const u8,
+    payload_json: ?[]const u8,
+    timeout_ms: i64,
+) ![]u8 {
     const request_id = try unified_v2.nextRequestId(allocator, message_counter, "control");
     defer allocator.free(request_id);
 
@@ -32,7 +50,7 @@ pub fn requestControlPayloadJson(
         control_type,
         request_id,
         payload_json,
-        default_timeout_ms,
+        timeout_ms,
     );
     defer response.deinit(allocator);
 

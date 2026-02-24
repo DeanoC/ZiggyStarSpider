@@ -50,6 +50,7 @@ const MAX_DEBUG_EVENTS: usize = 500;
 const FSRPC_DEFAULT_TIMEOUT_MS: u32 = 15_000;
 const FSRPC_CHAT_WRITE_TIMEOUT_MS: u32 = 180_000;
 const FSRPC_CLUNK_TIMEOUT_MS: u32 = 1_000;
+const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 45_000;
 
 const ChatAttachment = zui.protocol.types.ChatAttachment;
 const ChatMessage = zui.protocol.types.ChatMessage;
@@ -6014,12 +6015,13 @@ const App = struct {
         );
         defer self.allocator.free(payload_json);
 
-        const response_payload = try control_plane.requestControlPayloadJson(
+        const response_payload = try control_plane.requestControlPayloadJsonWithTimeout(
             self.allocator,
             client,
             &self.message_counter,
             "control.session_attach",
             payload_json,
+            CONTROL_SESSION_ATTACH_TIMEOUT_MS,
         );
         defer self.allocator.free(response_payload);
 
