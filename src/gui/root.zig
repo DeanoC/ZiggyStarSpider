@@ -51,7 +51,7 @@ const MAX_DEBUG_EVENTS: usize = 500;
 const FSRPC_DEFAULT_TIMEOUT_MS: u32 = 15_000;
 const FSRPC_CHAT_WRITE_TIMEOUT_MS: u32 = 180_000;
 const FSRPC_CLUNK_TIMEOUT_MS: u32 = 1_000;
-const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 45_000;
+const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
 
 const ChatAttachment = zui.protocol.types.ChatAttachment;
@@ -3027,6 +3027,7 @@ const App = struct {
     fn clearSelectedProjectAfterAuthFailure(self: *App) void {
         self.settings_panel.project_id.clearRetainingCapacity();
         self.settings_panel.project_token.clearRetainingCapacity();
+        self.session_attach_state = .unknown;
         self.syncSettingsToConfig() catch |err| {
             std.log.warn("Failed to persist cleared selected project after auth failure: {s}", .{@errorName(err)});
         };
@@ -3060,6 +3061,7 @@ const App = struct {
         if (self.config.getProjectToken(project_id)) |token| {
             try self.settings_panel.project_token.appendSlice(self.allocator, token);
         }
+        self.session_attach_state = .unknown;
         try self.syncSettingsToConfig();
     }
 
@@ -3092,6 +3094,9 @@ const App = struct {
         ) catch |err| blk: {
             if (selected_project_id != null and err == error.RemoteError) {
                 if (control_plane.lastRemoteError()) |remote| {
+                    if (isProjectAuthRemoteError(remote)) {
+                        self.clearSelectedProjectAfterAuthFailure();
+                    }
                     selected_project_warning = self.formatControlRemoteMessage("Selected project unavailable", remote);
                 } else {
                     selected_project_warning = std.fmt.allocPrint(self.allocator, "Selected project unavailable: {s}", .{@errorName(err)}) catch null;
@@ -3147,6 +3152,7 @@ const App = struct {
         self.workspace_state = status;
         self.workspace_last_refresh_ms = std.time.milliTimestamp();
         self.clearWorkspaceError();
+        self.session_attach_state = .unknown;
 
         if (self.settings_panel.project_token.items.len == 0) {
             if (token) |value| {
@@ -6387,6 +6393,10 @@ const App = struct {
                         "Session attach with selected project failed; retrying default attach: {s}",
                         .{primary_detail_owned},
                     );
+                    const primary_is_project_auth = isProjectAuthRemoteError(primary_detail_owned);
+                    if (primary_is_project_auth) {
+                        self.clearSelectedProjectAfterAuthFailure();
+                    }
                     var fallback_ok = true;
                     self.attachSessionBindingWithProject(client, attach_session, null, null) catch |fallback_err| {
                         fallback_ok = false;
@@ -6402,8 +6412,7 @@ const App = struct {
                         );
                     };
                     if (fallback_ok) {
-                        if (isProjectAuthRemoteError(primary_detail_owned)) {
-                            self.clearSelectedProjectAfterAuthFailure();
+                        if (primary_is_project_auth) {
                             attach_warning = try self.allocator.dupe(
                                 u8,
                                 "Selected project is not available for this session; connected using default project.",
@@ -6597,43 +6606,48 @@ const App = struct {
             try self.appendMessage("system", "No active session available", null);
             return;
         }
-        self.attachSessionBinding(client, session_key) catch |err| {
-            const primary_detail_owned = try self.allocator.dupe(
-                u8,
-                control_plane.lastRemoteError() orelse @errorName(err),
-            );
-            defer self.allocator.free(primary_detail_owned);
+        if (self.session_attach_state != .ready) {
+            self.attachSessionBinding(client, session_key) catch |err| {
+                const primary_detail_owned = try self.allocator.dupe(
+                    u8,
+                    control_plane.lastRemoteError() orelse @errorName(err),
+                );
+                defer self.allocator.free(primary_detail_owned);
 
-            const has_selected_project = self.selectedProjectId() != null;
-            if (has_selected_project) {
-                self.attachSessionBindingWithProject(client, session_key, null, null) catch |fallback_err| {
-                    const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
-                    const err_text = try std.fmt.allocPrint(
-                        self.allocator,
-                        "Session attach failed: {s} (fallback also failed: {s})",
-                        .{ primary_detail_owned, fallback_detail },
-                    );
+                const has_selected_project = self.selectedProjectId() != null;
+                if (has_selected_project) {
+                    const primary_is_project_auth = isProjectAuthRemoteError(primary_detail_owned);
+                    if (primary_is_project_auth) {
+                        self.clearSelectedProjectAfterAuthFailure();
+                    }
+                    self.attachSessionBindingWithProject(client, session_key, null, null) catch |fallback_err| {
+                        const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
+                        const err_text = try std.fmt.allocPrint(
+                            self.allocator,
+                            "Session attach failed: {s} (fallback also failed: {s})",
+                            .{ primary_detail_owned, fallback_detail },
+                        );
+                        defer self.allocator.free(err_text);
+                        try self.appendMessage("system", err_text, null);
+                        return fallback_err;
+                    };
+
+                    const warning = if (primary_is_project_auth) blk: {
+                        break :blk "Selected project is not available for this session; using default project for this message.";
+                    } else blk: {
+                        break :blk "Selected project attach failed; using default project for this message.";
+                    };
+                    self.setWorkspaceError(warning);
+                    try self.appendMessage("system", warning, null);
+                } else {
+                    const err_text = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
                     defer self.allocator.free(err_text);
                     try self.appendMessage("system", err_text, null);
-                    return fallback_err;
-                };
-
-                const warning = if (isProjectAuthRemoteError(primary_detail_owned)) blk: {
-                    self.clearSelectedProjectAfterAuthFailure();
-                    break :blk "Selected project is not available for this session; using default project for this message.";
-                } else blk: {
-                    break :blk "Selected project attach failed; using default project for this message.";
-                };
-                self.setWorkspaceError(warning);
-                try self.appendMessage("system", warning, null);
-            } else {
-                const err_text = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
-                defer self.allocator.free(err_text);
-                try self.appendMessage("system", err_text, null);
-                return err;
-            }
-        };
-        self.refreshSessionAttachStatusOnce(client, session_key);
+                    return err;
+                }
+            };
+            self.refreshSessionAttachStatusOnce(client, session_key);
+        }
         if (self.session_attach_state == .warming) {
             try self.appendMessage("system", "Sandbox runtime is warming. Retry in a moment.", null);
             return error.RuntimeWarming;
@@ -8512,10 +8526,15 @@ const App = struct {
     }
 
     fn setCurrentSessionKeyOwned(self: *App, key_copy: []const u8) void {
+        var changed = true;
         if (self.current_session_key) |current| {
+            changed = !std.mem.eql(u8, current, key_copy);
             self.allocator.free(current);
         }
         self.current_session_key = key_copy;
+        if (changed) {
+            self.session_attach_state = .unknown;
+        }
     }
 
     fn handleChatPanelAction(self: *App, action: zui.ChatPanelAction) void {
