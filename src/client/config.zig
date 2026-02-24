@@ -375,14 +375,20 @@ pub const Config = struct {
         defer parsed.deinit();
 
         const json = parsed.value;
+        const legacy_token = if (json.auth_token) |value|
+            value
+        else if (json.token) |value|
+            value
+        else
+            "";
         const loaded_admin = if (json.admin_token) |value|
             value
         else
-            "";
+            legacy_token;
         const loaded_user = if (json.user_token) |value|
             value
         else
-            "";
+            legacy_token;
 
         const active_role = parseTokenRole(json.active_role);
 
@@ -456,6 +462,9 @@ pub const Config = struct {
 // JSON-compatible config struct for serialization
 const ConfigJson = struct {
     server_url: ?[]const u8 = null,
+    // Legacy fields kept for backwards-compatible config migration.
+    auth_token: ?[]const u8 = null,
+    token: ?[]const u8 = null,
     admin_token: ?[]const u8 = null,
     user_token: ?[]const u8 = null,
     active_role: ?[]const u8 = null,

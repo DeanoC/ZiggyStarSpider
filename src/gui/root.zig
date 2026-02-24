@@ -6231,10 +6231,11 @@ const App = struct {
             }
         }
 
-        const connect_token = if (self.config.activeRoleToken().len > 0)
-            self.config.activeRoleToken()
+        const selected_role_token = self.config.getRoleToken(self.config.active_role);
+        const connect_token = if (selected_role_token.len > 0)
+            selected_role_token
         else
-            "";
+            self.config.activeRoleToken();
         const ws_client = ws_client_mod.WebSocketClient.init(self.allocator, effective_url, connect_token) catch |err| {
             const msg = try std.fmt.allocPrint(self.allocator, "Client init failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
@@ -6329,8 +6330,11 @@ const App = struct {
         self.setConnectionState(.connected, "Connected");
         self.settings_panel.focused_field = .none;
 
-        // Save URL to config on successful connect
-        self.config.setRoleToken(self.config.active_role, connect_token) catch {};
+        // Save URL to config on successful connect.
+        // Do not persist fallback tokens into the selected role.
+        if (selected_role_token.len > 0) {
+            self.config.setRoleToken(self.config.active_role, connect_token) catch {};
+        }
         if (self.settings_panel.default_session.items.len == 0) {
             try self.settings_panel.default_session.appendSlice(self.allocator, "main");
         }
