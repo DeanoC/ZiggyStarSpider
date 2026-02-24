@@ -6061,7 +6061,10 @@ const App = struct {
             control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter) catch |err| {
                 client.deinit();
                 self.ws_client = null;
-                const msg = try std.fmt.allocPrint(self.allocator, "Handshake failed: {s}", .{@errorName(err)});
+                const msg = if (err == error.RemoteError and control_plane.lastRemoteError()) |remote|
+                    try std.fmt.allocPrint(self.allocator, "Handshake failed: {s}", .{remote})
+                else
+                    try std.fmt.allocPrint(self.allocator, "Handshake failed: {s}", .{@errorName(err)});
                 defer self.allocator.free(msg);
                 self.setConnectionState(.error_state, msg);
                 return;

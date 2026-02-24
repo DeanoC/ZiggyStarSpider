@@ -5,6 +5,13 @@ const logger = @import("ziggy-core").utils.logger;
 // Simplified WebSocket client for ZSS
 // Connects to Spiderweb and handles basic message send/receive
 
+fn normalizedAuthorizationToken(token: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, token, " \t");
+    if (trimmed.len == 0) return null;
+    if (std.ascii.startsWithIgnoreCase(trimmed, "Bearer ")) return trimmed;
+    return null;
+}
+
 pub const WebSocketClient = struct {
     allocator: std.mem.Allocator,
     url: []const u8,
@@ -56,8 +63,15 @@ pub const WebSocketClient = struct {
 
         // Connect with handshake
         var headers_buf: [256]u8 = undefined;
-        const headers = if (self.token.len > 0) blk: {
-            const h = try std.fmt.bufPrint(&headers_buf, "Authorization: {s}\r\n", .{self.token});
+        const headers = if (normalizedAuthorizationToken(self.token)) |existing_bearer| blk: {
+            const h = try std.fmt.bufPrint(&headers_buf, "Authorization: {s}\r\n", .{existing_bearer});
+            break :blk h;
+        } else if (std.mem.trim(u8, self.token, " \t").len > 0) blk: {
+            const h = try std.fmt.bufPrint(
+                &headers_buf,
+                "Authorization: Bearer {s}\r\n",
+                .{std.mem.trim(u8, self.token, " \t")},
+            );
             break :blk h;
         } else null;
 

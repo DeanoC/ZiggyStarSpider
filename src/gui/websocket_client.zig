@@ -58,6 +58,13 @@ const MessageQueue = struct {
     }
 };
 
+fn normalizedAuthorizationToken(token: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, token, " \t");
+    if (trimmed.len == 0) return null;
+    if (std.ascii.startsWithIgnoreCase(trimmed, "Bearer ")) return trimmed;
+    return null;
+}
+
 pub const WebSocketClient = struct {
     allocator: std.mem.Allocator,
     url_buf: []u8,
@@ -115,8 +122,14 @@ pub const WebSocketClient = struct {
         errdefer if (client_owned_locally) client.deinit();
 
         var headers_storage: [512]u8 = undefined;
-        const headers = if (self.token_buf.len > 0)
-            try std.fmt.bufPrint(&headers_storage, "Authorization: {s}\r\n", .{self.token_buf})
+        const headers = if (normalizedAuthorizationToken(self.token_buf)) |existing_bearer|
+            try std.fmt.bufPrint(&headers_storage, "Authorization: {s}\r\n", .{existing_bearer})
+        else if (std.mem.trim(u8, self.token_buf, " \t").len > 0)
+            try std.fmt.bufPrint(
+                &headers_storage,
+                "Authorization: Bearer {s}\r\n",
+                .{std.mem.trim(u8, self.token_buf, " \t")},
+            )
         else
             null;
 
