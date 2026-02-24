@@ -3656,6 +3656,12 @@ const App = struct {
                 "Unable to recover dock layout; no panels available.",
                 self.theme.colors.text_secondary,
             );
+            self.ui_commands.popClip();
+            self.mouse_clicked = saved_mouse_clicked;
+            self.mouse_released = saved_mouse_released;
+            self.mouse_down = saved_mouse_down;
+            _ = self.drawWindowMenuBar(ui_window, fb_width);
+            self.drawStatusOverlay(fb_width, fb_height);
             return;
         }
         // Draw each dock group
@@ -4753,7 +4759,7 @@ const App = struct {
         if (self.projects.items.len > 0) {
             self.drawLabel(rect.min[0] + pad, y, "Project List:", self.theme.colors.text_primary);
             y += layout.label_to_input_gap;
-            const max_projects: usize = @min(self.projects.items.len, 8);
+            const max_projects: usize = self.projects.items.len;
             var idx: usize = 0;
             while (idx < max_projects) : (idx += 1) {
                 const project = self.projects.items[idx];
