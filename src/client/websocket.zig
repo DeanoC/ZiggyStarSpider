@@ -187,7 +187,8 @@ fn parseUrl(allocator: std.mem.Allocator, url: []const u8) !ParsedUrl {
     // Find path
     const path_start = std.mem.indexOf(u8, remaining, "/");
     const host_port = if (path_start) |i| remaining[0..i] else remaining;
-    const path = if (path_start) |i| try allocator.dupe(u8, remaining[i..]) else try allocator.dupe(u8, "/");
+    const raw_path = if (path_start) |i| remaining[i..] else "/";
+    const path = try normalizeControlPath(allocator, raw_path);
 
     // Parse host:port
     const port_start = std.mem.lastIndexOf(u8, host_port, ":");
@@ -200,6 +201,37 @@ fn parseUrl(allocator: std.mem.Allocator, url: []const u8) !ParsedUrl {
         .path = path,
         .tls = tls,
     };
+}
+
+fn normalizeControlPath(allocator: std.mem.Allocator, raw_path: []const u8) ![]u8 {
+    if (raw_path.len == 0 or std.mem.eql(u8, raw_path, "/")) {
+        return allocator.dupe(u8, "/");
+    }
+
+    const trimmed = std.mem.trimRight(u8, raw_path, "/");
+    if (trimmed.len == 0) return allocator.dupe(u8, "/");
+    if (std.mem.eql(u8, trimmed, "/v2/fs")) {
+        logger.warn("URL path /v2/fs is FSRPC-only; using '/' for control connection", .{});
+        return allocator.dupe(u8, "/");
+    }
+
+    return allocator.dupe(u8, raw_path);
+}
+
+test "parseUrl rewrites /v2/fs path to root for control websocket" {
+    const allocator = std.testing.allocator;
+    const parsed = try parseUrl(allocator, "ws://127.0.0.1:18790/v2/fs");
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("/", parsed.path);
+}
+
+test "parseUrl preserves non-fsrpc websocket path" {
+    const allocator = std.testing.allocator;
+    const parsed = try parseUrl(allocator, "ws://127.0.0.1:18790/custom");
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("/custom", parsed.path);
 }
 
 // Simple connection test

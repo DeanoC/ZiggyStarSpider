@@ -322,7 +322,8 @@ fn parseUrl(allocator: std.mem.Allocator, input: []const u8) !ParsedUrl {
 
     const slash = std.mem.indexOfScalar(u8, rest, '/');
     const host_port = if (slash) |idx| rest[0..idx] else rest;
-    const path = if (slash) |idx| try allocator.dupe(u8, rest[idx..]) else try allocator.dupe(u8, "/");
+    const raw_path = if (slash) |idx| rest[idx..] else "/";
+    const path = try normalizeControlPath(allocator, raw_path);
     errdefer allocator.free(path);
 
     const colon = std.mem.lastIndexOfScalar(u8, host_port, ':');
@@ -337,6 +338,40 @@ fn parseUrl(allocator: std.mem.Allocator, input: []const u8) !ParsedUrl {
         .path = path,
         .tls = tls,
     };
+}
+
+fn normalizeControlPath(allocator: std.mem.Allocator, raw_path: []const u8) ![]u8 {
+    if (raw_path.len == 0 or std.mem.eql(u8, raw_path, "/")) {
+        return allocator.dupe(u8, "/");
+    }
+
+    const trimmed = std.mem.trimRight(u8, raw_path, "/");
+    if (trimmed.len == 0) return allocator.dupe(u8, "/");
+    if (std.mem.eql(u8, trimmed, "/v2/fs")) {
+        std.log.warn(
+            "[WS] URL path /v2/fs is FSRPC-only; forcing control connection path to '/'",
+            .{},
+        );
+        return allocator.dupe(u8, "/");
+    }
+
+    return allocator.dupe(u8, raw_path);
+}
+
+test "parseUrl rewrites /v2/fs path to root for control websocket" {
+    const allocator = std.testing.allocator;
+    const parsed = try parseUrl(allocator, "ws://127.0.0.1:18790/v2/fs");
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("/", parsed.path);
+}
+
+test "parseUrl preserves non-fsrpc websocket path" {
+    const allocator = std.testing.allocator;
+    const parsed = try parseUrl(allocator, "ws://127.0.0.1:18790/custom");
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("/custom", parsed.path);
 }
 
 test "MessageQueue preserves FIFO order" {
