@@ -6139,36 +6139,34 @@ const App = struct {
                         "Session attach with selected project failed; retrying default attach: {s}",
                         .{primary_detail_owned},
                     );
+                    var fallback_ok = true;
                     self.attachSessionBindingWithProject(client, attach_session, null, null) catch |fallback_err| {
-                        client.deinit();
-                        self.ws_client = null;
+                        fallback_ok = false;
                         const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
                         std.log.err(
                             "Session attach failed with selected project ({s}); fallback attach also failed ({s})",
                             .{ primary_detail_owned, fallback_detail },
                         );
-                        const msg = try std.fmt.allocPrint(
+                        attach_warning = try std.fmt.allocPrint(
                             self.allocator,
-                            "Session attach failed: {s} (fallback also failed: {s})",
+                            "Session attach failed: {s} (fallback also failed: {s}). Continuing with default server session binding.",
                             .{ primary_detail_owned, fallback_detail },
                         );
-                        defer self.allocator.free(msg);
-                        self.setConnectionState(.error_state, msg);
-                        return;
                     };
+                    if (fallback_ok) {
+                        attach_warning = try std.fmt.allocPrint(
+                            self.allocator,
+                            "Selected project attach failed ({s}); connected using default project. Update project/token in Settings.",
+                            .{primary_detail_owned},
+                        );
+                    }
+                } else {
+                    std.log.err("Session attach failed: {s}", .{primary_detail_owned});
                     attach_warning = try std.fmt.allocPrint(
                         self.allocator,
-                        "Selected project attach failed ({s}); connected using default project. Update project/token in Settings.",
+                        "Session attach failed ({s}); continuing with default server session binding.",
                         .{primary_detail_owned},
                     );
-                } else {
-                    client.deinit();
-                    self.ws_client = null;
-                    std.log.err("Session attach failed: {s}", .{primary_detail_owned});
-                    const msg = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
-                    defer self.allocator.free(msg);
-                    self.setConnectionState(.error_state, msg);
-                    return;
                 }
             };
         }
