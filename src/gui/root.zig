@@ -6141,6 +6141,10 @@ const App = struct {
                         client.deinit();
                         self.ws_client = null;
                         const fallback_detail = control_plane.lastRemoteError() orelse @errorName(fallback_err);
+                        std.log.err(
+                            "Session attach failed with selected project ({s}); fallback attach also failed ({s})",
+                            .{ primary_detail_owned, fallback_detail },
+                        );
                         const msg = try std.fmt.allocPrint(
                             self.allocator,
                             "Session attach failed: {s} (fallback also failed: {s})",
@@ -6158,6 +6162,7 @@ const App = struct {
                 } else {
                     client.deinit();
                     self.ws_client = null;
+                    std.log.err("Session attach failed: {s}", .{primary_detail_owned});
                     const msg = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
                     defer self.allocator.free(msg);
                     self.setConnectionState(.error_state, msg);
