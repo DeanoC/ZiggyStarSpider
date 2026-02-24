@@ -17,8 +17,8 @@
             .hash = "ziggy_spider_protocol-0.1.0-Tn7uq7P_AACCdNT8of7ZtLwbxw3exYjGwAiUH2lCFlyr",
         },
         .ziggy_ui = .{
-            .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/heads/main.tar.gz",
-            .hash = "ziggy_ui-0.1.0-dS4PqMFr8QFYT4IUGQn9uoCu6V3znYFQya05BWb8YE4-",
+            .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/heads/feat/form-layout-and-panel-kinds.tar.gz",
+            .hash = "ziggy_ui-0.1.0-dS4PqBmS8QGQTPfpDBrfeuWhvB4jAovKSX3hiFa-v-A1",
         },
         .sdl3 = .{
             .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",

@@ -27,6 +27,7 @@ const workspace = zui.ui.workspace;
 const panel_manager = zui.ui.panel_manager;
 const dock_graph = zui.ui.layout.dock_graph;
 const dock_drop = zui.ui.layout.dock_drop;
+const form_layout = zui.ui.layout.form_layout;
 const text_buffer = zui.ui.text_buffer;
 
 const Rect = zui.core.Rect;
@@ -57,6 +58,21 @@ const ChatMessageState = zui.protocol.types.LocalChatMessageState;
 const ChatSession = zui.protocol.types.Session;
 
 const ChatPanel = zui.ChatPanel(ChatMessage, ChatSession);
+
+const PanelLayoutMetrics = form_layout.Metrics;
+
+const DockTabMetrics = struct {
+    pad: f32,
+    height: f32,
+    min_width: f32,
+    max_width_ratio: f32,
+};
+
+const FormScrollTarget = enum {
+    none,
+    settings,
+    projects,
+};
 
 const FsrpcEnvelope = struct {
     raw: []u8,
@@ -619,8 +635,9 @@ const SettingsPanel = struct {
     watch_theme_pack: bool = false,
     auto_connect_on_launch: bool = true,
     focused_field: SettingsFocusField = .server_url,
-    // Vertical scroll offset for settings content
-    scroll_y: f32 = 0.0,
+    // Vertical scroll offsets per form panel
+    settings_scroll_y: f32 = 0.0,
+    projects_scroll_y: f32 = 0.0,
 
     pub fn init(allocator: std.mem.Allocator) SettingsPanel {
         var panel = SettingsPanel{};
@@ -834,6 +851,9 @@ const App = struct {
     debug_scrollbar_dragging: bool = false,
     debug_scrollbar_drag_start_y: f32 = 0.0,
     debug_scrollbar_drag_start_scroll_y: f32 = 0.0,
+    form_scroll_drag_target: FormScrollTarget = .none,
+    form_scroll_drag_start_y: f32 = 0.0,
+    form_scroll_drag_start_scroll_y: f32 = 0.0,
     ui_commands: zui.ui.render.command_list.CommandList,
 
     projects: std.ArrayListUnmanaged(workspace_types.ProjectSummary) = .{},
@@ -859,6 +879,7 @@ const App = struct {
 
     theme: *const zui.Theme,
     ui_scale: f32 = 1.0,
+    metrics_context: ui_draw_context.DrawContext,
     config: config_mod.Config,
     client_context: client_state.ClientContext,
     agent_registry: client_agents.AgentRegistry,
@@ -890,6 +911,7 @@ const App = struct {
 
     // UI State for dock
     ui_state: zui.ui.main_window.WindowUiState = .{},
+    windows_menu_open_window_id: ?u32 = null,
     workspace_snapshot: ?workspace.WorkspaceSnapshot = null,
     workspace_snapshot_stale: bool = false,
     workspace_snapshot_restore_attempted: bool = false,
@@ -913,6 +935,7 @@ const App = struct {
 
         // Initialize theme - use clean theme (light mode as default for clean look)
         zui.theme.setMode(.light);
+        zui.ui.theme.setMode(.light);
 
         // Initialize workspace with default panels
         var ws = try workspace.Workspace.initDefault(allocator);
@@ -990,6 +1013,7 @@ const App = struct {
             .status_text = try allocator.dupe(u8, "Not connected"),
             .theme = zui.theme.current(),
             .ui_scale = 1.0,
+            .metrics_context = undefined,
             .config = config,
             .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
             .frame_clock = zapp.frame_clock.FrameClock.init(60),
@@ -997,6 +1021,13 @@ const App = struct {
             .manager = undefined,
         };
         app.applyThemeFromSettings();
+        app.metrics_context = ui_draw_context.DrawContext.init(
+            allocator,
+            .{ .direct = .{} },
+            zui.ui.theme.activeTheme(),
+            UiRect.fromMinSize(.{ 0.0, 0.0 }, .{ 1.0, 1.0 }),
+        );
+        errdefer app.metrics_context.deinit();
 
         app.client_context = try client_state.ClientContext.init(allocator);
         errdefer app.client_context.deinit();
@@ -1085,6 +1116,7 @@ const App = struct {
         self.client_context.deinit();
         self.agent_registry.deinit(self.allocator);
 
+        self.metrics_context.deinit();
         self.ui_commands.deinit();
         self.manager.deinit();
         while (self.ui_windows.items.len > 0) {
@@ -1274,6 +1306,9 @@ const App = struct {
         while (i < self.ui_windows.items.len) : (i += 1) {
             const w = self.ui_windows.items[i];
             if (w.id == window_id and w.id != self.main_window_id) {
+                if (self.windows_menu_open_window_id != null and self.windows_menu_open_window_id.? == w.id) {
+                    self.windows_menu_open_window_id = null;
+                }
                 _ = self.ui_windows.swapRemove(i);
                 if (w.persist_in_workspace) {
                     self.attachDetachedPanelsToMain(w.manager);
@@ -1466,12 +1501,18 @@ const App = struct {
                             self.debug_scroll_y -= mw.delta[1] * 40.0 * self.ui_scale;
                         }
                     }
-                    if (self.settings_panel.focused_field != .none) {
-                        self.settings_panel.scroll_y -= mw.delta[1] * 40.0 * self.ui_scale;
+                    if (self.focusedFormScrollY(manager)) |scroll_y| {
+                        scroll_y.* -= mw.delta[1] * 40.0 * self.ui_scale;
                     }
                 },
                 else => {},
             }
+        }
+        // Only clear active form-scroll drag while processing the main window.
+        // Secondary windows can report mouse-up while the drag is still active
+        // in the source window.
+        if (!self.mouse_down and ui_window.id == self.main_window_id) {
+            self.form_scroll_drag_target = .none;
         }
 
         var dock_area = self.dockViewportForWindow(ui_window) orelse blk: {
@@ -2799,9 +2840,8 @@ const App = struct {
             return;
         }
 
-        const pad = self.theme.spacing.sm;
-        const tab_height: f32 = 28.0 * self.ui_scale;
-        if (tab_height <= 0.0) return;
+        const tab_metrics = self.dockTabMetrics();
+        if (tab_metrics.height <= 0.0) return;
 
         for (layout.slice()) |group| {
             if (!self.isLayoutGroupUsable(manager, group.node_id)) continue;
@@ -2865,22 +2905,23 @@ const App = struct {
 
             if (tabs_node.tabs.items.len == 0) continue;
 
-            var tab_x = group.rect.min[0] + pad;
+            const group_width = group.rect.max[0] - group.rect.min[0];
+            var tab_x = group.rect.min[0] + tab_metrics.pad;
             for (tabs_node.tabs.items, 0..) |panel_id, idx| {
                 const panel = self.findPanelById(manager, panel_id) orelse continue;
-                const tab_width = self.measureText(panel.title) + pad * 2.0;
+                const tab_width = self.dockTabWidth(panel.title, group_width, tab_metrics);
                 const tab_rect = UiRect.fromMinSize(
                     .{ tab_x, group.rect.min[1] },
-                    .{ tab_width, tab_height },
+                    .{ tab_width, tab_metrics.height },
                 );
-                if (tab_rect.min[0] + tab_width > group.rect.max[0]) break;
+                if (tab_rect.min[0] + tab_width > group.rect.max[0] - tab_metrics.pad) break;
                 out_tabs.append(.{
                     .panel_id = panel_id,
                     .node_id = group.node_id,
                     .tab_index = idx,
                     .rect = tab_rect,
                 });
-                tab_x = tab_rect.max[0] + pad;
+                tab_x = tab_rect.max[0] + tab_metrics.pad;
             }
         }
     }
@@ -3041,6 +3082,47 @@ const App = struct {
         return manager.workspace.focused_panel_id != null and manager.workspace.focused_panel_id.? == panel_id;
     }
 
+    fn focusedSettingsBuffer(self: *App) ?*std.ArrayList(u8) {
+        return switch (self.settings_panel.focused_field) {
+            .server_url => &self.settings_panel.server_url,
+            .project_id => &self.settings_panel.project_id,
+            .project_token => &self.settings_panel.project_token,
+            .project_create_name => &self.settings_panel.project_create_name,
+            .project_create_vision => &self.settings_panel.project_create_vision,
+            .project_operator_token => &self.settings_panel.project_operator_token,
+            .default_session => &self.settings_panel.default_session,
+            .ui_theme => &self.settings_panel.ui_theme,
+            .ui_profile => &self.settings_panel.ui_profile,
+            .ui_theme_pack => &self.settings_panel.ui_theme_pack,
+            .none => null,
+        };
+    }
+
+    fn popLastUtf8Codepoint(buf: *std.ArrayList(u8)) void {
+        if (buf.items.len == 0) return;
+        var idx = buf.items.len;
+        while (idx > 0) {
+            idx -= 1;
+            if ((buf.items[idx] & 0xC0) != 0x80) {
+                buf.shrinkRetainingCapacity(idx);
+                return;
+            }
+        }
+        buf.clearRetainingCapacity();
+    }
+
+    fn appendSingleLineText(
+        self: *App,
+        buf: *std.ArrayList(u8),
+        text: []const u8,
+    ) !void {
+        for (text) |ch| {
+            if (ch == '\n' or ch == '\r') continue;
+            if (ch < 0x20) continue;
+            try buf.append(self.allocator, ch);
+        }
+    }
+
     fn handleKeyDownEvent(self: *App, key_evt: anytype, request_spawn_window: *bool, manager: *panel_manager.PanelManager) !void {
         switch (key_evt.key) {
             .escape => {
@@ -3057,21 +3139,11 @@ const App = struct {
                 }
             },
             .v => {
-                if (self.settings_panel.focused_field != .none and key_evt.mods.ctrl and !key_evt.repeat) {
+                if (key_evt.mods.ctrl and !key_evt.repeat) {
                     const clip = zapp.clipboard.getTextZ();
                     if (clip.len > 0) {
-                        switch (self.settings_panel.focused_field) {
-                            .server_url => try self.settings_panel.server_url.appendSlice(self.allocator, clip),
-                            .project_id => try self.settings_panel.project_id.appendSlice(self.allocator, clip),
-                            .project_token => try self.settings_panel.project_token.appendSlice(self.allocator, clip),
-                            .project_create_name => try self.settings_panel.project_create_name.appendSlice(self.allocator, clip),
-                            .project_create_vision => try self.settings_panel.project_create_vision.appendSlice(self.allocator, clip),
-                            .project_operator_token => try self.settings_panel.project_operator_token.appendSlice(self.allocator, clip),
-                            .default_session => try self.settings_panel.default_session.appendSlice(self.allocator, clip),
-                            .ui_theme => try self.settings_panel.ui_theme.appendSlice(self.allocator, clip),
-                            .ui_profile => try self.settings_panel.ui_profile.appendSlice(self.allocator, clip),
-                            .ui_theme_pack => try self.settings_panel.ui_theme_pack.appendSlice(self.allocator, clip),
-                            .none => {},
+                        if (self.focusedSettingsBuffer()) |buf| {
+                            try self.appendSingleLineText(buf, clip);
                         }
                     }
                 }
@@ -3117,49 +3189,13 @@ const App = struct {
                 }
             },
             .back_space => {
-                if (self.settings_panel.focused_field == .server_url and self.settings_panel.server_url.items.len > 0) {
-                    _ = self.settings_panel.server_url.pop();
-                } else if (self.settings_panel.focused_field == .project_id and self.settings_panel.project_id.items.len > 0) {
-                    _ = self.settings_panel.project_id.pop();
-                } else if (self.settings_panel.focused_field == .project_token and self.settings_panel.project_token.items.len > 0) {
-                    _ = self.settings_panel.project_token.pop();
-                } else if (self.settings_panel.focused_field == .project_create_name and self.settings_panel.project_create_name.items.len > 0) {
-                    _ = self.settings_panel.project_create_name.pop();
-                } else if (self.settings_panel.focused_field == .project_create_vision and self.settings_panel.project_create_vision.items.len > 0) {
-                    _ = self.settings_panel.project_create_vision.pop();
-                } else if (self.settings_panel.focused_field == .project_operator_token and self.settings_panel.project_operator_token.items.len > 0) {
-                    _ = self.settings_panel.project_operator_token.pop();
-                } else if (self.settings_panel.focused_field == .default_session and self.settings_panel.default_session.items.len > 0) {
-                    _ = self.settings_panel.default_session.pop();
-                } else if (self.settings_panel.focused_field == .ui_theme and self.settings_panel.ui_theme.items.len > 0) {
-                    _ = self.settings_panel.ui_theme.pop();
-                } else if (self.settings_panel.focused_field == .ui_profile and self.settings_panel.ui_profile.items.len > 0) {
-                    _ = self.settings_panel.ui_profile.pop();
-                } else if (self.settings_panel.focused_field == .ui_theme_pack and self.settings_panel.ui_theme_pack.items.len > 0) {
-                    _ = self.settings_panel.ui_theme_pack.pop();
+                if (self.focusedSettingsBuffer()) |buf| {
+                    popLastUtf8Codepoint(buf);
                 }
             },
             .delete => {
-                if (self.settings_panel.focused_field == .server_url and self.settings_panel.server_url.items.len > 0) {
-                    _ = self.settings_panel.server_url.pop();
-                } else if (self.settings_panel.focused_field == .project_id and self.settings_panel.project_id.items.len > 0) {
-                    _ = self.settings_panel.project_id.pop();
-                } else if (self.settings_panel.focused_field == .project_token and self.settings_panel.project_token.items.len > 0) {
-                    _ = self.settings_panel.project_token.pop();
-                } else if (self.settings_panel.focused_field == .project_create_name and self.settings_panel.project_create_name.items.len > 0) {
-                    _ = self.settings_panel.project_create_name.pop();
-                } else if (self.settings_panel.focused_field == .project_create_vision and self.settings_panel.project_create_vision.items.len > 0) {
-                    _ = self.settings_panel.project_create_vision.pop();
-                } else if (self.settings_panel.focused_field == .project_operator_token and self.settings_panel.project_operator_token.items.len > 0) {
-                    _ = self.settings_panel.project_operator_token.pop();
-                } else if (self.settings_panel.focused_field == .default_session and self.settings_panel.default_session.items.len > 0) {
-                    _ = self.settings_panel.default_session.pop();
-                } else if (self.settings_panel.focused_field == .ui_theme and self.settings_panel.ui_theme.items.len > 0) {
-                    _ = self.settings_panel.ui_theme.pop();
-                } else if (self.settings_panel.focused_field == .ui_profile and self.settings_panel.ui_profile.items.len > 0) {
-                    _ = self.settings_panel.ui_profile.pop();
-                } else if (self.settings_panel.focused_field == .ui_theme_pack and self.settings_panel.ui_theme_pack.items.len > 0) {
-                    _ = self.settings_panel.ui_theme_pack.pop();
+                if (self.focusedSettingsBuffer()) |buf| {
+                    popLastUtf8Codepoint(buf);
                 }
             },
             .page_up => {
@@ -3169,8 +3205,10 @@ const App = struct {
                         if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
                     }
                 }
-                self.settings_panel.scroll_y -= 200.0 * self.ui_scale;
-                if (self.settings_panel.scroll_y < 0.0) self.settings_panel.scroll_y = 0.0;
+                if (self.focusedFormScrollY(manager)) |scroll_y| {
+                    scroll_y.* -= 200.0 * self.ui_scale;
+                    if (scroll_y.* < 0.0) scroll_y.* = 0.0;
+                }
             },
             .page_down => {
                 if (self.debug_panel_id) |panel_id| {
@@ -3178,7 +3216,9 @@ const App = struct {
                         self.debug_scroll_y += 200.0 * self.ui_scale;
                     }
                 }
-                self.settings_panel.scroll_y += 200.0 * self.ui_scale;
+                if (self.focusedFormScrollY(manager)) |scroll_y| {
+                    scroll_y.* += 200.0 * self.ui_scale;
+                }
             },
             .home => {
                 if (self.debug_panel_id) |panel_id| {
@@ -3186,7 +3226,9 @@ const App = struct {
                         self.debug_scroll_y = 0.0;
                     }
                 }
-                self.settings_panel.scroll_y = 0.0;
+                if (self.focusedFormScrollY(manager)) |scroll_y| {
+                    scroll_y.* = 0.0;
+                }
             },
             .end => {
                 if (self.debug_panel_id) |panel_id| {
@@ -3195,8 +3237,10 @@ const App = struct {
                         self.debug_scroll_y += 1_000_000.0;
                     }
                 }
-                // Move far down; clamped during render
-                self.settings_panel.scroll_y += 1_000_000.0;
+                if (self.focusedFormScrollY(manager)) |scroll_y| {
+                    // Move far down; clamped during render
+                    scroll_y.* += 1_000_000.0;
+                }
             },
             .up_arrow => {
                 if (self.debug_panel_id) |panel_id| {
@@ -3205,8 +3249,10 @@ const App = struct {
                         if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
                     }
                 }
-                self.settings_panel.scroll_y -= 40.0 * self.ui_scale;
-                if (self.settings_panel.scroll_y < 0.0) self.settings_panel.scroll_y = 0.0;
+                if (self.focusedFormScrollY(manager)) |scroll_y| {
+                    scroll_y.* -= 40.0 * self.ui_scale;
+                    if (scroll_y.* < 0.0) scroll_y.* = 0.0;
+                }
             },
             .down_arrow => {
                 if (self.debug_panel_id) |panel_id| {
@@ -3214,7 +3260,9 @@ const App = struct {
                         self.debug_scroll_y += 40.0 * self.ui_scale;
                     }
                 }
-                self.settings_panel.scroll_y += 40.0 * self.ui_scale;
+                if (self.focusedFormScrollY(manager)) |scroll_y| {
+                    scroll_y.* += 40.0 * self.ui_scale;
+                }
             },
             else => {},
         }
@@ -3222,79 +3270,8 @@ const App = struct {
 
     fn handleTextInput(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
-
-        switch (self.settings_panel.focused_field) {
-            .server_url => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.settings_panel.server_url.append(self.allocator, ch);
-                    }
-                }
-            },
-            .project_id => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.settings_panel.project_id.append(self.allocator, ch);
-                    }
-                }
-            },
-            .project_token => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.settings_panel.project_token.append(self.allocator, ch);
-                    }
-                }
-            },
-            .project_create_name => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.settings_panel.project_create_name.append(self.allocator, ch);
-                    }
-                }
-            },
-            .project_create_vision => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.settings_panel.project_create_vision.append(self.allocator, ch);
-                    }
-                }
-            },
-            .project_operator_token => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.settings_panel.project_operator_token.append(self.allocator, ch);
-                    }
-                }
-            },
-            .default_session => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.settings_panel.default_session.append(self.allocator, ch);
-                    }
-                }
-            },
-            .ui_theme => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.settings_panel.ui_theme.append(self.allocator, ch);
-                    }
-                }
-            },
-            .ui_profile => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.settings_panel.ui_profile.append(self.allocator, ch);
-                    }
-                }
-            },
-            .ui_theme_pack => {
-                for (text) |ch| {
-                    if (ch >= 32 and ch < 127) {
-                        try self.settings_panel.ui_theme_pack.append(self.allocator, ch);
-                    }
-                }
-            },
-            .none => {},
+        if (self.focusedSettingsBuffer()) |buf| {
+            try self.appendSingleLineText(buf, text);
         }
     }
 
@@ -3602,11 +3579,17 @@ const App = struct {
         else
             .light;
         zui.theme.setMode(mode);
+        const ui_mode: zui.ui.theme.Mode = switch (mode) {
+            .light => .light,
+            .dark => .dark,
+        };
+        zui.ui.theme.setMode(ui_mode);
         self.theme = zui.theme.current();
     }
 
     fn drawFrame(self: *App, ui_window: *UiWindow) void {
         self.theme = zui.theme.current();
+        self.metrics_context.setTheme(zui.ui.theme.activeTheme());
         self.render_input_queue = &ui_window.queue;
         defer self.render_input_queue = null;
 
@@ -3635,9 +3618,11 @@ const App = struct {
         defer ui_draw_context.clearGlobalCommandList();
 
         const status_height: f32 = 24.0 * self.ui_scale;
+        const menu_height = self.windowMenuBarHeight();
+        const dock_height = @max(1.0, @as(f32, @floatFromInt(fb_height)) - status_height - menu_height);
         const viewport = UiRect.fromMinSize(
-            .{ 0, 0 },
-            .{ @floatFromInt(fb_width), @as(f32, @floatFromInt(fb_height)) - status_height },
+            .{ 0, menu_height },
+            .{ @floatFromInt(fb_width), dock_height },
         );
 
         // Draw background
@@ -3647,6 +3632,21 @@ const App = struct {
         );
 
         ui_window.ui_state.last_dock_content_rect = viewport;
+
+        const mouse_in_viewport = self.mouse_x >= viewport.min[0] and
+            self.mouse_x <= viewport.max[0] and
+            self.mouse_y >= viewport.min[1] and
+            self.mouse_y <= viewport.max[1];
+        const saved_mouse_clicked = self.mouse_clicked;
+        const saved_mouse_released = self.mouse_released;
+        const saved_mouse_down = self.mouse_down;
+        if (!mouse_in_viewport) {
+            self.mouse_clicked = false;
+            self.mouse_released = false;
+            self.mouse_down = false;
+        }
+
+        self.ui_commands.pushClip(.{ .min = viewport.min, .max = viewport.max });
 
         var layout: dock_graph.LayoutResult = .{};
         if (!self.collectDockLayoutSafe(ui_window.manager, viewport, &layout)) {
@@ -3659,6 +3659,12 @@ const App = struct {
                 "Unable to recover dock layout; no panels available.",
                 self.theme.colors.text_secondary,
             );
+            self.ui_commands.popClip();
+            self.mouse_clicked = saved_mouse_clicked;
+            self.mouse_released = saved_mouse_released;
+            self.mouse_down = saved_mouse_down;
+            _ = self.drawWindowMenuBar(ui_window, fb_width);
+            self.drawStatusOverlay(fb_width, fb_height);
             return;
         }
         // Draw each dock group
@@ -3674,8 +3680,154 @@ const App = struct {
         var drag_drop_targets = DockDropTargetList{};
         self.collectDockInteractionGeometry(ui_window.manager, viewport, &drag_tab_hits, &drag_drop_targets);
         self.drawDockDragOverlay(&ui_window.queue, ui_window.manager, ui_window, &drag_drop_targets, viewport);
+        self.ui_commands.popClip();
+        self.mouse_clicked = saved_mouse_clicked;
+        self.mouse_released = saved_mouse_released;
+        self.mouse_down = saved_mouse_down;
 
+        _ = self.drawWindowMenuBar(ui_window, fb_width);
         self.drawStatusOverlay(fb_width, fb_height);
+    }
+
+    fn windowMenuBarHeight(self: *App) f32 {
+        const layout = self.panelLayoutMetrics();
+        return @max(layout.button_height + layout.inner_inset * 1.2, 30.0 * self.ui_scale);
+    }
+
+    fn drawWindowMenuBar(self: *App, ui_window: *UiWindow, fb_width: u32) f32 {
+        const layout = self.panelLayoutMetrics();
+        const bar_h = self.windowMenuBarHeight();
+        const bar_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), bar_h);
+        self.ui_commands.pushRect(
+            .{ .min = bar_rect.min, .max = bar_rect.max },
+            .{ .fill = self.theme.colors.background, .stroke = self.theme.colors.border },
+        );
+
+        const button_y = bar_rect.min[1] + @max(0.0, (bar_h - layout.button_height) * 0.5);
+        const button_label_open = "Windows [^]";
+        const button_label_closed = "Windows [v]";
+        const button_w = @max(
+            132.0 * self.ui_scale,
+            self.measureText(button_label_open) + layout.inner_inset * 2.4,
+        );
+        const menu_button_rect = Rect.fromXYWH(layout.inset, button_y, button_w, layout.button_height);
+        const menu_open_for_window = self.windows_menu_open_window_id != null and
+            self.windows_menu_open_window_id.? == ui_window.id;
+
+        if (self.drawButtonWidget(
+            menu_button_rect,
+            if (menu_open_for_window) button_label_open else button_label_closed,
+            .{ .variant = .secondary },
+        )) {
+            if (menu_open_for_window) {
+                self.windows_menu_open_window_id = null;
+            } else {
+                self.windows_menu_open_window_id = ui_window.id;
+            }
+        }
+
+        var dropdown_rect: ?Rect = null;
+        if (self.windows_menu_open_window_id != null and self.windows_menu_open_window_id.? == ui_window.id) {
+            const row_h = layout.button_height;
+            const row_gap = @max(1.0, layout.inner_inset * 0.2);
+            const menu_w = @max(
+                272.0 * self.ui_scale,
+                self.measureText("Filesystem Browser (Open/Focus)") + layout.inner_inset * 2.8,
+            );
+            const rows: usize = 6;
+            const menu_h = layout.inner_inset * 2.0 +
+                row_h * @as(f32, @floatFromInt(rows)) +
+                row_gap * @as(f32, @floatFromInt(rows - 1));
+            const menu_x = layout.inset;
+            const menu_y = bar_rect.max[1] + @max(1.0, layout.inner_inset * 0.3);
+            const menu_rect = Rect.fromXYWH(menu_x, menu_y, menu_w, menu_h);
+            dropdown_rect = menu_rect;
+
+            self.drawSurfacePanel(menu_rect);
+            self.drawRect(menu_rect, self.theme.colors.border);
+
+            var row_y = menu_rect.min[1] + layout.inner_inset;
+            const row_x = menu_rect.min[0] + layout.inner_inset;
+            const row_w = menu_rect.width() - layout.inner_inset * 2.0;
+
+            const workspace_open = ui_window.manager.hasPanel(.Control) or ui_window.manager.hasPanel(.Settings);
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                if (workspace_open) "Workspace (Focus)" else "Workspace (Open)",
+                .{ .variant = .secondary },
+            )) {
+                self.ensureWorkspacePanel(ui_window.manager);
+                self.windows_menu_open_window_id = null;
+            }
+            row_y += row_h + row_gap;
+
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                if (ui_window.manager.hasPanel(.Chat)) "Chat (Focus)" else "Chat (Open)",
+                .{ .variant = .secondary },
+            )) {
+                ui_window.manager.ensurePanel(.Chat);
+                self.windows_menu_open_window_id = null;
+            }
+            row_y += row_h + row_gap;
+
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                if (self.hasPanelWithTitle(ui_window.manager, "Projects") or self.project_panel_id != null) "Projects (Focus)" else "Projects (Open)",
+                .{ .variant = .secondary },
+            )) {
+                _ = self.ensureProjectPanel(ui_window.manager) catch |err| {
+                    std.log.err("Windows menu failed to open Projects: {s}", .{@errorName(err)});
+                };
+                self.windows_menu_open_window_id = null;
+            }
+            row_y += row_h + row_gap;
+
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                if (self.hasPanelWithTitle(ui_window.manager, "Filesystem Browser") or self.filesystem_panel_id != null) "Filesystem Browser (Focus)" else "Filesystem Browser (Open)",
+                .{ .variant = .secondary },
+            )) {
+                _ = self.ensureFilesystemPanel(ui_window.manager) catch |err| {
+                    std.log.err("Windows menu failed to open Filesystem Browser: {s}", .{@errorName(err)});
+                };
+                self.windows_menu_open_window_id = null;
+            }
+            row_y += row_h + row_gap;
+
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                if (self.hasPanelWithTitle(ui_window.manager, "Debug Stream") or self.debug_panel_id != null) "Debug Stream (Focus)" else "Debug Stream (Open)",
+                .{ .variant = .secondary },
+            )) {
+                _ = self.ensureDebugPanel(ui_window.manager) catch |err| {
+                    std.log.err("Windows menu failed to open Debug Stream: {s}", .{@errorName(err)});
+                };
+                self.windows_menu_open_window_id = null;
+            }
+            row_y += row_h + row_gap;
+
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                "Spawn New Window",
+                .{ .variant = .secondary },
+            )) {
+                self.spawnUiWindow() catch |err| {
+                    std.log.err("Windows menu failed to create window: {s}", .{@errorName(err)});
+                };
+                self.windows_menu_open_window_id = null;
+            }
+        }
+
+        if (self.mouse_clicked and self.windows_menu_open_window_id != null and self.windows_menu_open_window_id.? == ui_window.id) {
+            const in_button = menu_button_rect.contains(.{ self.mouse_x, self.mouse_y });
+            const in_dropdown = if (dropdown_rect) |rect| rect.contains(.{ self.mouse_x, self.mouse_y }) else false;
+            if (!in_button and !in_dropdown) {
+                self.windows_menu_open_window_id = null;
+            }
+        }
+
+        return bar_h;
     }
 
     fn drawUnavailableWorkspaceFrame(self: *App, ui_window: *UiWindow, message: []const u8) void {
@@ -3795,10 +3947,12 @@ const App = struct {
         var label_buf: [256]u8 = undefined;
         const text = std.fmt.bufPrint(&label_buf, "{s} -> {s}", .{ panel.title, hint }) catch panel.title;
         const text_w = self.measureText(text);
-        const pad = self.theme.spacing.xs;
+        const line_height = self.textLineHeight();
+        const pad = @max(self.theme.spacing.xs, 4.0 * self.ui_scale);
+        const offset = @max(self.theme.spacing.md * 0.9, 12.0 * self.ui_scale);
         const label_rect = UiRect.fromMinSize(
-            .{ queue.state.mouse_pos[0] + 14.0, queue.state.mouse_pos[1] + 14.0 },
-            .{ text_w + pad * 2.0, (18.0 * self.ui_scale) + pad * 2.0 },
+            .{ queue.state.mouse_pos[0] + offset, queue.state.mouse_pos[1] + offset },
+            .{ text_w + pad * 2.0, line_height + pad * 2.0 },
         );
         self.ui_commands.pushRect(
             .{ .min = label_rect.min, .max = label_rect.max },
@@ -3879,10 +4033,10 @@ const App = struct {
         return true;
     }
 
-    fn computeSplitRect(rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { first: UiRect, second: UiRect } {
+    fn computeSplitRect(self: *App, rect: UiRect, axis: dock_graph.Axis, ratio: f32) struct { first: UiRect, second: UiRect } {
         const size = rect.size();
         const clamped_ratio = std.math.clamp(ratio, 0.1, 0.9);
-        const gap: f32 = 6.0;
+        const gap = self.dockSplitGap();
         if (axis == .vertical) {
             const avail = @max(0.0, size[0] - gap);
             const first_w = avail * clamped_ratio;
@@ -3997,8 +4151,9 @@ const App = struct {
 
     fn drawTabsPanel(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode, rect: UiRect) void {
         if (!self.isTabsNodeUsable(manager, tabs)) return;
-        const pad = self.theme.spacing.sm;
-        const tab_height: f32 = 28.0 * self.ui_scale;
+        const line_height = self.textLineHeight();
+        const tab_metrics = self.dockTabMetrics();
+        const tab_height = tab_metrics.height;
 
         // Draw panel background
         self.ui_commands.pushRect(
@@ -4016,7 +4171,8 @@ const App = struct {
             .{ .fill = self.theme.colors.background },
         );
 
-        var tab_x = rect.min[0] + pad;
+        var tab_x = rect.min[0] + tab_metrics.pad;
+        const rect_w = rect.max[0] - rect.min[0];
         var active_tab_id = if (tabs.active < tabs.tabs.items.len)
             tabs.tabs.items[tabs.active]
         else
@@ -4035,7 +4191,8 @@ const App = struct {
             const panel = self.findPanelById(manager, panel_id) orelse continue;
             const is_active = panel_id == active_tab_id;
 
-            const tab_width = self.measureText(panel.title) + pad * 2.0;
+            const desired_tab_width = self.measureText(panel.title) + tab_metrics.pad * 2.0;
+            const tab_width = self.dockTabWidth(panel.title, rect_w, tab_metrics);
             const tab_rect = UiRect.fromMinSize(
                 .{ tab_x, rect.min[1] },
                 .{ tab_width, tab_height },
@@ -4058,14 +4215,24 @@ const App = struct {
             );
 
             // Tab text
-            self.drawText(
-                tab_x + pad,
-                rect.min[1] + 6.0,
-                panel.title,
-                self.theme.colors.text_primary,
-            );
+            if (desired_tab_width > tab_width) {
+                self.drawTextTrimmed(
+                    tab_x + tab_metrics.pad,
+                    rect.min[1] + @max(0.0, (tab_height - line_height) * 0.5),
+                    tab_width - tab_metrics.pad * 2.0,
+                    panel.title,
+                    self.theme.colors.text_primary,
+                );
+            } else {
+                self.drawText(
+                    tab_x + tab_metrics.pad,
+                    rect.min[1] + @max(0.0, (tab_height - line_height) * 0.5),
+                    panel.title,
+                    self.theme.colors.text_primary,
+                );
+            }
 
-            tab_x += tab_width + pad;
+            tab_x += tab_width + tab_metrics.pad;
         }
 
         // Draw content area for active tab
@@ -4075,6 +4242,8 @@ const App = struct {
         );
 
         if (active_tab_id) |panel_id| {
+            self.ui_commands.pushClip(.{ .min = content_rect.min, .max = content_rect.max });
+            defer self.ui_commands.popClip();
             self.drawPanelContent(manager, panel_id, content_rect);
         }
     }
@@ -4112,6 +4281,7 @@ const App = struct {
 
     fn drawPanelContent(self: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId, rect: UiRect) void {
         const panel = self.findPanelById(manager, panel_id) orelse return;
+        const inset = self.panelLayoutMetrics().inset;
 
         switch (panel.kind) {
             .Chat => {
@@ -4127,10 +4297,19 @@ const App = struct {
                     self.drawProjectPanel(manager, rect);
                 } else if (self.filesystem_panel_id != null and self.filesystem_panel_id.? == panel.id) {
                     self.drawFilesystemPanel(manager, rect);
+                } else if (std.mem.eql(u8, panel.title, "Debug Stream")) {
+                    self.debug_panel_id = panel.id;
+                    self.drawDebugPanel(manager, rect);
+                } else if (std.mem.eql(u8, panel.title, "Projects")) {
+                    self.project_panel_id = panel.id;
+                    self.drawProjectPanel(manager, rect);
+                } else if (std.mem.eql(u8, panel.title, "Filesystem Browser")) {
+                    self.filesystem_panel_id = panel.id;
+                    self.drawFilesystemPanel(manager, rect);
                 } else {
                     self.drawText(
-                        rect.min[0] + 20,
-                        rect.min[1] + 20,
+                        rect.min[0] + inset,
+                        rect.min[1] + inset,
                         panel.title,
                         self.theme.colors.text_primary,
                     );
@@ -4139,8 +4318,8 @@ const App = struct {
             else => {
                 // Draw placeholder for other panel types
                 self.drawText(
-                    rect.min[0] + 20,
-                    rect.min[1] + 20,
+                    rect.min[0] + inset,
+                    rect.min[1] + inset,
                     panel.title,
                     self.theme.colors.text_primary,
                 );
@@ -4149,30 +4328,20 @@ const App = struct {
     }
 
     fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        const pad = self.theme.spacing.md;
-        var y = rect.min[1] + pad - self.settings_panel.scroll_y;
+        const layout = self.panelLayoutMetrics();
+        const pad = layout.inset;
+        var y = rect.min[1] + pad - self.settings_panel.settings_scroll_y;
         const rect_width = rect.max[0] - rect.min[0];
-        const input_height: f32 = 32.0 * self.ui_scale;
+        const input_height = layout.input_height;
+        const button_height = layout.button_height;
+        const input_width = @max(220.0, rect_width - pad * 2.0);
 
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "ZiggyStarSpider - Settings",
-            self.theme.colors.text_primary,
-        );
-        y += 30.0 * self.ui_scale;
-
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Server URL",
-            self.theme.colors.text_primary,
-        );
-        y += 20.0 * self.ui_scale;
+        self.drawFormSectionTitle(rect.min[0] + pad, &y, input_width, layout, "ZiggyStarSpider - Settings");
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Server URL");
         const input_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200.0, rect_width - pad * 2.0),
+            input_width,
             input_height,
         );
         const url_focused = self.drawTextInputWidget(
@@ -4183,18 +4352,12 @@ const App = struct {
         );
         if (url_focused) self.settings_panel.focused_field = .server_url;
 
-        y += input_height + pad;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Default session",
-            self.theme.colors.text_primary,
-        );
-        y += 20.0 * self.ui_scale;
+        y += input_height + layout.row_gap;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Default session");
         const default_session_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200.0, rect_width - pad * 2.0),
+            input_width,
             input_height,
         );
         const default_session_focused = self.drawTextInputWidget(
@@ -4205,18 +4368,12 @@ const App = struct {
         );
         if (default_session_focused) self.settings_panel.focused_field = .default_session;
 
-        y += input_height + pad;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "UI Theme",
-            self.theme.colors.text_primary,
-        );
-        y += 20.0 * self.ui_scale;
+        y += input_height + layout.row_gap;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Theme");
         const ui_theme_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200.0, rect_width - pad * 2.0),
+            input_width,
             input_height,
         );
         const ui_theme_focused = self.drawTextInputWidget(
@@ -4227,18 +4384,12 @@ const App = struct {
         );
         if (ui_theme_focused) self.settings_panel.focused_field = .ui_theme;
 
-        y += input_height + pad;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "UI Profile",
-            self.theme.colors.text_primary,
-        );
-        y += 20.0 * self.ui_scale;
+        y += input_height + layout.row_gap;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Profile");
         const ui_profile_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200.0, rect_width - pad * 2.0),
+            input_width,
             input_height,
         );
         const ui_profile_focused = self.drawTextInputWidget(
@@ -4249,18 +4400,12 @@ const App = struct {
         );
         if (ui_profile_focused) self.settings_panel.focused_field = .ui_profile;
 
-        y += input_height + pad;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "UI Theme Pack",
-            self.theme.colors.text_primary,
-        );
-        y += 20.0 * self.ui_scale;
+        y += input_height + layout.row_gap;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Theme Pack");
         const ui_theme_pack_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200.0, rect_width - pad * 2.0),
+            input_width,
             input_height,
         );
         const ui_theme_pack_focused = self.drawTextInputWidget(
@@ -4271,7 +4416,7 @@ const App = struct {
         );
         if (ui_theme_pack_focused) self.settings_panel.focused_field = .ui_theme_pack;
 
-        y += input_height + pad * 0.5;
+        y += input_height + layout.section_gap * 0.55;
         const watch_button_label = if (self.settings_panel.watch_theme_pack)
             "Watch Theme Pack: On"
         else
@@ -4279,8 +4424,8 @@ const App = struct {
         const watch_button_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200.0, rect_width * 0.65),
-            input_height,
+            @max(220.0, rect_width * 0.62),
+            button_height,
         );
         if (self.drawButtonWidget(
             watch_button_rect,
@@ -4290,8 +4435,7 @@ const App = struct {
             self.settings_panel.watch_theme_pack = !self.settings_panel.watch_theme_pack;
         }
 
-        y += input_height + pad;
-        const button_height: f32 = 32.0 * self.ui_scale;
+        y += button_height + layout.row_gap;
         const auto_connect_label = if (self.settings_panel.auto_connect_on_launch)
             "Auto Connect: On"
         else
@@ -4299,7 +4443,7 @@ const App = struct {
         const auto_connect_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(200.0, rect_width * 0.55),
+            @max(220.0, rect_width * 0.52),
             button_height,
         );
         if (self.drawButtonWidget(
@@ -4320,8 +4464,8 @@ const App = struct {
             self.settings_panel.focused_field = .none;
         }
 
-        const button_width: f32 = 140.0 * self.ui_scale;
-        const action_row_y = y + button_height + pad;
+        const button_width: f32 = @max(148.0 * self.ui_scale, rect_width * 0.25);
+        const action_row_y = y + button_height + layout.section_gap;
         const connect_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             action_row_y,
@@ -4353,50 +4497,46 @@ const App = struct {
             };
         }
 
-        const open_project_rect = Rect.fromXYWH(
+        self.drawTextTrimmed(
             save_rect.max[0] + pad,
-            action_row_y,
-            @max(button_width, 190.0 * self.ui_scale),
-            button_height,
+            action_row_y + @max(0.0, (button_height - layout.line_height) * 0.5),
+            @max(120.0, rect_width - (save_rect.max[0] - rect.min[0]) - pad * 2.0),
+            "Open panels from Windows menu (top bar).",
+            self.theme.colors.text_secondary,
         );
-        if (self.drawButtonWidget(
-            open_project_rect,
-            "Open Project Panel",
-            .{ .variant = .secondary },
-        )) {
-            _ = self.ensureProjectPanel(manager) catch |err| {
-                std.log.err("Failed to open project panel: {s}", .{@errorName(err)});
-            };
-        }
 
-        const content_bottom_scrolled = action_row_y + button_height + pad;
-        const content_bottom = content_bottom_scrolled + self.settings_panel.scroll_y;
+        const content_bottom_scrolled = action_row_y + button_height + layout.row_gap;
+        const content_bottom = content_bottom_scrolled + self.settings_panel.settings_scroll_y;
         const total_height = content_bottom - (rect.min[1] + pad);
         const viewport_h = @max(0.0, rect.max[1] - rect.min[1] - pad * 2.0);
         const max_scroll = if (total_height > viewport_h) total_height - viewport_h else 0.0;
-        if (self.settings_panel.scroll_y < 0.0) self.settings_panel.scroll_y = 0.0;
-        if (self.settings_panel.scroll_y > max_scroll) self.settings_panel.scroll_y = max_scroll;
+        if (self.settings_panel.settings_scroll_y < 0.0) self.settings_panel.settings_scroll_y = 0.0;
+        if (self.settings_panel.settings_scroll_y > max_scroll) self.settings_panel.settings_scroll_y = max_scroll;
+        const scroll_view_rect = Rect.fromXYWH(rect.min[0], rect.min[1] + pad, rect_width, viewport_h);
+        self.drawVerticalScrollbar(.settings, scroll_view_rect, total_height, &self.settings_panel.settings_scroll_y);
     }
 
     fn drawProjectPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        const pad = self.theme.spacing.md;
-        var y = rect.min[1] + pad - self.settings_panel.scroll_y;
+        _ = manager;
+        const layout = self.panelLayoutMetrics();
+        const pad = layout.inset;
+        var y = rect.min[1] + pad - self.settings_panel.projects_scroll_y;
         const rect_width = rect.max[0] - rect.min[0];
-        const input_height: f32 = 32.0 * self.ui_scale;
+        const input_height = layout.input_height;
+        const button_height = layout.button_height;
+        const input_width = @max(220.0, rect_width - pad * 2.0);
 
-        self.drawLabel(rect.min[0] + pad, y, "Project Workspace", self.theme.colors.text_primary);
-        y += 26.0 * self.ui_scale;
+        self.drawFormSectionTitle(rect.min[0] + pad, &y, input_width, layout, "Project Workspace");
 
         if (self.settings_panel.focused_field == .project_id) {
             self.settings_panel.focused_field = .none;
         }
 
-        self.drawLabel(rect.min[0] + pad, y, "Selected Project", self.theme.colors.text_primary);
-        y += 20.0 * self.ui_scale;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Selected Project");
         const project_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(220.0, rect_width - pad * 2.0),
+            input_width,
             input_height,
         );
         if (self.projects.items.len == 0) self.project_selector_open = false;
@@ -4420,94 +4560,25 @@ const App = struct {
             break :blk selected_id;
         };
 
-        var selector_label_buf: ?[]u8 = null;
-        defer if (selector_label_buf) |value| self.allocator.free(value);
-        const selector_label: []const u8 = blk: {
-            const suffix = if (self.project_selector_open) "[^]" else "[v]";
-            selector_label_buf = std.fmt.allocPrint(
-                self.allocator,
-                "{s} {s}",
-                .{ selected_project_label, suffix },
-            ) catch null;
-            if (selector_label_buf) |value| break :blk value;
-            break :blk selected_project_label;
-        };
-
         if (self.drawButtonWidget(
             project_rect,
-            selector_label,
+            selected_project_label,
             .{ .variant = .secondary, .disabled = self.projects.items.len == 0 },
         )) {
-            self.project_selector_open = !self.project_selector_open;
+            self.project_selector_open = false;
             self.settings_panel.focused_field = .none;
         }
 
         y += input_height;
-        var project_dropdown_rect: ?Rect = null;
-        if (self.project_selector_open and self.projects.items.len > 0) {
-            const row_height = input_height;
-            const dropdown_project_count: usize = self.projects.items.len;
-            const dropdown_height = row_height * @as(f32, @floatFromInt(dropdown_project_count));
-            const dropdown_y = y + 2.0 * self.ui_scale;
-            const dropdown_rect = Rect.fromXYWH(
-                project_rect.min[0],
-                dropdown_y,
-                project_rect.width(),
-                dropdown_height,
-            );
-            project_dropdown_rect = dropdown_rect;
-            self.drawSurfacePanel(dropdown_rect);
-            self.drawRect(dropdown_rect, self.theme.colors.border);
+        const project_dropdown_rect: ?Rect = null;
+        self.project_selector_open = false;
 
-            var idx: usize = 0;
-            while (idx < dropdown_project_count) : (idx += 1) {
-                const project = self.projects.items[idx];
-                const row_rect = Rect.fromXYWH(
-                    dropdown_rect.min[0],
-                    dropdown_rect.min[1] + row_height * @as(f32, @floatFromInt(idx)),
-                    dropdown_rect.width(),
-                    row_height,
-                );
-                const is_selected = self.settings_panel.project_id.items.len > 0 and
-                    std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
-
-                const row_label_buf: ?[]u8 = std.fmt.allocPrint(
-                    self.allocator,
-                    "{s} ({s})",
-                    .{ project.name, project.id },
-                ) catch null;
-                const row_label = if (row_label_buf) |value| value else project.id;
-                defer if (row_label_buf) |value| self.allocator.free(value);
-
-                if (self.drawButtonWidget(
-                    row_rect,
-                    row_label,
-                    .{
-                        .variant = if (is_selected) .primary else .secondary,
-                        .disabled = false,
-                    },
-                )) {
-                    self.selectProjectInSettings(project.id) catch |err| {
-                        const msg = std.fmt.allocPrint(self.allocator, "Project select failed: {s}", .{@errorName(err)}) catch null;
-                        if (msg) |text| {
-                            defer self.allocator.free(text);
-                            self.setWorkspaceError(text);
-                        }
-                    };
-                    self.project_selector_open = false;
-                }
-            }
-
-            y = dropdown_rect.max[1];
-        }
-
-        y += pad * 0.5;
-        self.drawLabel(rect.min[0] + pad, y, "Project Token (required unless primary agent)", self.theme.colors.text_primary);
-        y += 20.0 * self.ui_scale;
+        y += layout.row_gap * 0.65;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Project Token (required unless primary agent)");
         const project_token_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(220.0, rect_width - pad * 2.0),
+            input_width,
             input_height,
         );
         const project_token_focused = self.drawTextInputWidget(
@@ -4518,13 +4589,12 @@ const App = struct {
         );
         if (project_token_focused) self.settings_panel.focused_field = .project_token;
 
-        y += input_height + pad;
-        self.drawLabel(rect.min[0] + pad, y, "Create Project Name", self.theme.colors.text_primary);
-        y += 20.0 * self.ui_scale;
+        y += input_height + layout.row_gap;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Create Project Name");
         const create_name_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(220.0, rect_width - pad * 2.0),
+            input_width,
             input_height,
         );
         const create_name_focused = self.drawTextInputWidget(
@@ -4535,13 +4605,12 @@ const App = struct {
         );
         if (create_name_focused) self.settings_panel.focused_field = .project_create_name;
 
-        y += input_height + pad * 0.5;
-        self.drawLabel(rect.min[0] + pad, y, "Create Vision (optional)", self.theme.colors.text_primary);
-        y += 20.0 * self.ui_scale;
+        y += input_height + layout.row_gap * 0.8;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Create Vision (optional)");
         const create_vision_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(220.0, rect_width - pad * 2.0),
+            input_width,
             input_height,
         );
         const create_vision_focused = self.drawTextInputWidget(
@@ -4552,13 +4621,12 @@ const App = struct {
         );
         if (create_vision_focused) self.settings_panel.focused_field = .project_create_vision;
 
-        y += input_height + pad * 0.5;
-        self.drawLabel(rect.min[0] + pad, y, "Operator Token (optional)", self.theme.colors.text_primary);
-        y += 20.0 * self.ui_scale;
+        y += input_height + layout.row_gap * 0.8;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Operator Token (optional)");
         const operator_token_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(220.0, rect_width - pad * 2.0),
+            input_width,
             input_height,
         );
         const operator_token_focused = self.drawTextInputWidget(
@@ -4569,9 +4637,8 @@ const App = struct {
         );
         if (operator_token_focused) self.settings_panel.focused_field = .project_operator_token;
 
-        y += input_height + pad;
-        const button_height: f32 = 32.0 * self.ui_scale;
-        const button_width: f32 = @max(140.0, rect_width * 0.3);
+        y += input_height + layout.section_gap;
+        const button_width: f32 = @max(152.0 * self.ui_scale, rect_width * 0.28);
         const create_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
         const refresh_rect = Rect.fromXYWH(create_rect.max[0] + pad, y, button_width, button_height);
         const activate_rect = Rect.fromXYWH(refresh_rect.max[0] + pad, y, button_width, button_height);
@@ -4621,30 +4688,25 @@ const App = struct {
             };
         }
 
-        y += button_height + pad;
-        const fs_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
-        const debug_rect = Rect.fromXYWH(fs_rect.max[0] + pad, y, button_width, button_height);
-        if (self.drawButtonWidget(fs_rect, "Open Filesystem", .{ .variant = .secondary })) {
-            _ = self.ensureFilesystemPanel(manager) catch |err| {
-                std.log.err("Failed to open filesystem panel: {s}", .{@errorName(err)});
-            };
-        }
-        if (self.drawButtonWidget(debug_rect, "Open Debug", .{ .variant = .secondary })) {
-            _ = self.ensureDebugPanel(manager) catch |err| {
-                std.log.err("Failed to open debug panel: {s}", .{@errorName(err)});
-            };
-        }
+        y += button_height + layout.row_gap;
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y + @max(0.0, (button_height - layout.line_height) * 0.5),
+            input_width,
+            "Open Filesystem and Debug panels from the Windows menu.",
+            self.theme.colors.text_secondary,
+        );
 
-        y += button_height + pad;
-        const status_height: f32 = 32.0 * self.ui_scale;
+        y += button_height + layout.section_gap;
+        const status_height: f32 = @max(layout.line_height + layout.inner_inset * 2.2, 32.0 * self.ui_scale);
         const status_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(220.0, rect_width - pad * 2.0),
+            input_width,
             status_height,
         );
         self.drawStatusRow(status_rect);
-        y += status_height + pad;
+        y += status_height + layout.row_gap;
 
         if (self.workspace_last_error) |err_text| {
             self.drawLabel(
@@ -4653,7 +4715,7 @@ const App = struct {
                 err_text,
                 zcolors.rgba(220, 80, 80, 255),
             );
-            y += 18.0 * self.ui_scale;
+            y += layout.line_height;
         }
 
         const selected_project_text = if (self.settings_panel.project_id.items.len > 0)
@@ -4668,7 +4730,7 @@ const App = struct {
         if (selected_project_line) |line| {
             defer self.allocator.free(line);
             self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
-            y += 18.0 * self.ui_scale;
+            y += layout.line_height;
         }
 
         if (self.workspace_state) |*status| {
@@ -4681,7 +4743,7 @@ const App = struct {
             if (workspace_line) |line| {
                 defer self.allocator.free(line);
                 self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
-                y += 18.0 * self.ui_scale;
+                y += layout.line_height;
             }
         }
 
@@ -4693,15 +4755,40 @@ const App = struct {
         if (projects_line) |line| {
             defer self.allocator.free(line);
             self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
-            y += 18.0 * self.ui_scale;
+            y += layout.line_height;
         }
+        y += layout.row_gap * 0.6;
 
         if (self.projects.items.len > 0) {
             self.drawLabel(rect.min[0] + pad, y, "Project List:", self.theme.colors.text_primary);
-            y += 18.0 * self.ui_scale;
-            const max_projects: usize = @min(self.projects.items.len, 8);
-            var idx: usize = 0;
+            y += layout.label_to_input_gap;
+            const row_h = @max(layout.button_height * 0.86, layout.line_height + layout.inner_inset);
+            const row_gap = @max(1.0, layout.inner_inset * 0.3);
+            const row_step = row_h + row_gap;
+            const list_top = y;
+            const list_bottom = rect.max[1] + self.settings_panel.projects_scroll_y;
+            const visible_start_idx: usize = @intFromFloat(@max(
+                0.0,
+                @floor((rect.min[1] - list_top) / row_step),
+            ));
+            const visible_end_idx_unclamped: usize = @intFromFloat(@max(
+                0.0,
+                @ceil((list_bottom - list_top) / row_step),
+            ));
+            const max_projects: usize = self.projects.items.len;
+            const visible_end_idx = @min(max_projects, visible_end_idx_unclamped + 1);
+
+            if (visible_start_idx > 0) {
+                y += row_step * @as(f32, @floatFromInt(visible_start_idx));
+            }
+
+            var idx: usize = visible_start_idx;
             while (idx < max_projects) : (idx += 1) {
+                if (idx >= visible_end_idx) {
+                    const remaining = max_projects - idx;
+                    y += row_step * @as(f32, @floatFromInt(remaining));
+                    break;
+                }
                 const project = self.projects.items[idx];
                 const line = std.fmt.allocPrint(
                     self.allocator,
@@ -4710,12 +4797,12 @@ const App = struct {
                 ) catch null;
                 if (line) |value| {
                     defer self.allocator.free(value);
-                    const row_h: f32 = 20.0 * self.ui_scale;
-                    const button_w: f32 = 84.0 * self.ui_scale;
+                    const button_w = @max(90.0 * self.ui_scale, rect_width * 0.17);
                     const text_max_w = @max(120.0, rect_width - (pad * 2.0) - button_w - pad);
+                    const text_y = y + @max(0.0, (row_h - layout.line_height) * 0.5);
                     self.drawTextTrimmed(
                         rect.min[0] + pad,
-                        y,
+                        text_y,
                         text_max_w,
                         value,
                         self.theme.colors.text_secondary,
@@ -4724,7 +4811,7 @@ const App = struct {
                         std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
                     const use_rect = Rect.fromXYWH(
                         rect.min[0] + pad + text_max_w + pad,
-                        y - 2.0 * self.ui_scale,
+                        y,
                         button_w,
                         row_h,
                     );
@@ -4741,15 +4828,15 @@ const App = struct {
                             }
                         };
                     }
-                    y += row_h;
+                    y += row_step;
                 }
             }
         }
 
         if (self.nodes.items.len > 0) {
-            y += 6.0 * self.ui_scale;
+            y += layout.section_gap * 0.45;
             self.drawLabel(rect.min[0] + pad, y, "Nodes:", self.theme.colors.text_primary);
-            y += 18.0 * self.ui_scale;
+            y += layout.label_to_input_gap;
             const max_nodes: usize = @min(self.nodes.items.len, 8);
             var idx: usize = 0;
             while (idx < max_nodes) : (idx += 1) {
@@ -4762,7 +4849,7 @@ const App = struct {
                 if (line) |value| {
                     defer self.allocator.free(value);
                     self.drawLabel(rect.min[0] + pad, y, value, self.theme.colors.text_secondary);
-                    y += 16.0 * self.ui_scale;
+                    y += layout.line_height;
                 }
             }
         }
@@ -4785,12 +4872,14 @@ const App = struct {
         }
 
         const content_bottom_scrolled = y;
-        const content_bottom = content_bottom_scrolled + self.settings_panel.scroll_y;
+        const content_bottom = content_bottom_scrolled + self.settings_panel.projects_scroll_y;
         const total_height = content_bottom - (rect.min[1] + pad);
         const viewport_h = @max(0.0, rect.max[1] - rect.min[1] - pad * 2.0);
         const max_scroll = if (total_height > viewport_h) total_height - viewport_h else 0.0;
-        if (self.settings_panel.scroll_y < 0.0) self.settings_panel.scroll_y = 0.0;
-        if (self.settings_panel.scroll_y > max_scroll) self.settings_panel.scroll_y = max_scroll;
+        if (self.settings_panel.projects_scroll_y < 0.0) self.settings_panel.projects_scroll_y = 0.0;
+        if (self.settings_panel.projects_scroll_y > max_scroll) self.settings_panel.projects_scroll_y = max_scroll;
+        const scroll_view_rect = Rect.fromXYWH(rect.min[0], rect.min[1] + pad, rect_width, viewport_h);
+        self.drawVerticalScrollbar(.projects, scroll_view_rect, total_height, &self.settings_panel.projects_scroll_y);
     }
 
     fn pathWithinMount(path: []const u8, mount_path: []const u8) bool {
@@ -4922,12 +5011,16 @@ const App = struct {
 
     fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         _ = manager;
-        const pad = self.theme.spacing.md;
+        const layout = self.panelLayoutMetrics();
+        const pad = layout.inset;
+        const inner = layout.inner_inset;
         var y = rect.min[1] + pad;
         const width = rect.max[0] - rect.min[0];
+        const row_h = layout.button_height;
+        const content_width = @max(220.0, width - pad * 2.0);
 
         self.drawLabel(rect.min[0] + pad, y, "Filesystem Browser", self.theme.colors.text_primary);
-        y += 24.0 * self.ui_scale;
+        y += layout.title_gap;
 
         const path_label = if (self.filesystem_path.items.len > 0)
             self.filesystem_path.items
@@ -4936,12 +5029,11 @@ const App = struct {
         const path_line = std.fmt.allocPrint(self.allocator, "Path: {s}", .{path_label}) catch null;
         if (path_line) |line| {
             defer self.allocator.free(line);
-            self.drawTextTrimmed(rect.min[0] + pad, y, width - pad * 2.0, line, self.theme.colors.text_secondary);
+            self.drawTextTrimmed(rect.min[0] + pad, y, content_width, line, self.theme.colors.text_secondary);
         }
-        y += 20.0 * self.ui_scale;
+        y += layout.line_height + layout.row_gap * 0.55;
 
-        const row_h: f32 = 30.0 * self.ui_scale;
-        const action_w: f32 = @max(120.0, width * 0.22);
+        const action_w: f32 = @max(124.0, width * 0.21);
         const refresh_rect = Rect.fromXYWH(rect.min[0] + pad, y, action_w, row_h);
         const up_rect = Rect.fromXYWH(refresh_rect.max[0] + pad, y, action_w, row_h);
         const root_rect = Rect.fromXYWH(up_rect.max[0] + pad, y, action_w * 1.35, row_h);
@@ -5006,32 +5098,34 @@ const App = struct {
             };
         }
 
-        y += row_h + pad;
+        y += row_h + layout.row_gap;
         if (self.filesystem_error) |err_text| {
             self.drawTextTrimmed(
                 rect.min[0] + pad,
                 y,
-                width - pad * 2.0,
+                content_width,
                 err_text,
                 zcolors.rgba(220, 80, 80, 255),
             );
-            y += 18.0 * self.ui_scale;
+            y += layout.line_height;
         }
 
-        const listing_height = @max(120.0, (rect.max[1] - y - pad * 2.0) * 0.52);
-        const listing_rect = Rect.fromXYWH(rect.min[0] + pad, y, @max(220.0, width - pad * 2.0), listing_height);
+        const listing_height = @max(140.0, (rect.max[1] - y - pad * 2.0) * 0.52);
+        const listing_rect = Rect.fromXYWH(rect.min[0] + pad, y, content_width, listing_height);
         self.drawSurfacePanel(listing_rect);
 
-        var list_y = listing_rect.min[1] + 6.0;
+        const list_row_h = @max(layout.button_height * 0.8, layout.line_height + inner * 0.9);
+        const list_row_gap = @max(1.0, inner * 0.35);
+        var list_y = listing_rect.min[1] + inner;
         const max_rows: usize = @min(self.filesystem_entries.items.len, 14);
         var idx: usize = 0;
         while (idx < max_rows and idx < self.filesystem_entries.items.len) : (idx += 1) {
             const entry = self.filesystem_entries.items[idx];
             const row_rect = Rect.fromXYWH(
-                listing_rect.min[0] + 6.0,
+                listing_rect.min[0] + inner,
                 list_y,
-                listing_rect.width() - 12.0,
-                22.0 * self.ui_scale,
+                listing_rect.width() - inner * 2.0,
+                list_row_h,
             );
             const prefix = if (entry.is_dir) "[dir]" else "[file]";
             const label = std.fmt.allocPrint(self.allocator, "{s} {s}", .{ prefix, entry.name }) catch null;
@@ -5057,7 +5151,7 @@ const App = struct {
                     defer self.allocator.free(text);
                     self.drawTextTrimmed(
                         row_rect.min[0] + @max(80.0, row_rect.width() * 0.5),
-                        row_rect.min[1] + 5.0 * self.ui_scale,
+                        row_rect.min[1] + @max(0.0, (row_rect.height() - layout.line_height) * 0.5),
                         row_rect.width() * 0.46,
                         text,
                         self.theme.colors.primary,
@@ -5065,14 +5159,14 @@ const App = struct {
                 }
             }
 
-            list_y += 24.0 * self.ui_scale;
+            list_y += list_row_h + list_row_gap;
         }
 
         y = listing_rect.max[1] + pad;
         const preview_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(220.0, width - pad * 2.0),
+            content_width,
             @max(100.0, rect.max[1] - y - pad),
         );
         self.drawSurfacePanel(preview_rect);
@@ -5082,18 +5176,18 @@ const App = struct {
         else
             "(select a file to preview)";
         self.drawTextTrimmed(
-            preview_rect.min[0] + 6.0,
-            preview_rect.min[1] + 6.0,
-            preview_rect.width() - 12.0,
+            preview_rect.min[0] + inner,
+            preview_rect.min[1] + inner,
+            preview_rect.width() - inner * 2.0,
             preview_title,
             self.theme.colors.text_secondary,
         );
 
         if (self.filesystem_preview_text) |text| {
             _ = self.drawTextWrapped(
-                preview_rect.min[0] + 6.0,
-                preview_rect.min[1] + 26.0,
-                preview_rect.width() - 12.0,
+                preview_rect.min[0] + inner,
+                preview_rect.min[1] + inner + layout.line_height + layout.row_gap * 0.5,
+                preview_rect.width() - inner * 2.0,
                 text,
                 self.theme.colors.text_primary,
             );
@@ -5103,12 +5197,16 @@ const App = struct {
     fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         _ = manager;
 
-        const pad = self.theme.spacing.md;
-        const row_height: f32 = 32.0 * self.ui_scale;
-        const line_height: f32 = 16.0 * self.ui_scale;
-        const event_gap: f32 = 4.0 * self.ui_scale;
+        const layout = self.panelLayoutMetrics();
+        const pad = layout.inset;
+        const inner = layout.inner_inset;
+        const line_height = layout.line_height;
+        const row_height = layout.button_height;
+        const event_gap = @max(2.0 * self.ui_scale, inner * 0.35);
         var y = rect.min[1] + pad;
         const width = rect.max[0] - rect.min[0];
+        const content_width = @max(240.0, width - pad * 2.0);
+        const scrollbar_reserved = @max(14.0, 8.0 * self.ui_scale + inner);
 
         self.drawLabel(
             rect.min[0] + pad,
@@ -5116,7 +5214,7 @@ const App = struct {
             "SpiderWeb Debug Stream",
             self.theme.colors.text_primary,
         );
-        y += 28.0 * self.ui_scale;
+        y += layout.title_gap;
 
         const status_text = if (self.debug_stream_pending)
             "Status: updating subscription..."
@@ -5130,7 +5228,7 @@ const App = struct {
             status_text,
             self.theme.colors.text_secondary,
         );
-        y += 20.0 * self.ui_scale;
+        y += line_height;
 
         self.drawLabel(
             rect.min[0] + pad,
@@ -5138,7 +5236,7 @@ const App = struct {
             "Fold nested JSON with [+]/[-].",
             self.theme.colors.text_secondary,
         );
-        y += 22.0 * self.ui_scale;
+        y += line_height + layout.row_gap * 0.45;
 
         const toggle_rect = Rect.fromXYWH(
             rect.min[0] + pad,
@@ -5158,36 +5256,36 @@ const App = struct {
             };
         }
 
-        y += row_height + pad;
+        y += row_height + layout.row_gap;
         const output_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
-            @max(240.0, width - pad * 2.0),
+            content_width,
             @max(120.0, rect.max[1] - y - pad),
         );
         self.debug_output_rect = output_rect;
         self.drawSurfacePanel(output_rect);
 
-        const usable_height = @max(0.0, output_rect.height() - 12.0);
+        const usable_height = @max(0.0, output_rect.height() - inner * 2.0);
         if (usable_height <= 0) return;
 
         var have_copy_rect = false;
         var copy_btn_rect: Rect = Rect.fromXYWH(0, 0, 0, 0);
         if (self.debug_selected_index) |_| {
-            const copy_btn_w: f32 = 80.0 * self.ui_scale;
-            const copy_btn_h: f32 = 24.0 * self.ui_scale;
+            const copy_btn_w: f32 = @max(84.0 * self.ui_scale, layout.line_height * 4.1);
+            const copy_btn_h: f32 = @max(layout.button_height * 0.74, 24.0 * self.ui_scale);
             copy_btn_rect = Rect.fromXYWH(
-                output_rect.max[0] - copy_btn_w - 4.0,
-                output_rect.min[1] + 4.0,
+                output_rect.max[0] - copy_btn_w - inner * 0.5,
+                output_rect.min[1] + inner * 0.5,
                 copy_btn_w,
                 copy_btn_h,
             );
             have_copy_rect = true;
         }
 
-        var total_content_height: f32 = 12.0;
+        var total_content_height: f32 = inner * 2.0;
         for (self.debug_events.items) |entry| {
-            const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - 14.0, entry);
+            const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry);
             const visible_lines = 1 + payload_visible_rows;
             total_content_height += line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
         }
@@ -5198,9 +5296,9 @@ const App = struct {
         self.ui_commands.pushClip(.{ .min = output_rect.min, .max = output_rect.max });
         defer self.ui_commands.popClip();
 
-        var cur_y = output_rect.min[1] + 6.0 - self.debug_scroll_y;
+        var cur_y = output_rect.min[1] + inner - self.debug_scroll_y;
         for (self.debug_events.items, 0..) |entry, idx| {
-            const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - 14.0, entry);
+            const payload_visible_rows = self.countVisibleDebugPayloadRows(output_rect.min[0], output_rect.max[0] - scrollbar_reserved, entry);
             const visible_lines = 1 + payload_visible_rows;
             const entry_h = line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
 
@@ -5217,8 +5315,8 @@ const App = struct {
                 self.drawFilledRect(entry_rect, select_color);
             }
 
-            const content_max_x = output_rect.max[0] - 14.0;
-            self.drawDebugEventHeaderLine(output_rect.min[0] + 8.0, cur_y, content_max_x, entry);
+            const content_max_x = output_rect.max[0] - scrollbar_reserved;
+            self.drawDebugEventHeaderLine(output_rect.min[0] + inner + 2.0, cur_y, content_max_x, entry);
 
             var clicked_fold_marker = false;
             var line_y = cur_y + line_height;
@@ -5226,8 +5324,8 @@ const App = struct {
             while (payload_line_idx < entry.payload_lines.items.len) {
                 const meta = entry.payload_lines.items[payload_line_idx];
                 const line = entry.payload_json[meta.start..meta.end];
-                const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * 6.5 * self.ui_scale;
-                const line_x_base = output_rect.min[0] + 8.0 + indent_width;
+                const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
+                const line_x_base = output_rect.min[0] + inner + 2.0 + indent_width;
                 const content_start = @min(meta.indent_spaces, line.len);
                 const content = line[content_start..];
 
@@ -5276,10 +5374,10 @@ const App = struct {
         if (max_scroll > 0) {
             const sb_width: f32 = 8.0 * self.ui_scale;
             const sb_track_rect = Rect.fromXYWH(
-                output_rect.max[0] - sb_width - 2.0,
-                output_rect.min[1] + 2.0,
+                output_rect.max[0] - sb_width - inner * 0.35,
+                output_rect.min[1] + inner * 0.35,
                 sb_width,
-                output_rect.height() - 4.0,
+                output_rect.height() - inner * 0.7,
             );
 
             const thumb_height = @max(20.0, sb_track_rect.height() * (output_rect.height() / total_content_height));
@@ -5386,7 +5484,7 @@ const App = struct {
         while (line_index < entry.payload_lines.items.len) {
             const meta = entry.payload_lines.items[line_index];
             const line = entry.payload_json[meta.start..meta.end];
-            const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * 6.5 * self.ui_scale;
+            const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * self.measureText(" ");
             const line_x_base = output_min_x + 8.0 + indent_width;
             const content_start = @min(meta.indent_spaces, line.len);
             const content = line[content_start..];
@@ -5409,7 +5507,7 @@ const App = struct {
     }
 
     fn measureJsonLineWrapRows(self: *App, line_x: f32, max_x: f32, line: []const u8) usize {
-        const line_height: f32 = 16.0 * self.ui_scale;
+        const line_height = self.textLineHeight();
         const available_w = @max(1.0, max_x - line_x);
         const h = self.measureTextWrappedHeight(available_w, line);
 
@@ -5437,6 +5535,7 @@ const App = struct {
     fn drawDebugEventHeaderLine(self: *App, x: f32, y: f32, max_x: f32, entry: DebugEventEntry) void {
         var ts_buf: [64]u8 = undefined;
         const ts = std.fmt.bufPrint(&ts_buf, "{d}", .{entry.timestamp_ms}) catch "0";
+        const line_height = self.textLineHeight();
 
         // Use a fixed timestamp column so category text never overlaps when
         // text measurement is slightly off relative to actual glyph widths.
@@ -5460,7 +5559,7 @@ const App = struct {
                 const remaining = max_x - badge_x;
                 if (remaining > 40.0 * self.ui_scale) {
                     const badge_w = @min(remaining, self.measureText(text) + 10.0 * self.ui_scale);
-                    const badge_h = 14.0 * self.ui_scale;
+                    const badge_h = line_height;
                     const badge_rect = Rect.fromXYWH(
                         badge_x,
                         y + 1.0 * self.ui_scale,
@@ -5495,7 +5594,7 @@ const App = struct {
     }
 
     fn wrappedLineBreak(self: *App, wrap_x: f32, cursor_x: *f32, cursor_y: *f32, rows: *usize) void {
-        const line_height: f32 = 16.0 * self.ui_scale;
+        const line_height = self.textLineHeight();
         cursor_x.* = wrap_x;
         cursor_y.* += line_height;
         rows.* += 1;
@@ -5503,18 +5602,19 @@ const App = struct {
 
     fn maxFittingPrefix(self: *App, text: []const u8, max_w: f32) usize {
         if (text.len == 0 or max_w <= 0.0) return 0;
-
-        var low: usize = 0;
-        var high: usize = text.len;
-        while (low < high) {
-            const mid = low + (high - low + 1) / 2;
-            if (self.measureText(text[0..mid]) <= max_w) {
-                low = mid;
-            } else {
-                high = mid - 1;
-            }
+        var width: f32 = 0.0;
+        var idx: usize = 0;
+        var best_end: usize = 0;
+        while (idx < text.len) {
+            const next = nextUtf8Boundary(text, idx);
+            if (next <= idx) break;
+            const glyph_w = self.measureText(text[idx..next]);
+            if (width + glyph_w > max_w) break;
+            width += glyph_w;
+            best_end = next;
+            idx = next;
         }
-        return low;
+        return best_end;
     }
 
     fn drawJsonTokenWrapped(
@@ -5537,10 +5637,11 @@ const App = struct {
                     self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
                     continue;
                 }
-                const single = token[start .. start + 1];
+                const next = nextUtf8Boundary(token, start);
+                const single = token[start..next];
                 self.drawText(cursor_x.*, cursor_y.*, single, color);
                 cursor_x.* += self.measureText(single);
-                start += 1;
+                start = next;
                 continue;
             }
 
@@ -5551,10 +5652,11 @@ const App = struct {
                     self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
                     continue;
                 }
-                const single = rest[0..1];
+                const next = nextUtf8Boundary(rest, 0);
+                const single = rest[0..next];
                 self.drawText(cursor_x.*, cursor_y.*, single, color);
                 cursor_x.* += self.measureText(single);
-                start += 1;
+                start += next;
                 continue;
             }
 
@@ -5769,7 +5871,11 @@ const App = struct {
     fn drawStatusRow(self: *App, rect: Rect) void {
         self.drawSurfacePanel(rect);
 
-        const indicator = Rect.fromXYWH(rect.min[0] + 8.0, rect.min[1] + 8.0, 12.0, 12.0);
+        const inner = @max(self.theme.spacing.xs, 6.0 * self.ui_scale);
+        const line_height = self.textLineHeight();
+        const indicator_size = @max(10.0 * self.ui_scale, line_height * 0.58);
+        const indicator_y = rect.min[1] + @max(0.0, (rect.height() - indicator_size) * 0.5);
+        const indicator = Rect.fromXYWH(rect.min[0] + inner, indicator_y, indicator_size, indicator_size);
         const dot = switch (self.connection_state) {
             .disconnected => zcolors.rgba(200, 80, 80, 255),
             .connecting => zcolors.rgba(220, 200, 60, 255),
@@ -5779,12 +5885,76 @@ const App = struct {
         self.drawFilledRect(indicator, dot);
 
         self.drawTextTrimmed(
-            rect.min[0] + 28.0,
-            rect.min[1] + 7.0,
-            rect.width() - 34.0,
+            indicator.max[0] + inner,
+            rect.min[1] + @max(0.0, (rect.height() - line_height) * 0.5),
+            rect.width() - (indicator.max[0] - rect.min[0]) - inner * 2.0,
             self.status_text,
             self.theme.colors.text_primary,
         );
+    }
+
+    fn drawVerticalScrollbar(
+        self: *App,
+        target: FormScrollTarget,
+        viewport_rect: Rect,
+        content_height: f32,
+        scroll_y: *f32,
+    ) void {
+        const viewport_height = viewport_rect.height();
+        const max_scroll = if (content_height > viewport_height) content_height - viewport_height else 0.0;
+        if (scroll_y.* < 0.0) scroll_y.* = 0.0;
+        if (scroll_y.* > max_scroll) scroll_y.* = max_scroll;
+        if (max_scroll <= 0.0) {
+            if (self.form_scroll_drag_target == target) self.form_scroll_drag_target = .none;
+            return;
+        }
+
+        const inset = @max(1.0, 2.0 * self.ui_scale);
+        const track_w = @max(self.theme.spacing.xs, 8.0 * self.ui_scale);
+        const track_rect = Rect.fromXYWH(
+            viewport_rect.max[0] - track_w - inset,
+            viewport_rect.min[1] + inset,
+            track_w,
+            @max(8.0, viewport_rect.height() - inset * 2.0),
+        );
+
+        const thumb_height = @max(20.0 * self.ui_scale, track_rect.height() * (viewport_height / content_height));
+        const thumb_range = @max(1.0, track_rect.height() - thumb_height);
+        const thumb_ratio = if (max_scroll > 0.0) scroll_y.* / max_scroll else 0.0;
+        const thumb_y = track_rect.min[1] + thumb_ratio * thumb_range;
+        const thumb_rect = Rect.fromXYWH(track_rect.min[0], thumb_y, track_w, thumb_height);
+
+        if (self.form_scroll_drag_target == target) {
+            if (self.mouse_down) {
+                const scroll_per_px = max_scroll / thumb_range;
+                const delta_y = self.mouse_y - self.form_scroll_drag_start_y;
+                scroll_y.* = std.math.clamp(
+                    self.form_scroll_drag_start_scroll_y + delta_y * scroll_per_px,
+                    0.0,
+                    max_scroll,
+                );
+            } else {
+                self.form_scroll_drag_target = .none;
+            }
+        } else if (self.mouse_clicked and track_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            const raw = (self.mouse_y - track_rect.min[1] - thumb_height * 0.5) / thumb_range;
+            const click_ratio = std.math.clamp(raw, 0.0, 1.0);
+            scroll_y.* = click_ratio * max_scroll;
+            self.form_scroll_drag_target = target;
+            self.form_scroll_drag_start_y = self.mouse_y;
+            self.form_scroll_drag_start_scroll_y = scroll_y.*;
+        }
+
+        self.drawFilledRect(track_rect, zcolors.withAlpha(self.theme.colors.border, 0.25));
+        const hovered = thumb_rect.contains(.{ self.mouse_x, self.mouse_y });
+        const active = self.form_scroll_drag_target == target;
+        const thumb_color = if (active)
+            self.theme.colors.primary
+        else if (hovered)
+            zcolors.blend(self.theme.colors.border, self.theme.colors.primary, 0.46)
+        else
+            self.theme.colors.border;
+        self.drawFilledRect(thumb_rect, thumb_color);
     }
 
     fn drawButtonWidget(self: *App, rect: Rect, label: []const u8, opts: widgets.button.Options) bool {
@@ -5850,9 +6020,11 @@ const App = struct {
         self.drawPaintRect(rect, fill);
         self.drawRect(rect, border);
 
-        const text_x = rect.min[0] + 8.0;
-        const text_y = rect.min[1] + 10.0;
-        const max_w = rect.width() - 16.0;
+        const text_pad_x = @max(self.theme.spacing.sm, 8.0 * self.ui_scale);
+        const text_x = rect.min[0] + text_pad_x;
+        const max_w = rect.width() - text_pad_x * 2.0;
+        const line_height = self.textLineHeight();
+        const text_y = rect.min[1] + @max(0.0, (rect.height() - line_height) * 0.5);
 
         if (text.len == 0) {
             const placeholder = if (opts.placeholder.len > 0) opts.placeholder else "";
@@ -5862,17 +6034,17 @@ const App = struct {
         } else {
             var text_color = self.theme.colors.text_primary;
             if (opts.disabled) text_color = zcolors.withAlpha(text_color, 0.45);
-            self.drawTextTrimmed(text_x, text_y, max_w, text, text_color);
+            const visible_start = self.inputTailStartForWidth(text, max_w);
+            self.drawText(text_x, text_y, text[visible_start..], text_color);
         }
 
         if (state.focused and !opts.disabled and !opts.read_only) {
             // Draw caret using same measurement as text
             const caret_width: f32 = 2.0 * self.ui_scale;
-            const caret_height: f32 = 14.0 * self.ui_scale;
+            const caret_height = line_height;
 
-            // Measure text up to caret position for accurate placement
-            const text_before_caret = text;
-            const caret_offset = self.measureText(text_before_caret);
+            const visible_start = self.inputTailStartForWidth(text, max_w);
+            const caret_offset = self.measureText(text[visible_start..]);
             const caret_x = text_x + @min(caret_offset, max_w - caret_width);
 
             const caret_rect = UiRect.fromMinSize(
@@ -5989,6 +6161,41 @@ const App = struct {
                 break;
             }
         }
+    }
+
+    fn ensureWorkspacePanel(self: *App, manager: *panel_manager.PanelManager) void {
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .Settings or panel.kind == .Control) {
+                manager.focusPanel(panel.id);
+                return;
+            }
+        }
+        manager.ensurePanel(.Control);
+        self.focusSettingsPanel(manager);
+    }
+
+    fn focusedFormScrollTarget(self: *App, manager: *panel_manager.PanelManager) FormScrollTarget {
+        const focused_id = manager.workspace.focused_panel_id orelse return .none;
+        const panel = self.findPanelById(manager, focused_id) orelse return .none;
+        if (panel.kind == .Settings or panel.kind == .Control) return .settings;
+        if (self.project_panel_id != null and self.project_panel_id.? == focused_id) return .projects;
+        if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Projects")) return .projects;
+        return .none;
+    }
+
+    fn focusedFormScrollY(self: *App, manager: *panel_manager.PanelManager) ?*f32 {
+        return switch (self.focusedFormScrollTarget(manager)) {
+            .settings => &self.settings_panel.settings_scroll_y,
+            .projects => &self.settings_panel.projects_scroll_y,
+            .none => null,
+        };
+    }
+
+    fn hasPanelWithTitle(_: *App, manager: *panel_manager.PanelManager, title: []const u8) bool {
+        for (manager.workspace.panels.items) |*panel| {
+            if (std.mem.eql(u8, panel.title, title)) return true;
+        }
+        return false;
     }
 
     fn disconnect(self: *App) void {
@@ -8237,20 +8444,151 @@ const App = struct {
         self.drawText(x, y, text, color);
     }
 
+    fn drawFormSectionTitle(
+        self: *App,
+        x: f32,
+        y: *f32,
+        max_w: f32,
+        layout: PanelLayoutMetrics,
+        text: []const u8,
+    ) void {
+        const width = @max(1.0, max_w);
+        const row_h = form_layout.titleRowHeight(layout);
+        const text_y = y.* + @max(0.0, (row_h - layout.line_height) * 0.5);
+        self.drawTextTrimmed(x, text_y, width, text, self.theme.colors.text_primary);
+        y.* += form_layout.advanceAfterTitle(layout);
+    }
+
+    fn drawFormFieldLabel(
+        self: *App,
+        x: f32,
+        y: *f32,
+        max_w: f32,
+        layout: PanelLayoutMetrics,
+        text: []const u8,
+    ) void {
+        const width = @max(1.0, max_w);
+        const row_h = form_layout.labelRowHeight(layout);
+        const text_y = y.* + @max(0.0, (row_h - layout.line_height) * 0.5);
+        self.drawTextTrimmed(x, text_y, width, text, self.theme.colors.text_primary);
+        y.* += form_layout.advanceLabelToInput(layout);
+    }
+
+    fn textLineHeight(self: *App) f32 {
+        const measured = self.metrics_context.lineHeight();
+        const px: f32 = @floatFromInt(self.textPixelSize());
+        const min_from_font = px * 1.18;
+        if (measured > 0.0) return @max(measured, min_from_font);
+        return @max(@max(12.0, 16.0 * self.ui_scale), min_from_font);
+    }
+
+    fn textPixelSize(_: *App) u16 {
+        const size_f = font_system.currentFontSize(zui.ui.theme.activeTheme());
+        if (size_f <= 1.0) return 1;
+        const clamped = @min(@as(u32, @intFromFloat(size_f)), 65535);
+        return @intCast(clamped);
+    }
+
+    fn panelLayoutMetrics(self: *App) PanelLayoutMetrics {
+        const line_height = self.textLineHeight();
+        return form_layout.defaultMetrics(self.theme, line_height, self.ui_scale);
+    }
+
+    fn dockTabMetrics(self: *App) DockTabMetrics {
+        const line_height = self.textLineHeight();
+        const tab_pad = @max(self.theme.spacing.sm, self.theme.spacing.xs * 1.4);
+        return .{
+            .pad = tab_pad,
+            .height = @max(line_height + self.theme.spacing.sm * 1.4, 28.0 * self.ui_scale),
+            .min_width = @max(96.0 * self.ui_scale, line_height * 4.8),
+            .max_width_ratio = 0.34,
+        };
+    }
+
+    fn dockTabWidth(self: *App, title: []const u8, group_width: f32, metrics: DockTabMetrics) f32 {
+        const desired = self.measureText(title) + metrics.pad * 2.0;
+        const max_width = @max(metrics.min_width, (group_width - metrics.pad * 2.0) * metrics.max_width_ratio);
+        return @min(max_width, desired);
+    }
+
+    fn dockSplitGap(self: *App) f32 {
+        return @max(self.theme.spacing.xs, 6.0 * self.ui_scale);
+    }
+
+    fn nextUtf8Boundary(text: []const u8, index: usize) usize {
+        if (index >= text.len) return text.len;
+        var i = index + 1;
+        while (i < text.len and (text[i] & 0xC0) == 0x80) : (i += 1) {}
+        return i;
+    }
+
+    fn skipLeadingSpaces(text: []const u8, start: usize) usize {
+        var i = start;
+        while (i < text.len and (text[i] == ' ' or text[i] == '\t')) : (i += 1) {}
+        return i;
+    }
+
+    fn nextWrapBreak(self: *App, line: []const u8, start: usize, max_w: f32) usize {
+        if (start >= line.len) return line.len;
+        const max_width = @max(1.0, max_w);
+
+        var cursor = start;
+        var last_fit = start;
+        var last_space_end: ?usize = null;
+        while (cursor < line.len) {
+            const next = nextUtf8Boundary(line, cursor);
+            if (next <= cursor) break;
+            const width = self.measureText(line[start..next]);
+            if (width <= max_width or last_fit == start) {
+                last_fit = next;
+                if (line[cursor] == ' ' or line[cursor] == '\t') {
+                    last_space_end = next;
+                }
+                cursor = next;
+                continue;
+            }
+            break;
+        }
+
+        if (last_fit == start) {
+            return nextUtf8Boundary(line, start);
+        }
+        if (last_space_end) |space_end| {
+            if (space_end > start and space_end < line.len) {
+                return space_end;
+            }
+        }
+        return last_fit;
+    }
+
+    fn inputTailStartForWidth(self: *App, text: []const u8, max_w: f32) usize {
+        if (text.len == 0 or self.measureText(text) <= max_w) return 0;
+        var start: usize = 0;
+        while (start < text.len) {
+            const next = nextUtf8Boundary(text, start);
+            if (next <= start) break;
+            if (self.measureText(text[next..]) <= max_w) return next;
+            start = next;
+        }
+        return text.len;
+    }
+
     fn drawCenteredText(self: *App, rect: Rect, text: []const u8, color: [4]f32) void {
-        const text_w = @as(f32, @floatFromInt(text.len)) * 8.0;
+        const text_w = self.measureText(text);
+        const line_height = self.textLineHeight();
         const x = rect.min[0] + @max(0.0, (rect.width() - text_w) * 0.5);
-        const y = rect.min[1] + @max(0.0, (rect.height() - 12.0) * 0.5);
+        const y = rect.min[1] + @max(0.0, (rect.height() - line_height) * 0.5);
         self.drawText(x, y, text, color);
     }
 
     fn drawText(self: *App, x: f32, y: f32, text: []const u8, color: [4]f32) void {
-        self.ui_commands.pushText(text, .{ x, y }, color, .body, @intFromFloat(14.0 * self.ui_scale));
+        self.ui_commands.pushText(text, .{ x, y }, color, .body, self.textPixelSize());
     }
 
     fn drawTextWrapped(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) f32 {
         var current_y = y;
-        const line_height: f32 = 16.0 * self.ui_scale;
+        const line_height = self.textLineHeight();
+        const wrap_w = @max(1.0, max_w);
 
         // Split by existing newlines first
         var lines_iter = std.mem.splitScalar(u8, text, '\n');
@@ -8262,46 +8600,18 @@ const App = struct {
 
             var line_start: usize = 0;
             while (line_start < raw_line.len) {
-                var low: usize = line_start;
-                var high: usize = raw_line.len;
-                var best_end: usize = line_start;
-
-                // Find how many characters fit in the line
-                while (low <= high) {
-                    const mid = low + (high - low) / 2;
-                    if (self.measureText(raw_line[line_start..mid]) <= max_w) {
-                        best_end = mid;
-                        low = mid + 1;
-                    } else {
-                        high = mid - 1;
-                    }
-                }
-
-                // Ensure we make progress
-                if (best_end == line_start) best_end = line_start + 1;
-
-                // Word wrap optimization: if we didn't hit the end, try to find the last space
-                if (best_end < raw_line.len) {
-                    if (std.mem.lastIndexOfScalar(u8, raw_line[line_start..best_end], ' ')) |last_space| {
-                        if (last_space > 0) {
-                            best_end = line_start + last_space + 1;
-                        }
-                    }
-                }
-
+                const best_end = self.nextWrapBreak(raw_line, line_start, wrap_w);
                 self.drawText(x, current_y, raw_line[line_start..best_end], color);
                 current_y += line_height;
-                line_start = best_end;
-
-                // Trim leading spaces for next wrapped line part
-                while (line_start < raw_line.len and raw_line[line_start] == ' ') : (line_start += 1) {}
+                line_start = skipLeadingSpaces(raw_line, best_end);
             }
         }
         return current_y - y;
     }
 
     fn measureTextWrappedHeight(self: *App, max_w: f32, text: []const u8) f32 {
-        const line_height: f32 = 16.0 * self.ui_scale;
+        const line_height = self.textLineHeight();
+        const wrap_w = @max(1.0, max_w);
         var total_height: f32 = 0;
 
         if (text.len == 0) return line_height;
@@ -8316,75 +8626,50 @@ const App = struct {
 
             var line_start: usize = 0;
             while (line_start < raw_line.len) {
-                var low: usize = line_start;
-                var high: usize = raw_line.len;
-                var best_end: usize = line_start;
-
-                while (low <= high) {
-                    const mid = low + (high - low) / 2;
-                    if (self.measureText(raw_line[line_start..mid]) <= max_w) {
-                        best_end = mid;
-                        low = mid + 1;
-                    } else {
-                        high = mid - 1;
-                    }
-                }
-
-                if (best_end == line_start) best_end = line_start + 1;
-
-                if (best_end < raw_line.len) {
-                    if (std.mem.lastIndexOfScalar(u8, raw_line[line_start..best_end], ' ')) |last_space| {
-                        if (last_space > 0) {
-                            best_end = line_start + last_space + 1;
-                        }
-                    }
-                }
-
+                const best_end = self.nextWrapBreak(raw_line, line_start, wrap_w);
                 total_height += line_height;
-                line_start = best_end;
-                while (line_start < raw_line.len and raw_line[line_start] == ' ') : (line_start += 1) {}
+                line_start = skipLeadingSpaces(raw_line, best_end);
             }
         }
         return total_height;
     }
 
     fn measureText(self: *App, text: []const u8) f32 {
-        // Tuned to match actual text rendering (was 7.0, caused offset)
-        return @as(f32, @floatFromInt(text.len)) * 6.5 * self.ui_scale;
+        return self.metrics_context.measureText(text, 0.0)[0];
     }
 
     fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
-        // Use binary search to find how many chars fit
-        if (self.measureText(text) <= max_w) {
+        if (max_w <= 0.0) return;
+        const text_w = self.measureText(text);
+        if (text_w <= max_w) {
             self.drawText(x, y, text, color);
             return;
         }
 
-        // Binary search for max chars that fit
-        var low: usize = 0;
-        var high: usize = text.len;
-        while (low < high) {
-            const mid = low + (high - low + 1) / 2;
-            const w = self.measureText(text[0..mid]);
-            if (w <= max_w - self.measureText("...")) {
-                low = mid;
-            } else {
-                high = mid - 1;
-            }
+        const ellipsis = "...";
+        const ellipsis_w = self.measureText(ellipsis);
+        if (ellipsis_w > max_w) return;
+
+        const limit = max_w - ellipsis_w;
+        var width: f32 = 0.0;
+        var idx: usize = 0;
+        var best_end: usize = 0;
+        while (idx < text.len) {
+            const next = nextUtf8Boundary(text, idx);
+            if (next <= idx) break;
+            const glyph_w = self.measureText(text[idx..next]);
+            if (width + glyph_w > limit) break;
+            width += glyph_w;
+            best_end = next;
+            idx = next;
         }
 
-        if (low <= 3) {
+        if (best_end == 0) {
             self.drawText(x, y, "...", color);
             return;
         }
-
-        var tmp: [1024]u8 = undefined;
-        const copy_len = @min(low, @min(text.len, tmp.len - 3));
-        if (copy_len > 0) @memcpy(tmp[0..copy_len], text[0..copy_len]);
-        tmp[copy_len] = '.';
-        tmp[copy_len + 1] = '.';
-        tmp[copy_len + 2] = '.';
-        self.drawText(x, y, tmp[0 .. copy_len + 3], color);
+        self.drawText(x, y, text[0..best_end], color);
+        self.drawText(x + width, y, ellipsis, color);
     }
 };
 
