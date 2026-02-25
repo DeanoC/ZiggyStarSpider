@@ -120,8 +120,9 @@ const ResultQueue = struct {
     }
 
     fn deinit(self: *ResultQueue) void {
-        while (self.pop()) |*result| {
-            result.deinit(self.allocator);
+        while (self.pop()) |result| {
+            var owned = result;
+            owned.deinit(self.allocator);
         }
     }
 
