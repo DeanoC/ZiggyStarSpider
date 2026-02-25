@@ -3253,7 +3253,19 @@ const App = struct {
         if (std.mem.indexOf(u8, remote, "project_assignment_forbidden") != null) {
             return self.allocator.dupe(
                 u8,
-                "This agent is not allowed on that project (Spider Web is primary-agent only).",
+                "This agent is not allowed on that project (system project is Mother-only).",
+            ) catch null;
+        }
+        if (std.mem.indexOf(u8, remote, "provisioning_required") != null) {
+            return self.allocator.dupe(
+                u8,
+                "This user token has no non-system project/agent target. Ask an admin to provision one via Mother.",
+            ) catch null;
+        }
+        if (std.mem.indexOf(u8, remote, "last_target_invalid") != null) {
+            return self.allocator.dupe(
+                u8,
+                "The remembered project/agent target is no longer valid. Ask an admin to re-provision access.",
             ) catch null;
         }
         return null;
@@ -3289,6 +3301,11 @@ const App = struct {
             std.mem.indexOf(u8, remote, "invalid_token") != null or
             std.mem.indexOf(u8, remote, "unauthorized") != null or
             std.mem.indexOf(u8, remote, "forbidden") != null;
+    }
+
+    fn isProvisioningRemoteError(remote: []const u8) bool {
+        return std.mem.indexOf(u8, remote, "provisioning_required") != null or
+            std.mem.indexOf(u8, remote, "last_target_invalid") != null;
     }
 
     fn disableAutoConnectAfterAuthFailure(self: *App) void {
@@ -6638,6 +6655,10 @@ const App = struct {
                 self.ws_client = null;
                 const msg = if (err == error.RemoteError) blk: {
                     if (control_plane.lastRemoteError()) |remote| {
+                        if (isProvisioningRemoteError(remote)) {
+                            break :blk self.formatControlRemoteMessage("Connection blocked", remote) orelse
+                                try std.fmt.allocPrint(self.allocator, "Connection blocked: {s}", .{remote});
+                        }
                         if (isTokenAuthRemoteError(remote)) {
                             self.disableAutoConnectAfterAuthFailure();
                             self.settings_panel.focused_field = .project_operator_token;
@@ -6679,6 +6700,17 @@ const App = struct {
                     control_plane.lastRemoteError() orelse @errorName(err),
                 );
                 defer self.allocator.free(primary_detail_owned);
+
+                if (isProvisioningRemoteError(primary_detail_owned)) {
+                    std.log.err("Session attach blocked: {s}", .{primary_detail_owned});
+                    client.deinit();
+                    self.ws_client = null;
+                    const msg = self.formatControlRemoteMessage("Session attach failed", primary_detail_owned) orelse
+                        try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
+                    defer self.allocator.free(msg);
+                    self.setConnectionState(.error_state, msg);
+                    return;
+                }
 
                 const has_selected_project = self.selectedProjectId() != null;
                 if (has_selected_project) {
@@ -6937,6 +6969,15 @@ const App = struct {
                     control_plane.lastRemoteError() orelse @errorName(err),
                 );
                 defer self.allocator.free(primary_detail_owned);
+
+                if (isProvisioningRemoteError(primary_detail_owned)) {
+                    const err_text = self.formatControlRemoteMessage("Session attach failed", primary_detail_owned) orelse
+                        try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
+                    defer self.allocator.free(err_text);
+                    self.setWorkspaceError(err_text);
+                    try self.appendMessage("system", err_text, null);
+                    return err;
+                }
 
                 const has_selected_project = self.selectedProjectId() != null;
                 if (has_selected_project) {
