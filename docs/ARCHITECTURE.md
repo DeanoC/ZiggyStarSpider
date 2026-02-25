@@ -101,6 +101,8 @@ Project context handling:
 - onboarding wizard (`connect -> project -> mounts -> activate`)
 - workspace topology cache (projects, nodes, mounts)
 - filesystem browser panel (path navigation + preview)
+- non-blocking filesystem worker thread (dedicated FS-RPC websocket + request/result queues)
+- incremental per-path filesystem cache (lazy load by navigated path, explicit refresh invalidation)
 - async chat worker that applies project context before FS-RPC chat IO
 - reconnect-aware chat job resume handling
 

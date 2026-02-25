@@ -22,6 +22,7 @@ const client_state = zui.client.state;
 const client_agents = zui.client.agent_registry;
 const font_system = zui.ui.font_system;
 const protocol_messages = @import("protocol_messages.zig");
+const fs_worker_mod = @import("filesystem_worker.zig");
 
 const workspace = zui.ui.workspace;
 const panel_manager = zui.ui.panel_manager;
@@ -51,10 +52,12 @@ const MAX_DEBUG_EVENTS: usize = 500;
 const FSRPC_DEFAULT_TIMEOUT_MS: u32 = 15_000;
 const FSRPC_CHAT_WRITE_TIMEOUT_MS: u32 = 180_000;
 const FSRPC_CLUNK_TIMEOUT_MS: u32 = 1_000;
+const CONTROL_CONNECT_TIMEOUT_MS: i64 = 2_500;
 const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
 const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
 const WS_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
+const FILESYSTEM_DIR_CACHE_TTL_MS: i64 = 5_000;
 
 const ChatAttachment = zui.protocol.types.ChatAttachment;
 const ChatMessage = zui.protocol.types.ChatMessage;
@@ -112,6 +115,22 @@ const FilesystemEntry = struct {
         allocator.free(self.path);
         self.* = undefined;
     }
+};
+
+const FilesystemDirCacheEntry = struct {
+    listing: []u8,
+    cached_at_ms: i64,
+
+    fn deinit(self: *FilesystemDirCacheEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.listing);
+        self.* = undefined;
+    }
+};
+
+const FilesystemActiveRequest = struct {
+    id: u64,
+    kind: fs_worker_mod.RequestKind,
+    open_after_resolve: bool = false,
 };
 
 const JobStatusInfo = struct {
@@ -472,11 +491,16 @@ const App = struct {
     project_panel_id: ?workspace.PanelId = null,
     project_selector_open: bool = false,
     filesystem_panel_id: ?workspace.PanelId = null,
+    filesystem_worker: ?fs_worker_mod.FilesystemWorker = null,
     filesystem_path: std.ArrayList(u8) = .empty,
     filesystem_entries: std.ArrayListUnmanaged(FilesystemEntry) = .{},
     filesystem_preview_path: ?[]u8 = null,
     filesystem_preview_text: ?[]u8 = null,
     filesystem_error: ?[]u8 = null,
+    filesystem_busy: bool = false,
+    filesystem_next_request_id: u64 = 1,
+    filesystem_active_request: ?FilesystemActiveRequest = null,
+    filesystem_dir_cache: std.StringHashMapUnmanaged(FilesystemDirCacheEntry) = .{},
     fsrpc_last_remote_error: ?[]u8 = null,
     session_attach_state: SessionAttachUiState = .unknown,
 
@@ -704,6 +728,8 @@ const App = struct {
             self.allocator.free(value);
             self.workspace_last_error = null;
         }
+        self.stopFilesystemWorker();
+        self.filesystem_active_request = null;
         self.clearFsrpcRemoteError();
         self.clearDebugEvents();
         self.debug_events.deinit(self.allocator);
@@ -715,6 +741,7 @@ const App = struct {
         if (self.pending_send_job_id) |job_id| self.allocator.free(job_id);
         if (self.pending_send_correlation_id) |corr| self.allocator.free(corr);
         self.clearFilesystemData();
+        self.clearFilesystemDirCache();
         self.filesystem_path.deinit(self.allocator);
 
         zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
@@ -823,6 +850,7 @@ const App = struct {
             }
 
             try self.pollWebSocket();
+            self.pollFilesystemWorker();
             if (self.pending_send_job_id != null and self.ws_client != null) {
                 _ = self.tryResumePendingSendJob() catch {};
             }
@@ -2641,6 +2669,7 @@ const App = struct {
                 const has_pending_send = self.pending_send_message_id != null;
                 self.debug_stream_pending = false;
                 self.clearPendingDebugRequest();
+                self.stopFilesystemWorker();
 
                 client.deinit();
                 self.ws_client = null;
@@ -2688,6 +2717,82 @@ const App = struct {
             if (count > 0) {
                 std.log.debug("[ZSS] Polled {d} messages this frame", .{count});
             }
+        }
+    }
+
+    fn pollFilesystemWorker(self: *App) void {
+        const worker = if (self.filesystem_worker) |*value| value else return;
+        var processed: u32 = 0;
+        while (processed < 12) : (processed += 1) {
+            var result = worker.tryPopResult() orelse break;
+            defer result.deinit(self.allocator);
+            self.handleFilesystemWorkerResult(&result);
+        }
+    }
+
+    fn handleFilesystemWorkerResult(self: *App, result: *const fs_worker_mod.Result) void {
+        const active = self.filesystem_active_request orelse return;
+        if (active.id != result.id) return;
+
+        self.filesystem_active_request = null;
+        self.filesystem_busy = false;
+
+        if (result.error_text) |err_text| {
+            self.setFsrpcRemoteError(err_text);
+            self.setFilesystemError(err_text);
+            return;
+        }
+
+        self.clearFsrpcRemoteError();
+        self.clearFilesystemError();
+
+        switch (result.kind) {
+            .list_dir => {
+                const listing = result.listing orelse {
+                    self.setFilesystemError("filesystem worker returned no directory listing");
+                    return;
+                };
+                self.putFilesystemDirCache(result.path, listing) catch {};
+                self.applyFilesystemListing(result.path, listing) catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Filesystem listing apply failed: {s}", .{@errorName(err)}) catch null;
+                    defer if (msg) |value| self.allocator.free(value);
+                    if (msg) |value| self.setFilesystemError(value);
+                };
+            },
+            .read_file => {
+                const content = result.content orelse {
+                    self.setFilesystemError("filesystem worker returned no file content");
+                    return;
+                };
+                self.applyFilesystemPreview(result.path, content) catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Filesystem preview apply failed: {s}", .{@errorName(err)}) catch null;
+                    defer if (msg) |value| self.allocator.free(value);
+                    if (msg) |value| self.setFilesystemError(value);
+                };
+            },
+            .resolve_kind => {
+                const is_dir = result.is_dir orelse {
+                    self.setFilesystemError("filesystem worker returned no path-kind result");
+                    return;
+                };
+                const resolved_kind: FilesystemEntryKind = if (is_dir) .directory else .file;
+                self.updateFilesystemEntryKind(result.path, resolved_kind);
+                if (!active.open_after_resolve) return;
+
+                if (is_dir) {
+                    self.queueFilesystemPathLoad(result.path, true, false) catch |err| {
+                        const msg = std.fmt.allocPrint(self.allocator, "Filesystem open failed: {s}", .{@errorName(err)}) catch null;
+                        defer if (msg) |value| self.allocator.free(value);
+                        if (msg) |value| self.setFilesystemError(value);
+                    };
+                } else {
+                    self.submitFilesystemRequest(.read_file, result.path, false) catch |err| {
+                        const msg = std.fmt.allocPrint(self.allocator, "Filesystem file read failed: {s}", .{@errorName(err)}) catch null;
+                        defer if (msg) |value| self.allocator.free(value);
+                        if (msg) |value| self.setFilesystemError(value);
+                    };
+                }
+            },
         }
     }
 
@@ -2971,6 +3076,152 @@ const App = struct {
         }
     }
 
+    fn clearFilesystemDirCache(self: *App) void {
+        var it = self.filesystem_dir_cache.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.filesystem_dir_cache.deinit(self.allocator);
+        self.filesystem_dir_cache = .{};
+    }
+
+    fn invalidateFilesystemDirCachePath(self: *App, path: []const u8) void {
+        if (self.filesystem_dir_cache.fetchRemove(path)) |removed| {
+            self.allocator.free(removed.key);
+            var value = removed.value;
+            value.deinit(self.allocator);
+        }
+    }
+
+    fn putFilesystemDirCache(self: *App, path: []const u8, listing: []const u8) !void {
+        if (self.filesystem_dir_cache.getEntry(path)) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+            entry.value_ptr.* = .{
+                .listing = try self.allocator.dupe(u8, listing),
+                .cached_at_ms = std.time.milliTimestamp(),
+            };
+            return;
+        }
+
+        const key_copy = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(key_copy);
+        try self.filesystem_dir_cache.put(self.allocator, key_copy, .{
+            .listing = try self.allocator.dupe(u8, listing),
+            .cached_at_ms = std.time.milliTimestamp(),
+        });
+    }
+
+    fn cachedFilesystemListing(self: *App, path: []const u8) ?[]const u8 {
+        const now_ms = std.time.milliTimestamp();
+        if (self.filesystem_dir_cache.getEntry(path)) |entry| {
+            if (now_ms - entry.value_ptr.cached_at_ms <= FILESYSTEM_DIR_CACHE_TTL_MS) {
+                return entry.value_ptr.listing;
+            }
+        }
+        self.invalidateFilesystemDirCachePath(path);
+        return null;
+    }
+
+    fn startFilesystemWorker(
+        self: *App,
+        url: []const u8,
+        token: []const u8,
+        session_key: ?[]const u8,
+        agent_id: ?[]const u8,
+        project_id: ?[]const u8,
+        project_token: ?[]const u8,
+    ) !void {
+        self.stopFilesystemWorker();
+        self.filesystem_worker = try fs_worker_mod.FilesystemWorker.init(
+            self.allocator,
+            url,
+            token,
+            session_key,
+            agent_id,
+            project_id,
+            project_token,
+        );
+        errdefer {
+            if (self.filesystem_worker) |*worker| {
+                worker.deinit();
+                self.filesystem_worker = null;
+            }
+        }
+        if (self.filesystem_worker) |*worker| {
+            try worker.start();
+        }
+        self.filesystem_busy = false;
+        self.filesystem_active_request = null;
+    }
+
+    fn stopFilesystemWorker(self: *App) void {
+        if (self.filesystem_worker) |*worker| {
+            worker.deinit();
+            self.filesystem_worker = null;
+        }
+        self.filesystem_busy = false;
+        self.filesystem_active_request = null;
+    }
+
+    fn submitFilesystemRequest(
+        self: *App,
+        kind: fs_worker_mod.RequestKind,
+        path: []const u8,
+        open_after_resolve: bool,
+    ) !void {
+        if (self.filesystem_active_request != null) return error.Busy;
+        const worker = if (self.filesystem_worker) |*value| value else return error.NotConnected;
+        const request_id = self.filesystem_next_request_id;
+        self.filesystem_next_request_id +%= 1;
+        if (self.filesystem_next_request_id == 0) self.filesystem_next_request_id = 1;
+
+        try worker.submit(request_id, kind, path);
+        self.filesystem_active_request = .{
+            .id = request_id,
+            .kind = kind,
+            .open_after_resolve = open_after_resolve,
+        };
+        self.filesystem_busy = true;
+    }
+
+    fn applyFilesystemListing(self: *App, path: []const u8, listing: []const u8) !void {
+        self.clearFilesystemData();
+        try self.setFilesystemPath(path);
+        var iter = std.mem.splitScalar(u8, listing, '\n');
+        while (iter.next()) |raw| {
+            const entry_name = std.mem.trim(u8, raw, " \t\r\n");
+            if (entry_name.len == 0) continue;
+            if (std.mem.eql(u8, entry_name, ".") or std.mem.eql(u8, entry_name, "..")) continue;
+
+            const child_path = try self.joinFilesystemPath(path, entry_name);
+            errdefer self.allocator.free(child_path);
+
+            try self.filesystem_entries.append(self.allocator, .{
+                .name = try self.allocator.dupe(u8, entry_name),
+                .path = child_path,
+                .kind = .unknown,
+            });
+        }
+    }
+
+    fn applyFilesystemPreview(self: *App, path: []const u8, content: []const u8) !void {
+        if (self.filesystem_preview_path) |value| self.allocator.free(value);
+        self.filesystem_preview_path = try self.allocator.dupe(u8, path);
+
+        if (self.filesystem_preview_text) |value| self.allocator.free(value);
+        if (content.len > 16_384) {
+            const suffix = "\n... (truncated)";
+            const limit = 16_384;
+            const buf = try self.allocator.alloc(u8, limit + suffix.len);
+            @memcpy(buf[0..limit], content[0..limit]);
+            @memcpy(buf[limit .. limit + suffix.len], suffix);
+            self.filesystem_preview_text = buf;
+        } else {
+            self.filesystem_preview_text = try self.allocator.dupe(u8, content);
+        }
+    }
+
     fn setFsrpcRemoteError(self: *App, message: []const u8) void {
         self.clearFsrpcRemoteError();
         self.fsrpc_last_remote_error = self.allocator.dupe(u8, message) catch null;
@@ -3029,6 +3280,24 @@ const App = struct {
     fn isProjectAuthRemoteError(remote: []const u8) bool {
         return std.mem.indexOf(u8, remote, "project_auth_failed") != null or
             std.mem.indexOf(u8, remote, "ProjectAuthFailed") != null;
+    }
+
+    fn isTokenAuthRemoteError(remote: []const u8) bool {
+        return std.mem.indexOf(u8, remote, "auth_failed") != null or
+            std.mem.indexOf(u8, remote, "auth_required") != null or
+            std.mem.indexOf(u8, remote, "invalid token") != null or
+            std.mem.indexOf(u8, remote, "invalid_token") != null or
+            std.mem.indexOf(u8, remote, "unauthorized") != null or
+            std.mem.indexOf(u8, remote, "forbidden") != null;
+    }
+
+    fn disableAutoConnectAfterAuthFailure(self: *App) void {
+        if (!self.settings_panel.auto_connect_on_launch and !self.config.auto_connect_on_launch) return;
+        self.settings_panel.auto_connect_on_launch = false;
+        self.config.auto_connect_on_launch = false;
+        self.config.save() catch |err| {
+            std.log.warn("Failed to persist auto-connect disable after auth failure: {s}", .{@errorName(err)});
+        };
     }
 
     fn clearSelectedProjectAfterAuthFailure(self: *App) void {
@@ -4954,88 +5223,46 @@ const App = struct {
         return self.allocator.dupe(u8, trimmed);
     }
 
-    fn refreshFilesystemBrowser(self: *App) !void {
-        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+    fn applyCachedFilesystemListing(self: *App, path: []const u8) bool {
+        const listing = self.cachedFilesystemListing(path) orelse return false;
+        self.applyFilesystemListing(path, listing) catch return false;
+        return true;
+    }
+
+    fn queueFilesystemPathLoad(
+        self: *App,
+        path: []const u8,
+        use_cache: bool,
+        force_refresh: bool,
+    ) !void {
+        try self.setFilesystemPath(path);
         self.clearFsrpcRemoteError();
-        self.clearFilesystemData();
         self.clearFilesystemError();
+
+        if (force_refresh) {
+            self.invalidateFilesystemDirCachePath(path);
+        } else if (use_cache) {
+            _ = self.applyCachedFilesystemListing(path);
+        }
+
+        try self.submitFilesystemRequest(.list_dir, path, false);
+    }
+
+    fn refreshFilesystemBrowser(self: *App) !void {
         if (self.filesystem_path.items.len == 0) {
             try self.filesystem_path.appendSlice(self.allocator, "/");
         }
-
-        try self.fsrpcBootstrapGui(client);
         const current_path = self.filesystem_path.items;
-        const fid = try self.fsrpcWalkPathGui(client, current_path);
-        defer self.fsrpcClunkBestEffort(client, fid);
-        const is_dir = try self.fsrpcFidIsDirGui(client, fid);
-        if (!is_dir) return error.NotDir;
-        try self.fsrpcOpenGui(client, fid, "r");
-        const listing = try self.fsrpcReadAllTextGui(client, fid);
-        defer self.allocator.free(listing);
-
-        var iter = std.mem.splitScalar(u8, listing, '\n');
-        while (iter.next()) |raw| {
-            const entry_name = std.mem.trim(u8, raw, " \t\r\n");
-            if (entry_name.len == 0) continue;
-            if (std.mem.eql(u8, entry_name, ".") or std.mem.eql(u8, entry_name, "..")) continue;
-
-            const child_path = try self.joinFilesystemPath(current_path, entry_name);
-            errdefer self.allocator.free(child_path);
-
-            try self.filesystem_entries.append(self.allocator, .{
-                .name = try self.allocator.dupe(u8, entry_name),
-                .path = child_path,
-                .kind = .unknown,
-            });
-        }
+        try self.queueFilesystemPathLoad(current_path, false, true);
     }
 
     fn openFilesystemEntry(self: *App, entry: *const FilesystemEntry) !void {
         self.clearFsrpcRemoteError();
-        const kind = switch (entry.kind) {
-            .unknown => blk: {
-                const resolved = try self.resolveFilesystemEntryKind(entry.path);
-                self.updateFilesystemEntryKind(entry.path, resolved);
-                break :blk resolved;
-            },
-            else => entry.kind,
-        };
-
-        if (kind == .directory) {
-            try self.setFilesystemPath(entry.path);
-            try self.refreshFilesystemBrowser();
-            return;
+        switch (entry.kind) {
+            .directory => try self.queueFilesystemPathLoad(entry.path, true, false),
+            .file => try self.submitFilesystemRequest(.read_file, entry.path, false),
+            .unknown => try self.submitFilesystemRequest(.resolve_kind, entry.path, true),
         }
-
-        const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
-        const raw = try self.readFsPathTextGui(client, entry.path);
-        defer self.allocator.free(raw);
-
-        if (self.filesystem_preview_path) |value| self.allocator.free(value);
-        self.filesystem_preview_path = try self.allocator.dupe(u8, entry.path);
-
-        if (self.filesystem_preview_text) |value| self.allocator.free(value);
-        if (raw.len > 16_384) {
-            const suffix = "\n... (truncated)";
-            const limit = 16_384;
-            const buf = try self.allocator.alloc(u8, limit + suffix.len);
-            @memcpy(buf[0..limit], raw[0..limit]);
-            @memcpy(buf[limit .. limit + suffix.len], suffix);
-            self.filesystem_preview_text = buf;
-        } else {
-            self.filesystem_preview_text = try self.allocator.dupe(u8, raw);
-        }
-        self.clearFilesystemError();
-    }
-
-    fn resolveFilesystemEntryKind(self: *App, path: []const u8) !FilesystemEntryKind {
-        const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
-        const fid = try self.fsrpcWalkPathGui(client, path);
-        defer self.fsrpcClunkBestEffort(client, fid);
-        const is_dir = try self.fsrpcFidIsDirGui(client, fid);
-        return if (is_dir) .directory else .file;
     }
 
     fn updateFilesystemEntryKind(self: *App, path: []const u8, kind: FilesystemEntryKind) void {
@@ -5078,7 +5305,7 @@ const App = struct {
         if (self.drawButtonWidget(
             refresh_rect,
             "Refresh",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.filesystem_busy },
         )) {
             self.refreshFilesystemBrowser() catch |err| {
                 const msg = self.formatFilesystemOpError("Filesystem refresh failed", err);
@@ -5091,13 +5318,12 @@ const App = struct {
         if (self.drawButtonWidget(
             up_rect,
             "Up",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.filesystem_busy },
         )) {
             const next_path = self.parentFilesystemPath(path_label) catch null;
             if (next_path) |value| {
                 defer self.allocator.free(value);
-                self.setFilesystemPath(value) catch {};
-                self.refreshFilesystemBrowser() catch |err| {
+                self.queueFilesystemPathLoad(value, true, false) catch |err| {
                     const msg = self.formatFilesystemOpError("Filesystem refresh failed", err);
                     if (msg) |text| {
                         defer self.allocator.free(text);
@@ -5109,24 +5335,27 @@ const App = struct {
         if (self.drawButtonWidget(
             root_rect,
             "Use Workspace Root",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.filesystem_busy },
         )) {
+            var target_path: ?[]u8 = null;
+            defer if (target_path) |value| self.allocator.free(value);
             if (self.workspace_state) |*status| {
                 if (status.workspace_root) |root| {
                     const mapped = self.mapWorkspaceRootToFilesystemPath(root) catch null;
                     if (mapped) |value| {
-                        defer self.allocator.free(value);
-                        self.setFilesystemPath(value) catch {};
+                        target_path = value;
                     } else {
-                        self.setFilesystemPath("/") catch {};
+                        target_path = self.allocator.dupe(u8, "/") catch null;
                     }
                 } else {
-                    self.setFilesystemPath("/") catch {};
+                    target_path = self.allocator.dupe(u8, "/") catch null;
                 }
             } else {
-                self.setFilesystemPath("/") catch {};
+                target_path = self.allocator.dupe(u8, "/") catch null;
             }
-            self.refreshFilesystemBrowser() catch |err| {
+
+            const resolved_target = if (target_path) |value| value else "/";
+            self.queueFilesystemPathLoad(resolved_target, true, false) catch |err| {
                 const msg = self.formatFilesystemOpError("Filesystem refresh failed", err);
                 if (msg) |text| {
                     defer self.allocator.free(text);
@@ -5136,6 +5365,16 @@ const App = struct {
         }
 
         y += row_h + layout.row_gap;
+        if (self.filesystem_busy) {
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                y,
+                content_width,
+                "Loading filesystem...",
+                self.theme.colors.text_secondary,
+            );
+            y += layout.line_height;
+        }
         if (self.filesystem_error) |err_text| {
             self.drawTextTrimmed(
                 rect.min[0] + pad,
@@ -5172,7 +5411,11 @@ const App = struct {
             const label = std.fmt.allocPrint(self.allocator, "{s} {s}", .{ prefix, entry.name }) catch null;
             const clicked = if (label) |text| blk: {
                 defer self.allocator.free(text);
-                break :blk self.drawButtonWidget(row_rect, text, .{ .variant = .secondary });
+                break :blk self.drawButtonWidget(
+                    row_rect,
+                    text,
+                    .{ .variant = .secondary, .disabled = self.filesystem_busy },
+                );
             } else false;
             if (clicked) {
                 self.openFilesystemEntry(&entry) catch |err| {
@@ -6330,6 +6573,8 @@ const App = struct {
         const had_pending_send = self.pending_send_message_id != null;
         self.setConnectionState(.connecting, "Connecting...");
         self.session_attach_state = .unknown;
+        self.stopFilesystemWorker();
+        self.clearFilesystemDirCache();
         if (self.ws_client) |*existing| {
             while (existing.tryReceive()) |msg| self.allocator.free(msg);
             existing.deinit();
@@ -6375,13 +6620,33 @@ const App = struct {
 
         var attach_warning: ?[]u8 = null;
         defer if (attach_warning) |value| self.allocator.free(value);
+        var worker_attach_session: ?[]const u8 = null;
+        var worker_attach_agent: ?[]const u8 = null;
+        var worker_attach_project_id: ?[]const u8 = null;
+        var worker_attach_project_token: ?[]const u8 = null;
+        var fetched_worker_agent: ?[]u8 = null;
+        defer if (fetched_worker_agent) |value| self.allocator.free(value);
 
         if (self.ws_client) |*client| {
-            control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter) catch |err| {
+            control_plane.ensureUnifiedV2ConnectionWithTimeout(
+                self.allocator,
+                client,
+                &self.message_counter,
+                CONTROL_CONNECT_TIMEOUT_MS,
+            ) catch |err| {
                 client.deinit();
                 self.ws_client = null;
                 const msg = if (err == error.RemoteError) blk: {
                     if (control_plane.lastRemoteError()) |remote| {
+                        if (isTokenAuthRemoteError(remote)) {
+                            self.disableAutoConnectAfterAuthFailure();
+                            self.settings_panel.focused_field = .project_operator_token;
+                            break :blk try std.fmt.allocPrint(
+                                self.allocator,
+                                "Handshake failed: {s}. Update token in Projects and reconnect.",
+                                .{remote},
+                            );
+                        }
                         break :blk try std.fmt.allocPrint(self.allocator, "Handshake failed: {s}", .{remote});
                     }
                     break :blk try std.fmt.allocPrint(self.allocator, "Handshake failed: {s}", .{@errorName(err)});
@@ -6401,6 +6666,12 @@ const App = struct {
             }
             const attach_session = self.settings_panel.default_session.items;
             try self.ensureSessionExists(attach_session, attach_session);
+            worker_attach_session = attach_session;
+            worker_attach_project_id = self.selectedProjectId();
+            worker_attach_project_token = if (worker_attach_project_id) |project_id|
+                self.selectedProjectToken(project_id)
+            else
+                null;
 
             self.attachSessionBinding(client, attach_session) catch |err| {
                 const primary_detail_owned = try self.allocator.dupe(
@@ -6434,6 +6705,8 @@ const App = struct {
                         );
                     };
                     if (fallback_ok) {
+                        worker_attach_project_id = null;
+                        worker_attach_project_token = null;
                         if (primary_is_project_auth) {
                             attach_warning = try self.allocator.dupe(
                                 u8,
@@ -6449,6 +6722,8 @@ const App = struct {
                     }
                 } else {
                     std.log.err("Session attach failed: {s}", .{primary_detail_owned});
+                    worker_attach_project_id = null;
+                    worker_attach_project_token = null;
                     attach_warning = try std.fmt.allocPrint(
                         self.allocator,
                         "Session attach failed ({s}); continuing with default server session binding.",
@@ -6456,7 +6731,34 @@ const App = struct {
                     );
                 }
             };
+
+            worker_attach_agent = self.selectedAgentId();
+            if (worker_attach_agent == null) {
+                fetched_worker_agent = self.fetchDefaultAgentFromServer(client, attach_session) catch null;
+                if (fetched_worker_agent) |agent_id| {
+                    worker_attach_agent = agent_id;
+                    self.setDefaultAgentInSettings(agent_id) catch {};
+                }
+            }
         }
+
+        self.startFilesystemWorker(
+            effective_url,
+            connect_token,
+            worker_attach_session,
+            worker_attach_agent,
+            worker_attach_project_id,
+            worker_attach_project_token,
+        ) catch |err| {
+            std.log.warn("Failed to start filesystem worker: {s}", .{@errorName(err)});
+            const warning = std.fmt.allocPrint(
+                self.allocator,
+                "Filesystem worker unavailable: {s}",
+                .{@errorName(err)},
+            ) catch null;
+            defer if (warning) |value| self.allocator.free(value);
+            if (warning) |value| self.setFilesystemError(value);
+        };
 
         self.setConnectionState(.connected, "Connected");
         self.settings_panel.focused_field = .none;
@@ -6467,6 +6769,12 @@ const App = struct {
                 "main";
             self.refreshSessionAttachStatusOnce(client, session_key_for_status);
         }
+        self.refreshWorkspaceData() catch |err| {
+            if (self.formatControlOpError("Workspace refresh failed", err)) |msg| {
+                defer self.allocator.free(msg);
+                self.setWorkspaceError(msg);
+            }
+        };
 
         // Save URL to config on successful connect.
         // Do not persist fallback tokens into the selected role.
@@ -6479,14 +6787,6 @@ const App = struct {
         self.syncSettingsToConfig() catch |err| {
             std.log.warn("Failed to save config on connect: {s}", .{@errorName(err)});
         };
-        self.refreshWorkspaceData() catch |err| {
-            const msg = self.formatControlOpError("Workspace refresh failed", err);
-            if (msg) |text| {
-                defer self.allocator.free(text);
-                self.setWorkspaceError(text);
-            }
-        };
-
         if (self.chat_sessions.items.len == 0) {
             try self.ensureSessionExists("main", "Main");
         } else if (self.current_session_key == null) {
@@ -6560,6 +6860,7 @@ const App = struct {
     }
 
     fn disconnect(self: *App) void {
+        self.stopFilesystemWorker();
         if (self.ws_client) |*client| {
             // Drain any pending messages before disconnecting
             while (client.tryReceive()) |msg| {
@@ -6576,6 +6877,7 @@ const App = struct {
         self.clearPendingDebugRequest();
         self.clearWorkspaceData();
         self.clearFilesystemData();
+        self.clearFilesystemDirCache();
     }
 
     fn saveConfig(self: *App) !void {
@@ -6628,7 +6930,7 @@ const App = struct {
             try self.appendMessage("system", "No active session available", null);
             return;
         }
-        if (self.session_attach_state != .ready) {
+        if (self.session_attach_state == .unknown or self.session_attach_state == .err) {
             self.attachSessionBinding(client, session_key) catch |err| {
                 const primary_detail_owned = try self.allocator.dupe(
                     u8,
@@ -6669,13 +6971,18 @@ const App = struct {
                 }
             };
             self.refreshSessionAttachStatusOnce(client, session_key);
+        } else if (self.session_attach_state == .warming) {
+            // Avoid re-attaching while warmup is in-flight; that re-arms backend warmup and can
+            // keep the session in warming forever when the user retries quickly.
+            self.refreshSessionAttachStatusOnce(client, session_key);
         }
         if (self.session_attach_state == .warming) {
             try self.appendMessage("system", "Sandbox runtime is warming. Retry in a moment.", null);
             return error.RuntimeWarming;
         }
         if (self.session_attach_state == .err) {
-            try self.appendMessage("system", "Sandbox runtime is unavailable for this session.", null);
+            const detail = self.workspace_last_error orelse "Sandbox runtime is unavailable for this session.";
+            try self.appendMessage("system", detail, null);
             return error.RemoteError;
         }
 

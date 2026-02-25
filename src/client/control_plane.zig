@@ -13,7 +13,16 @@ pub fn ensureUnifiedV2Connection(
     client: anytype,
     message_counter: *u64,
 ) !void {
-    try unified_v2.sendControlVersionAndConnect(allocator, client, message_counter, default_timeout_ms);
+    try ensureUnifiedV2ConnectionWithTimeout(allocator, client, message_counter, default_timeout_ms);
+}
+
+pub fn ensureUnifiedV2ConnectionWithTimeout(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    timeout_ms: i64,
+) !void {
+    try unified_v2.sendControlVersionAndConnect(allocator, client, message_counter, timeout_ms);
 }
 
 pub fn requestControlPayloadJson(
