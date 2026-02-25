@@ -52,6 +52,7 @@ const MAX_DEBUG_EVENTS: usize = 500;
 const FSRPC_DEFAULT_TIMEOUT_MS: u32 = 15_000;
 const FSRPC_CHAT_WRITE_TIMEOUT_MS: u32 = 180_000;
 const FSRPC_CLUNK_TIMEOUT_MS: u32 = 1_000;
+const CONTROL_CONNECT_TIMEOUT_MS: i64 = 2_500;
 const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
 const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
@@ -3257,6 +3258,24 @@ const App = struct {
     fn isProjectAuthRemoteError(remote: []const u8) bool {
         return std.mem.indexOf(u8, remote, "project_auth_failed") != null or
             std.mem.indexOf(u8, remote, "ProjectAuthFailed") != null;
+    }
+
+    fn isTokenAuthRemoteError(remote: []const u8) bool {
+        return std.mem.indexOf(u8, remote, "auth_failed") != null or
+            std.mem.indexOf(u8, remote, "auth_required") != null or
+            std.mem.indexOf(u8, remote, "invalid token") != null or
+            std.mem.indexOf(u8, remote, "invalid_token") != null or
+            std.mem.indexOf(u8, remote, "unauthorized") != null or
+            std.mem.indexOf(u8, remote, "forbidden") != null;
+    }
+
+    fn disableAutoConnectAfterAuthFailure(self: *App) void {
+        if (!self.settings_panel.auto_connect_on_launch and !self.config.auto_connect_on_launch) return;
+        self.settings_panel.auto_connect_on_launch = false;
+        self.config.auto_connect_on_launch = false;
+        self.config.save() catch |err| {
+            std.log.warn("Failed to persist auto-connect disable after auth failure: {s}", .{@errorName(err)});
+        };
     }
 
     fn clearSelectedProjectAfterAuthFailure(self: *App) void {
@@ -6581,11 +6600,25 @@ const App = struct {
         defer if (attach_warning) |value| self.allocator.free(value);
 
         if (self.ws_client) |*client| {
-            control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter) catch |err| {
+            control_plane.ensureUnifiedV2ConnectionWithTimeout(
+                self.allocator,
+                client,
+                &self.message_counter,
+                CONTROL_CONNECT_TIMEOUT_MS,
+            ) catch |err| {
                 client.deinit();
                 self.ws_client = null;
                 const msg = if (err == error.RemoteError) blk: {
                     if (control_plane.lastRemoteError()) |remote| {
+                        if (isTokenAuthRemoteError(remote)) {
+                            self.disableAutoConnectAfterAuthFailure();
+                            self.settings_panel.focused_field = .project_operator_token;
+                            break :blk try std.fmt.allocPrint(
+                                self.allocator,
+                                "Handshake failed: {s}. Update token in Projects and reconnect.",
+                                .{remote},
+                            );
+                        }
                         break :blk try std.fmt.allocPrint(self.allocator, "Handshake failed: {s}", .{remote});
                     }
                     break :blk try std.fmt.allocPrint(self.allocator, "Handshake failed: {s}", .{@errorName(err)});
@@ -6694,14 +6727,6 @@ const App = struct {
         self.syncSettingsToConfig() catch |err| {
             std.log.warn("Failed to save config on connect: {s}", .{@errorName(err)});
         };
-        self.refreshWorkspaceData() catch |err| {
-            const msg = self.formatControlOpError("Workspace refresh failed", err);
-            if (msg) |text| {
-                defer self.allocator.free(text);
-                self.setWorkspaceError(text);
-            }
-        };
-
         if (self.chat_sessions.items.len == 0) {
             try self.ensureSessionExists("main", "Main");
         } else if (self.current_session_key == null) {
