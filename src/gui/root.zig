@@ -3125,10 +3125,16 @@ const App = struct {
 
     fn startFilesystemWorker(self: *App, url: []const u8, token: []const u8) !void {
         self.stopFilesystemWorker();
-        var worker = try fs_worker_mod.FilesystemWorker.init(self.allocator, url, token);
-        errdefer worker.deinit();
-        try worker.start();
-        self.filesystem_worker = worker;
+        self.filesystem_worker = try fs_worker_mod.FilesystemWorker.init(self.allocator, url, token);
+        errdefer {
+            if (self.filesystem_worker) |*worker| {
+                worker.deinit();
+                self.filesystem_worker = null;
+            }
+        }
+        if (self.filesystem_worker) |*worker| {
+            try worker.start();
+        }
         self.filesystem_busy = false;
         self.filesystem_active_request = null;
     }
