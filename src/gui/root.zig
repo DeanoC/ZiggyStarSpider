@@ -3123,9 +3123,25 @@ const App = struct {
         return null;
     }
 
-    fn startFilesystemWorker(self: *App, url: []const u8, token: []const u8) !void {
+    fn startFilesystemWorker(
+        self: *App,
+        url: []const u8,
+        token: []const u8,
+        session_key: ?[]const u8,
+        agent_id: ?[]const u8,
+        project_id: ?[]const u8,
+        project_token: ?[]const u8,
+    ) !void {
         self.stopFilesystemWorker();
-        self.filesystem_worker = try fs_worker_mod.FilesystemWorker.init(self.allocator, url, token);
+        self.filesystem_worker = try fs_worker_mod.FilesystemWorker.init(
+            self.allocator,
+            url,
+            token,
+            session_key,
+            agent_id,
+            project_id,
+            project_token,
+        );
         errdefer {
             if (self.filesystem_worker) |*worker| {
                 worker.deinit();
@@ -6604,6 +6620,12 @@ const App = struct {
 
         var attach_warning: ?[]u8 = null;
         defer if (attach_warning) |value| self.allocator.free(value);
+        var worker_attach_session: ?[]const u8 = null;
+        var worker_attach_agent: ?[]const u8 = null;
+        var worker_attach_project_id: ?[]const u8 = null;
+        var worker_attach_project_token: ?[]const u8 = null;
+        var fetched_worker_agent: ?[]u8 = null;
+        defer if (fetched_worker_agent) |value| self.allocator.free(value);
 
         if (self.ws_client) |*client| {
             control_plane.ensureUnifiedV2ConnectionWithTimeout(
@@ -6644,6 +6666,12 @@ const App = struct {
             }
             const attach_session = self.settings_panel.default_session.items;
             try self.ensureSessionExists(attach_session, attach_session);
+            worker_attach_session = attach_session;
+            worker_attach_project_id = self.selectedProjectId();
+            worker_attach_project_token = if (worker_attach_project_id) |project_id|
+                self.selectedProjectToken(project_id)
+            else
+                null;
 
             self.attachSessionBinding(client, attach_session) catch |err| {
                 const primary_detail_owned = try self.allocator.dupe(
@@ -6677,6 +6705,8 @@ const App = struct {
                         );
                     };
                     if (fallback_ok) {
+                        worker_attach_project_id = null;
+                        worker_attach_project_token = null;
                         if (primary_is_project_auth) {
                             attach_warning = try self.allocator.dupe(
                                 u8,
@@ -6692,6 +6722,8 @@ const App = struct {
                     }
                 } else {
                     std.log.err("Session attach failed: {s}", .{primary_detail_owned});
+                    worker_attach_project_id = null;
+                    worker_attach_project_token = null;
                     attach_warning = try std.fmt.allocPrint(
                         self.allocator,
                         "Session attach failed ({s}); continuing with default server session binding.",
@@ -6699,9 +6731,25 @@ const App = struct {
                     );
                 }
             };
+
+            worker_attach_agent = self.selectedAgentId();
+            if (worker_attach_agent == null) {
+                fetched_worker_agent = self.fetchDefaultAgentFromServer(client, attach_session) catch null;
+                if (fetched_worker_agent) |agent_id| {
+                    worker_attach_agent = agent_id;
+                    self.setDefaultAgentInSettings(agent_id) catch {};
+                }
+            }
         }
 
-        self.startFilesystemWorker(effective_url, connect_token) catch |err| {
+        self.startFilesystemWorker(
+            effective_url,
+            connect_token,
+            worker_attach_session,
+            worker_attach_agent,
+            worker_attach_project_id,
+            worker_attach_project_token,
+        ) catch |err| {
             std.log.warn("Failed to start filesystem worker: {s}", .{@errorName(err)});
             const warning = std.fmt.allocPrint(
                 self.allocator,
@@ -6721,6 +6769,12 @@ const App = struct {
                 "main";
             self.refreshSessionAttachStatusOnce(client, session_key_for_status);
         }
+        self.refreshWorkspaceData() catch |err| {
+            if (self.formatControlOpError("Workspace refresh failed", err)) |msg| {
+                defer self.allocator.free(msg);
+                self.setWorkspaceError(msg);
+            }
+        };
 
         // Save URL to config on successful connect.
         // Do not persist fallback tokens into the selected role.

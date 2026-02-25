@@ -4,6 +4,7 @@ const control_plane = @import("control_plane");
 
 const fsrpc_default_timeout_ms: u32 = 15_000;
 const fsrpc_clunk_timeout_ms: u32 = 1_000;
+const control_session_attach_timeout_ms: i64 = 20_000;
 
 pub const RequestKind = enum {
     list_dir,
@@ -158,23 +159,53 @@ pub const FilesystemWorker = struct {
     allocator: std.mem.Allocator,
     url: []u8,
     token: []u8,
+    session_key: ?[]u8 = null,
+    agent_id: ?[]u8 = null,
+    project_id: ?[]u8 = null,
+    project_token: ?[]u8 = null,
     should_stop: std.atomic.Value(bool),
     worker_thread: ?std.Thread = null,
     requests: RequestQueue,
     results: ResultQueue,
     client: ?ws_client_mod.WebSocketClient = null,
     control_ready: bool = false,
+    session_attached: bool = false,
     fsrpc_ready: bool = false,
     message_counter: u64 = 0,
     next_tag: u32 = 1,
     next_fid: u32 = 2,
     last_remote_error: ?[]u8 = null,
 
-    pub fn init(allocator: std.mem.Allocator, url: []const u8, token: []const u8) !FilesystemWorker {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        token: []const u8,
+        session_key: ?[]const u8,
+        agent_id: ?[]const u8,
+        project_id: ?[]const u8,
+        project_token: ?[]const u8,
+    ) !FilesystemWorker {
+        const url_copy = try allocator.dupe(u8, url);
+        errdefer allocator.free(url_copy);
+        const token_copy = try allocator.dupe(u8, token);
+        errdefer allocator.free(token_copy);
+        const session_key_copy = if (session_key) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (session_key_copy) |value| allocator.free(value);
+        const agent_id_copy = if (agent_id) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (agent_id_copy) |value| allocator.free(value);
+        const project_id_copy = if (project_id) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (project_id_copy) |value| allocator.free(value);
+        const project_token_copy = if (project_token) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (project_token_copy) |value| allocator.free(value);
+
         return .{
             .allocator = allocator,
-            .url = try allocator.dupe(u8, url),
-            .token = try allocator.dupe(u8, token),
+            .url = url_copy,
+            .token = token_copy,
+            .session_key = session_key_copy,
+            .agent_id = agent_id_copy,
+            .project_id = project_id_copy,
+            .project_token = project_token_copy,
             .should_stop = std.atomic.Value(bool).init(false),
             .requests = RequestQueue.init(allocator),
             .results = ResultQueue.init(allocator),
@@ -197,6 +228,10 @@ pub const FilesystemWorker = struct {
         self.requests.deinit();
         self.results.deinit();
         self.clearRemoteError();
+        if (self.session_key) |value| self.allocator.free(value);
+        if (self.agent_id) |value| self.allocator.free(value);
+        if (self.project_id) |value| self.allocator.free(value);
+        if (self.project_token) |value| self.allocator.free(value);
         self.allocator.free(self.url);
         self.allocator.free(self.token);
     }
@@ -294,6 +329,7 @@ pub const FilesystemWorker = struct {
             try client.connect();
             self.client = client;
             self.control_ready = false;
+            self.session_attached = false;
             self.fsrpc_ready = false;
         }
 
@@ -305,6 +341,9 @@ pub const FilesystemWorker = struct {
             if (!self.control_ready) {
                 try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
                 self.control_ready = true;
+            }
+            if (!self.session_attached) {
+                try self.ensureSessionAttached(client);
             }
             return client;
         }
@@ -320,6 +359,7 @@ pub const FilesystemWorker = struct {
             self.client = null;
         }
         self.control_ready = false;
+        self.session_attached = false;
         self.fsrpc_ready = false;
     }
 
@@ -347,6 +387,51 @@ pub const FilesystemWorker = struct {
         self.next_fid +%= 1;
         if (self.next_fid == 0 or self.next_fid == 1) self.next_fid = 2;
         return out;
+    }
+
+    fn ensureSessionAttached(self: *FilesystemWorker, client: *ws_client_mod.WebSocketClient) !void {
+        const session_key = self.session_key orelse {
+            self.session_attached = true;
+            return;
+        };
+        const agent_id = self.agent_id orelse {
+            self.session_attached = true;
+            return;
+        };
+
+        const escaped_session = try jsonEscape(self.allocator, session_key);
+        defer self.allocator.free(escaped_session);
+        const escaped_agent = try jsonEscape(self.allocator, agent_id);
+        defer self.allocator.free(escaped_agent);
+
+        var payload = std.ArrayListUnmanaged(u8){};
+        defer payload.deinit(self.allocator);
+        try payload.writer(self.allocator).print(
+            "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\"",
+            .{ escaped_session, escaped_agent },
+        );
+        if (self.project_id) |project_id| {
+            const escaped_project = try jsonEscape(self.allocator, project_id);
+            defer self.allocator.free(escaped_project);
+            try payload.writer(self.allocator).print(",\"project_id\":\"{s}\"", .{escaped_project});
+        }
+        if (self.project_token) |project_token| {
+            const escaped_token = try jsonEscape(self.allocator, project_token);
+            defer self.allocator.free(escaped_token);
+            try payload.writer(self.allocator).print(",\"project_token\":\"{s}\"", .{escaped_token});
+        }
+        try payload.append(self.allocator, '}');
+
+        const response_payload = try control_plane.requestControlPayloadJsonWithTimeout(
+            self.allocator,
+            client,
+            &self.message_counter,
+            "control.session_attach",
+            payload.items,
+            control_session_attach_timeout_ms,
+        );
+        defer self.allocator.free(response_payload);
+        self.session_attached = true;
     }
 
     fn ensureFsrpcReady(self: *FilesystemWorker, client: *ws_client_mod.WebSocketClient) !void {
