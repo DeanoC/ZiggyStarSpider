@@ -4857,6 +4857,7 @@ const App = struct {
         }
 
         const button_width: f32 = @max(148.0 * self.ui_scale, rect_width * 0.25);
+        const control_ready = self.connection_state == .connected;
         const action_row_y = y + button_height + layout.section_gap;
         const connect_rect = Rect.fromXYWH(
             rect.min[0] + pad,
@@ -4889,15 +4890,54 @@ const App = struct {
             };
         }
 
+        const history_row_y = action_row_y + button_height + layout.row_gap;
+        const load_history_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            history_row_y,
+            button_width,
+            button_height,
+        );
+        if (self.drawButtonWidget(
+            load_history_rect,
+            "Load History",
+            .{ .variant = .secondary, .disabled = !control_ready },
+        )) {
+            self.loadSessionHistoryFromServer(true) catch |err| {
+                if (self.formatControlOpError("Session history failed", err)) |msg| {
+                    defer self.allocator.free(msg);
+                    self.setWorkspaceError(msg);
+                }
+            };
+        }
+
+        const restore_rect = Rect.fromXYWH(
+            load_history_rect.max[0] + pad,
+            history_row_y,
+            button_width,
+            button_height,
+        );
+        if (self.drawButtonWidget(
+            restore_rect,
+            "Restore Last",
+            .{ .variant = .secondary, .disabled = !control_ready },
+        )) {
+            self.restoreLastSessionFromServer() catch |err| {
+                if (self.formatControlOpError("Session restore failed", err)) |msg| {
+                    defer self.allocator.free(msg);
+                    self.setWorkspaceError(msg);
+                }
+            };
+        }
+
         self.drawTextTrimmed(
-            save_rect.max[0] + pad,
-            action_row_y + @max(0.0, (button_height - layout.line_height) * 0.5),
-            @max(120.0, rect_width - (save_rect.max[0] - rect.min[0]) - pad * 2.0),
+            rect.min[0] + pad,
+            history_row_y + button_height + layout.row_gap * 0.5,
+            input_width,
             "Open panels from Windows menu (top bar).",
             self.theme.colors.text_secondary,
         );
 
-        const content_bottom_scrolled = action_row_y + button_height + layout.row_gap;
+        const content_bottom_scrolled = history_row_y + button_height + layout.row_gap * 1.5 + layout.line_height;
         const content_bottom = content_bottom_scrolled + self.settings_panel.settings_scroll_y;
         const total_height = content_bottom - (rect.min[1] + pad);
         const viewport_h = @max(0.0, rect.max[1] - rect.min[1] - pad * 2.0);
@@ -5406,14 +5446,47 @@ const App = struct {
 
         if (self.workspace_state) |*status| {
             const root_text = status.workspace_root orelse "(none)";
+            const mounted_count: usize = if (status.actual_mounts.items.len > 0)
+                status.actual_mounts.items.len
+            else
+                status.mounts.items.len;
             const workspace_line = std.fmt.allocPrint(
                 self.allocator,
                 "Workspace root: {s} | mounts: {d}",
-                .{ root_text, status.mounts.items.len },
+                .{ root_text, mounted_count },
             ) catch null;
             if (workspace_line) |line| {
                 defer self.allocator.free(line);
                 self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
+                y += layout.line_height;
+            }
+
+            const health_state = workspaceHealthState(status);
+            const availability_line = std.fmt.allocPrint(
+                self.allocator,
+                "Workspace health: {s} | online={d}/{d} degraded={d} missing={d} drift={d}",
+                .{
+                    workspaceHealthStateLabel(health_state),
+                    status.availability_online,
+                    status.availability_mounts_total,
+                    status.availability_degraded,
+                    status.availability_missing,
+                    status.drift_count,
+                },
+            ) catch null;
+            if (availability_line) |line| {
+                defer self.allocator.free(line);
+                self.drawLabel(
+                    rect.min[0] + pad,
+                    y,
+                    line,
+                    switch (health_state) {
+                        .healthy => self.theme.colors.text_secondary,
+                        .unknown => self.theme.colors.text_secondary,
+                        .degraded => zcolors.rgba(236, 174, 36, 255),
+                        .missing => zcolors.rgba(220, 80, 80, 255),
+                    },
+                );
                 y += layout.line_height;
             }
         }
@@ -5514,17 +5587,24 @@ const App = struct {
             self.drawLabel(rect.min[0] + pad, y, "Nodes:", self.theme.colors.text_primary);
             y += layout.label_to_input_gap;
             const max_nodes: usize = @min(self.nodes.items.len, 8);
+            const now_ms = std.time.milliTimestamp();
             var idx: usize = 0;
             while (idx < max_nodes) : (idx += 1) {
                 const node = self.nodes.items[idx];
+                const node_online = node.lease_expires_at_ms > now_ms;
                 const line = std.fmt.allocPrint(
                     self.allocator,
-                    "  - {s} ({s})",
-                    .{ node.node_id, node.node_name },
+                    "  - {s} ({s}) [{s}]",
+                    .{ node.node_id, node.node_name, if (node_online) "online" else "degraded" },
                 ) catch null;
                 if (line) |value| {
                     defer self.allocator.free(value);
-                    self.drawLabel(rect.min[0] + pad, y, value, self.theme.colors.text_secondary);
+                    self.drawLabel(
+                        rect.min[0] + pad,
+                        y,
+                        value,
+                        if (node_online) self.theme.colors.text_secondary else zcolors.rgba(236, 174, 36, 255),
+                    );
                     y += layout.line_height;
                 }
             }
@@ -5567,6 +5647,36 @@ const App = struct {
         if (!std.mem.startsWith(u8, path, mount_path)) return false;
         if (path.len == mount_path.len) return true;
         return path.len > mount_path.len and path[mount_path.len] == '/';
+    }
+
+    const WorkspaceHealthState = enum {
+        healthy,
+        degraded,
+        missing,
+        unknown,
+    };
+
+    fn workspaceHealthState(status: *const workspace_types.WorkspaceStatus) WorkspaceHealthState {
+        if (status.availability_missing > 0) return .missing;
+        const reconcile_state = status.reconcile_state orelse "";
+        if (status.availability_degraded > 0 or
+            status.drift_count > 0 or
+            status.queue_depth > 0 or
+            std.mem.eql(u8, reconcile_state, "degraded"))
+        {
+            return .degraded;
+        }
+        if (status.availability_mounts_total == 0 or std.mem.eql(u8, reconcile_state, "unknown")) return .unknown;
+        return .healthy;
+    }
+
+    fn workspaceHealthStateLabel(state: WorkspaceHealthState) []const u8 {
+        return switch (state) {
+            .healthy => "healthy",
+            .degraded => "degraded",
+            .missing => "missing",
+            .unknown => "unknown",
+        };
     }
 
     fn findMountForPath(self: *App, path: []const u8) ?*const workspace_types.MountView {
@@ -6775,6 +6885,226 @@ const App = struct {
         return self.config.selectedAgent();
     }
 
+    fn sessionHistoryAgentFilter(self: *App) ?[]const u8 {
+        const selected = self.selectedAgentId() orelse return null;
+        if (selected.len == 0) return null;
+        return selected;
+    }
+
+    fn formatSessionHistoryDisplayName(
+        self: *App,
+        session: *const workspace_types.SessionSummary,
+    ) ![]u8 {
+        if (session.summary) |summary| {
+            return std.fmt.allocPrint(
+                self.allocator,
+                "{s} ({s}@{s}) - {s}",
+                .{
+                    session.session_key,
+                    session.agent_id,
+                    session.project_id orelse "(none)",
+                    summary,
+                },
+            );
+        }
+        return std.fmt.allocPrint(
+            self.allocator,
+            "{s} ({s}@{s})",
+            .{
+                session.session_key,
+                session.agent_id,
+                session.project_id orelse "(none)",
+            },
+        );
+    }
+
+    fn sessionExists(self: *const App, session_key: []const u8) bool {
+        for (self.chat_sessions.items) |session| {
+            if (std.mem.eql(u8, session.key, session_key)) return true;
+        }
+        return false;
+    }
+
+    fn projectTokenForSessionProject(self: *App, project_id: ?[]const u8) ?[]const u8 {
+        const pid = project_id orelse return null;
+        if (self.settings_panel.project_id.items.len > 0 and
+            std.mem.eql(u8, self.settings_panel.project_id.items, pid) and
+            self.settings_panel.project_token.items.len > 0)
+        {
+            return self.settings_panel.project_token.items;
+        }
+        return self.config.getProjectToken(pid);
+    }
+
+    fn attachSessionBindingExplicit(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        session_key: []const u8,
+        agent_id: []const u8,
+        project_id: ?[]const u8,
+        project_token: ?[]const u8,
+    ) !void {
+        const payload_json = try self.buildSessionAttachPayload(
+            session_key,
+            agent_id,
+            project_id,
+            project_token,
+        );
+        defer self.allocator.free(payload_json);
+        const response_payload = try control_plane.requestControlPayloadJsonWithTimeout(
+            self.allocator,
+            client,
+            &self.message_counter,
+            "control.session_attach",
+            payload_json,
+            CONTROL_SESSION_ATTACH_TIMEOUT_MS,
+        );
+        defer self.allocator.free(response_payload);
+    }
+
+    fn loadSessionHistoryFromServer(self: *App, show_feedback: bool) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        var history = try control_plane.sessionHistory(
+            self.allocator,
+            client,
+            &self.message_counter,
+            self.sessionHistoryAgentFilter(),
+            24,
+        );
+        defer {
+            for (history.items) |*entry| entry.deinit(self.allocator);
+            history.deinit(self.allocator);
+        }
+
+        var added_count: usize = 0;
+        for (history.items) |*entry| {
+            const existed = self.sessionExists(entry.session_key);
+            const display_name = try self.formatSessionHistoryDisplayName(entry);
+            defer self.allocator.free(display_name);
+            try self.ensureSessionInList(entry.session_key, display_name);
+            if (!existed) added_count += 1;
+        }
+
+        if (self.current_session_key == null and history.items.len > 0) {
+            try self.setCurrentSessionKey(history.items[0].session_key);
+        }
+
+        if (!show_feedback) return;
+        if (history.items.len == 0) {
+            try self.appendMessage("system", "No persisted sessions found.", null);
+            return;
+        }
+        const message = try std.fmt.allocPrint(
+            self.allocator,
+            "Loaded {d} persisted session(s) ({d} new).",
+            .{ history.items.len, added_count },
+        );
+        defer self.allocator.free(message);
+        try self.appendMessage("system", message, null);
+    }
+
+    fn restoreLastSessionFromServer(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+
+        var restored = try control_plane.sessionRestore(
+            self.allocator,
+            client,
+            &self.message_counter,
+            self.sessionHistoryAgentFilter(),
+        );
+        defer restored.deinit(self.allocator);
+
+        if (!restored.found or restored.session == null) {
+            try self.appendMessage("system", "No persisted session available to restore.", null);
+            return;
+        }
+
+        const session = restored.session.?;
+        const display_name = try self.formatSessionHistoryDisplayName(&session);
+        defer self.allocator.free(display_name);
+        try self.ensureSessionInList(session.session_key, display_name);
+        try self.setCurrentSessionKey(session.session_key);
+
+        self.settings_panel.default_session.clearRetainingCapacity();
+        try self.settings_panel.default_session.appendSlice(self.allocator, session.session_key);
+        try self.setDefaultAgentInSettings(session.agent_id);
+
+        var effective_project_id = session.project_id;
+        var effective_project_token = self.projectTokenForSessionProject(effective_project_id);
+        var restore_warning: ?[]u8 = null;
+        defer if (restore_warning) |value| self.allocator.free(value);
+
+        self.attachSessionBindingExplicit(
+            client,
+            session.session_key,
+            session.agent_id,
+            effective_project_id,
+            effective_project_token,
+        ) catch |err| {
+            const primary_detail = control_plane.lastRemoteError() orelse @errorName(err);
+            if (effective_project_id != null and isSelectedProjectAttachRemoteError(primary_detail)) {
+                self.attachSessionBindingExplicit(
+                    client,
+                    session.session_key,
+                    session.agent_id,
+                    null,
+                    null,
+                ) catch |fallback_err| {
+                    _ = fallback_err;
+                    return err;
+                };
+                effective_project_id = null;
+                effective_project_token = null;
+                restore_warning = try std.fmt.allocPrint(
+                    self.allocator,
+                    "Restored session {s}, but project context was unavailable ({s}).",
+                    .{ session.session_key, primary_detail },
+                );
+            } else {
+                return err;
+            }
+        };
+
+        if (effective_project_id) |project_id| {
+            try self.ensureSelectedProjectInSettings(project_id);
+            self.settings_panel.project_token.clearRetainingCapacity();
+            if (effective_project_token) |token| {
+                try self.settings_panel.project_token.appendSlice(self.allocator, token);
+            }
+        }
+
+        self.refreshSessionAttachStatusOnce(client, session.session_key);
+        try self.syncSettingsToConfig();
+        self.startFilesystemWorker(
+            client.url_buf,
+            client.token_buf,
+            session.session_key,
+            session.agent_id,
+            effective_project_id,
+            effective_project_token,
+        ) catch |worker_err| {
+            std.log.warn("Failed to rebind filesystem worker for restored session: {s}", .{@errorName(worker_err)});
+        };
+
+        try self.loadSessionHistoryFromServer(false);
+        if (restore_warning) |warning| {
+            self.setWorkspaceError(warning);
+            try self.appendMessage("system", warning, null);
+            return;
+        }
+        self.clearWorkspaceError();
+        const ok = try std.fmt.allocPrint(
+            self.allocator,
+            "Restored session {s}.",
+            .{session.session_key},
+        );
+        defer self.allocator.free(ok);
+        try self.appendMessage("system", ok, null);
+    }
+
     fn parseAgentFromSessionListPayload(
         self: *App,
         payload_json: []const u8,
@@ -7201,6 +7531,9 @@ const App = struct {
                 defer self.allocator.free(msg);
                 self.setWorkspaceError(msg);
             }
+        };
+        self.loadSessionHistoryFromServer(false) catch |err| {
+            std.log.warn("Failed to load session history on connect: {s}", .{@errorName(err)});
         };
 
         // Save URL to config on successful connect.
@@ -9226,8 +9559,13 @@ const App = struct {
     }
 
     fn ensureSessionInList(self: *App, key: []const u8, display_name: []const u8) !void {
-        for (self.chat_sessions.items) |session| {
+        for (self.chat_sessions.items) |*session| {
             if (std.mem.eql(u8, session.key, key)) {
+                if (display_name.len > 0 and !std.mem.eql(u8, session.display_name, display_name)) {
+                    const display_name_copy = try self.allocator.dupe(u8, display_name);
+                    self.allocator.free(session.display_name);
+                    session.display_name = display_name_copy;
+                }
                 if (self.shouldLogDebug(120)) {
                     std.log.debug("ensureSessionInList: key exists {s}", .{key});
                 }
