@@ -5236,12 +5236,31 @@ const App = struct {
     }
 
     fn setFilesystemPath(self: *App, path: []const u8) !void {
+        const existing = self.filesystem_path.items;
+        const aliases_existing =
+            existing.len > 0 and
+            path.len > 0 and
+            slicesOverlap(existing, path);
+        const safe_path = if (aliases_existing)
+            try self.allocator.dupe(u8, path)
+        else
+            path;
+        defer if (aliases_existing) self.allocator.free(safe_path);
+
         self.filesystem_path.clearRetainingCapacity();
-        if (path.len == 0) {
+        if (safe_path.len == 0) {
             try self.filesystem_path.appendSlice(self.allocator, "/");
         } else {
-            try self.filesystem_path.appendSlice(self.allocator, path);
+            try self.filesystem_path.appendSlice(self.allocator, safe_path);
         }
+    }
+
+    fn slicesOverlap(a: []const u8, b: []const u8) bool {
+        const a_start = @intFromPtr(a.ptr);
+        const a_end = a_start + a.len;
+        const b_start = @intFromPtr(b.ptr);
+        const b_end = b_start + b.len;
+        return a_start < b_end and b_start < a_end;
     }
 
     fn mapWorkspaceRootToFilesystemPath(self: *App, workspace_root: []const u8) ![]u8 {
