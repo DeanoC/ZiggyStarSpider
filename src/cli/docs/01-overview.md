@@ -25,6 +25,12 @@ ziggystarspider --help
 - `project doctor` - Readiness checks with actionable failures
 - `node list` - List registered nodes
 - `node info <node_id>` - Show node details
+- `node join-request <node_name> [fs_url]` - Submit pending node join request
+- `node pending` - List pending node join requests
+- `node approve <request_id>` - Approve pending node join request
+- `node deny <request_id>` - Deny pending node join request
+- `node service-get <node_id>` - Show node service catalog
+- `node service-upsert <node_id> <node_secret>` - Update node service catalog metadata
 - `workspace status [project_id]` - Show active workspace mounts
 - `auth status` - Show Spiderweb auth token status (admin only)
 - `auth rotate <admin|user>` - Rotate Spiderweb auth token (admin only)

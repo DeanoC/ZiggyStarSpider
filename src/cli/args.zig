@@ -44,6 +44,12 @@ pub const Verb = enum {
     history,
     resume_job,
     list,
+    pending,
+    approve,
+    deny,
+    join_request,
+    service_get,
+    service_upsert,
     use,
     create,
     up,
@@ -194,6 +200,12 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
         .node => {
             if (std.mem.eql(u8, arg, "list")) return .list;
             if (std.mem.eql(u8, arg, "info")) return .info;
+            if (std.mem.eql(u8, arg, "pending")) return .pending;
+            if (std.mem.eql(u8, arg, "approve")) return .approve;
+            if (std.mem.eql(u8, arg, "deny")) return .deny;
+            if (std.mem.eql(u8, arg, "join-request")) return .join_request;
+            if (std.mem.eql(u8, arg, "service-get")) return .service_get;
+            if (std.mem.eql(u8, arg, "service-upsert")) return .service_upsert;
         },
         .workspace => {
             if (std.mem.eql(u8, arg, "status")) return .status;
