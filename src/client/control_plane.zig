@@ -475,6 +475,64 @@ pub fn getNode(
     return parseNodeInfo(allocator, node_val.object);
 }
 
+pub fn listAgents(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+) !std.ArrayListUnmanaged(workspace_types.AgentInfo) {
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.agent_list",
+        null,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const agents_val = parsed.value.object.get("agents") orelse return error.InvalidResponse;
+    if (agents_val != .array) return error.InvalidResponse;
+
+    var agents = std.ArrayListUnmanaged(workspace_types.AgentInfo){};
+    errdefer workspace_types.deinitAgentList(allocator, &agents);
+
+    for (agents_val.array.items) |item| {
+        if (item != .object) return error.InvalidResponse;
+        try agents.append(allocator, try parseAgentInfo(allocator, item.object));
+    }
+    return agents;
+}
+
+pub fn getAgent(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    agent_id: []const u8,
+) !workspace_types.AgentInfo {
+    const escaped_id = try unified_v2.jsonEscape(allocator, agent_id);
+    defer allocator.free(escaped_id);
+    const payload_req = try std.fmt.allocPrint(allocator, "{{\"agent_id\":\"{s}\"}}", .{escaped_id});
+    defer allocator.free(payload_req);
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.agent_get",
+        payload_req,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const agent_val = parsed.value.object.get("agent") orelse return error.InvalidResponse;
+    if (agent_val != .object) return error.InvalidResponse;
+    return parseAgentInfo(allocator, agent_val.object);
+}
+
 pub fn workspaceStatus(
     allocator: std.mem.Allocator,
     client: anytype,
@@ -670,6 +728,30 @@ fn parseNodeInfo(
     };
 }
 
+fn parseAgentInfo(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !workspace_types.AgentInfo {
+    var info = workspace_types.AgentInfo{
+        .id = try dupRequiredStringAny(allocator, obj, &.{ "id", "agent_id" }),
+        .name = try dupRequiredString(allocator, obj, "name"),
+        .description = try dupOptionalString(allocator, obj, "description") orelse try allocator.dupe(u8, ""),
+        .is_default = try getOptionalBool(obj, "is_default", false),
+        .identity_loaded = try getOptionalBool(obj, "identity_loaded", false),
+        .needs_hatching = try getOptionalBool(obj, "needs_hatching", false),
+    };
+    errdefer info.deinit(allocator);
+
+    if (obj.get("capabilities")) |caps_val| {
+        if (caps_val != .array) return error.InvalidResponse;
+        for (caps_val.array.items) |item| {
+            if (item != .string) return error.InvalidResponse;
+            try info.capabilities.append(allocator, try allocator.dupe(u8, item.string));
+        }
+    }
+    return info;
+}
+
 fn parseWorkspaceStatus(
     allocator: std.mem.Allocator,
     obj: std.json.ObjectMap,
@@ -715,6 +797,13 @@ fn parseWorkspaceStatus(
                 try status.drift_items.append(allocator, try parseDriftItem(allocator, item.object));
             }
         }
+    }
+    if (obj.get("availability")) |availability_val| {
+        if (availability_val != .object) return error.InvalidResponse;
+        status.availability_mounts_total = @intCast(try getOptionalU64(availability_val.object, "mounts_total", 0));
+        status.availability_online = @intCast(try getOptionalU64(availability_val.object, "online", 0));
+        status.availability_degraded = @intCast(try getOptionalU64(availability_val.object, "degraded", 0));
+        status.availability_missing = @intCast(try getOptionalU64(availability_val.object, "missing", 0));
     }
 
     status.reconcile_state = try dupOptionalNullableString(allocator, obj, "reconcile_state");
@@ -954,4 +1043,34 @@ test "parseProjectTokenMutation accepts nullable token" {
     try std.testing.expect(mutation.project_token == null);
     try std.testing.expectEqual(true, mutation.revoked);
     try std.testing.expectEqual(@as(i64, 1234), mutation.updated_at_ms);
+}
+
+test "parseAgentInfo reads capabilities and flags" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "id":"mother",
+        \\  "name":"Mother",
+        \\  "description":"Primary orchestrator",
+        \\  "is_default":true,
+        \\  "identity_loaded":true,
+        \\  "needs_hatching":false,
+        \\  "capabilities":["chat","plan"]
+        \\}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+
+    var info = try parseAgentInfo(allocator, parsed.value.object);
+    defer info.deinit(allocator);
+
+    try std.testing.expectEqualStrings("mother", info.id);
+    try std.testing.expectEqualStrings("Mother", info.name);
+    try std.testing.expect(info.is_default);
+    try std.testing.expect(info.identity_loaded);
+    try std.testing.expect(!info.needs_hatching);
+    try std.testing.expectEqual(@as(usize, 2), info.capabilities.items.len);
+    try std.testing.expectEqualStrings("chat", info.capabilities.items[0]);
+    try std.testing.expectEqualStrings("plan", info.capabilities.items[1]);
 }

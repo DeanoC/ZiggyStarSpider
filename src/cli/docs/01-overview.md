@@ -23,6 +23,8 @@ ziggystarspider --help
 - `project create <name> [vision]` - Create a project and store selection/token locally
 - `project up <name>` - One-shot project + mount bootstrap
 - `project doctor` - Readiness checks with actionable failures
+- `agent list` - List discoverable agents
+- `agent info <agent_id>` - Show one agent's metadata
 - `node list` - List registered nodes
 - `node info <node_id>` - Show node details
 - `node join-request <node_name> [fs_url]` - Submit pending node join request

@@ -18,6 +18,7 @@ pub const Command = struct {
 pub const Noun = enum {
     chat,
     fs,
+    agent,
     project,
     node,
     pairing,
@@ -121,6 +122,7 @@ const help_node = @embedFile("docs/16-node.md");
 const help_workspace = @embedFile("docs/17-workspace.md");
 const help_auth = @embedFile("docs/18-auth.md");
 const help_pairing = @embedFile("docs/19-pairing.md");
+const help_agent = @embedFile("docs/20-agent.md");
 
 pub fn printHelp() void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
@@ -131,6 +133,7 @@ pub fn printHelpForNoun(noun: Noun) void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const content = switch (noun) {
         .chat => help_chat,
+        .agent => help_agent,
         .project => help_project,
         .node => help_node,
         .pairing => help_pairing,
@@ -165,6 +168,7 @@ pub fn gitRevision() []const u8 {
 fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "chat")) return .chat;
     if (std.mem.eql(u8, arg, "fs")) return .fs;
+    if (std.mem.eql(u8, arg, "agent")) return .agent;
     if (std.mem.eql(u8, arg, "project")) return .project;
     if (std.mem.eql(u8, arg, "node")) return .node;
     if (std.mem.eql(u8, arg, "pairing")) return .pairing;
@@ -201,6 +205,11 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "up")) return .up;
             if (std.mem.eql(u8, arg, "doctor")) return .doctor;
             if (std.mem.eql(u8, arg, "info")) return .info;
+        },
+        .agent => {
+            if (std.mem.eql(u8, arg, "list")) return .list;
+            if (std.mem.eql(u8, arg, "info")) return .info;
+            if (std.mem.eql(u8, arg, "get")) return .info;
         },
         .node => {
             if (std.mem.eql(u8, arg, "list")) return .list;

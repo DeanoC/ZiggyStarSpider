@@ -195,6 +195,16 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 },
             }
         },
+        .agent => {
+            switch (cmd.verb) {
+                .list => try executeAgentList(allocator, options, cmd),
+                .info => try executeAgentInfo(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown agent verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
         .node => {
             switch (cmd.verb) {
                 .list => try executeNodeList(allocator, options, cmd),
@@ -920,6 +930,59 @@ fn executeProjectDoctor(allocator: std.mem.Allocator, options: args.Options, cmd
     } else {
         try stdout.print("project doctor: {d} issue(s) detected\n", .{failures});
         return error.InvalidResponse;
+    }
+}
+
+fn executeAgentList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    _ = cmd;
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var agents = try control_plane.listAgents(allocator, client, &g_control_request_counter);
+    defer workspace_types.deinitAgentList(allocator, &agents);
+    if (agents.items.len == 0) {
+        try stdout.print("(no agents)\n", .{});
+        return;
+    }
+
+    try stdout.print("Agents:\n", .{});
+    for (agents.items) |agent| {
+        const default_marker = if (agent.is_default) " [default]" else "";
+        const hatching_marker = if (agent.needs_hatching) " [needs_hatching]" else "";
+        try stdout.print(
+            "  - {s} ({s}){s}{s}\n",
+            .{ agent.id, agent.name, default_marker, hatching_marker },
+        );
+    }
+}
+
+fn executeAgentInfo(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("agent info requires an agent ID", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var agent = try control_plane.getAgent(allocator, client, &g_control_request_counter, cmd.args[0]);
+    defer agent.deinit(allocator);
+
+    try stdout.print("Agent {s}\n", .{agent.id});
+    try stdout.print("  Name: {s}\n", .{agent.name});
+    try stdout.print("  Description: {s}\n", .{agent.description});
+    try stdout.print("  Default: {s}\n", .{if (agent.is_default) "yes" else "no"});
+    try stdout.print("  Identity loaded: {s}\n", .{if (agent.identity_loaded) "yes" else "no"});
+    try stdout.print("  Needs hatching: {s}\n", .{if (agent.needs_hatching) "yes" else "no"});
+    if (agent.capabilities.items.len == 0) {
+        try stdout.print("  Capabilities: (none)\n", .{});
+    } else {
+        try stdout.print("  Capabilities:\n", .{});
+        for (agent.capabilities.items) |capability| {
+            try stdout.print("    - {s}\n", .{capability});
+        }
     }
 }
 

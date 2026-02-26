@@ -134,6 +134,25 @@ pub const NodeInfo = struct {
     }
 };
 
+pub const AgentInfo = struct {
+    id: []u8,
+    name: []u8,
+    description: []u8,
+    is_default: bool = false,
+    identity_loaded: bool = false,
+    needs_hatching: bool = false,
+    capabilities: std.ArrayListUnmanaged([]u8) = .{},
+
+    pub fn deinit(self: *AgentInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.name);
+        allocator.free(self.description);
+        for (self.capabilities.items) |capability| allocator.free(capability);
+        self.capabilities.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const WorkspaceStatus = struct {
     agent_id: []u8,
     project_id: ?[]u8 = null,
@@ -148,6 +167,10 @@ pub const WorkspaceStatus = struct {
     last_success_ms: i64 = 0,
     last_error: ?[]u8 = null,
     queue_depth: usize = 0,
+    availability_mounts_total: usize = 0,
+    availability_online: usize = 0,
+    availability_degraded: usize = 0,
+    availability_missing: usize = 0,
 
     pub fn deinit(self: *WorkspaceStatus, allocator: std.mem.Allocator) void {
         allocator.free(self.agent_id);
@@ -199,4 +222,10 @@ pub fn deinitNodeList(allocator: std.mem.Allocator, nodes: *std.ArrayListUnmanag
     for (nodes.items) |*node| node.deinit(allocator);
     nodes.deinit(allocator);
     nodes.* = .{};
+}
+
+pub fn deinitAgentList(allocator: std.mem.Allocator, agents: *std.ArrayListUnmanaged(AgentInfo)) void {
+    for (agents.items) |*agent| agent.deinit(allocator);
+    agents.deinit(allocator);
+    agents.* = .{};
 }
