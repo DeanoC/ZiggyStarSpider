@@ -19,6 +19,7 @@ pub const Noun = enum {
     chat,
     fs,
     agent,
+    session,
     project,
     node,
     pairing,
@@ -47,6 +48,8 @@ pub const Verb = enum {
     resume_job,
     list,
     pending,
+    attach,
+    close,
     approve,
     deny,
     join_request,
@@ -123,6 +126,7 @@ const help_workspace = @embedFile("docs/17-workspace.md");
 const help_auth = @embedFile("docs/18-auth.md");
 const help_pairing = @embedFile("docs/19-pairing.md");
 const help_agent = @embedFile("docs/20-agent.md");
+const help_session = @embedFile("docs/21-session.md");
 
 pub fn printHelp() void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
@@ -134,6 +138,7 @@ pub fn printHelpForNoun(noun: Noun) void {
     const content = switch (noun) {
         .chat => help_chat,
         .agent => help_agent,
+        .session => help_session,
         .project => help_project,
         .node => help_node,
         .pairing => help_pairing,
@@ -169,6 +174,7 @@ fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "chat")) return .chat;
     if (std.mem.eql(u8, arg, "fs")) return .fs;
     if (std.mem.eql(u8, arg, "agent")) return .agent;
+    if (std.mem.eql(u8, arg, "session")) return .session;
     if (std.mem.eql(u8, arg, "project")) return .project;
     if (std.mem.eql(u8, arg, "node")) return .node;
     if (std.mem.eql(u8, arg, "pairing")) return .pairing;
@@ -210,6 +216,14 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "list")) return .list;
             if (std.mem.eql(u8, arg, "info")) return .info;
             if (std.mem.eql(u8, arg, "get")) return .info;
+        },
+        .session => {
+            if (std.mem.eql(u8, arg, "list")) return .list;
+            if (std.mem.eql(u8, arg, "status")) return .status;
+            if (std.mem.eql(u8, arg, "attach")) return .attach;
+            if (std.mem.eql(u8, arg, "resume")) return .resume_job;
+            if (std.mem.eql(u8, arg, "close")) return .close;
+            if (std.mem.eql(u8, arg, "history")) return .list;
         },
         .node => {
             if (std.mem.eql(u8, arg, "list")) return .list;

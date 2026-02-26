@@ -625,6 +625,141 @@ pub fn sessionStatusWithTimeout(
     return parseSessionAttachStatus(allocator, parsed.value.object);
 }
 
+pub fn sessionAttach(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    session_key: []const u8,
+    agent_id: []const u8,
+    project_id: ?[]const u8,
+    project_token: ?[]const u8,
+) !workspace_types.SessionAttachStatus {
+    const escaped_session = try unified_v2.jsonEscape(allocator, session_key);
+    defer allocator.free(escaped_session);
+    const escaped_agent = try unified_v2.jsonEscape(allocator, agent_id);
+    defer allocator.free(escaped_agent);
+
+    const escaped_project = if (project_id) |value|
+        try unified_v2.jsonEscape(allocator, value)
+    else
+        null;
+    defer if (escaped_project) |value| allocator.free(value);
+
+    const escaped_token = if (project_token) |value|
+        try unified_v2.jsonEscape(allocator, value)
+    else
+        null;
+    defer if (escaped_token) |value| allocator.free(value);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.writer(allocator).print(
+        "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\"",
+        .{ escaped_session, escaped_agent },
+    );
+    if (escaped_project) |value| {
+        try payload.writer(allocator).print(",\"project_id\":\"{s}\"", .{value});
+    }
+    if (escaped_token) |value| {
+        try payload.writer(allocator).print(",\"project_token\":\"{s}\"", .{value});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.session_attach",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseSessionAttachStatus(allocator, parsed.value.object);
+}
+
+pub fn sessionResume(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    session_key: []const u8,
+) !workspace_types.SessionAttachStatus {
+    const escaped_session = try unified_v2.jsonEscape(allocator, session_key);
+    defer allocator.free(escaped_session);
+    const payload_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"session_key\":\"{s}\"}}",
+        .{escaped_session},
+    );
+    defer allocator.free(payload_req);
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.session_resume",
+        payload_req,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseSessionAttachStatus(allocator, parsed.value.object);
+}
+
+pub fn listSessions(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+) !workspace_types.SessionList {
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.session_list",
+        null,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseSessionList(allocator, parsed.value.object);
+}
+
+pub fn closeSession(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    session_key: []const u8,
+) !workspace_types.SessionCloseResult {
+    const escaped_session = try unified_v2.jsonEscape(allocator, session_key);
+    defer allocator.free(escaped_session);
+    const payload_req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"session_key\":\"{s}\"}}",
+        .{escaped_session},
+    );
+    defer allocator.free(payload_req);
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.session_close",
+        payload_req,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    return parseSessionCloseResult(allocator, parsed.value.object);
+}
+
 pub fn reconcileStatus(
     allocator: std.mem.Allocator,
     client: anytype,
@@ -843,6 +978,46 @@ fn parseSessionAttachStatus(
     status.error_message = try dupOptionalNullableString(allocator, attach_val.object, "error_message");
     status.updated_at_ms = try getOptionalI64(attach_val.object, "updated_at_ms", 0);
     return status;
+}
+
+fn parseSessionSummary(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !workspace_types.SessionSummary {
+    return .{
+        .session_key = try dupRequiredString(allocator, obj, "session_key"),
+        .agent_id = try dupRequiredString(allocator, obj, "agent_id"),
+        .project_id = try dupOptionalNullableString(allocator, obj, "project_id"),
+    };
+}
+
+fn parseSessionList(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !workspace_types.SessionList {
+    var list = workspace_types.SessionList{
+        .active_session = try dupRequiredString(allocator, obj, "active_session"),
+    };
+    errdefer list.deinit(allocator);
+
+    const sessions_val = obj.get("sessions") orelse return error.InvalidResponse;
+    if (sessions_val != .array) return error.InvalidResponse;
+    for (sessions_val.array.items) |item| {
+        if (item != .object) return error.InvalidResponse;
+        try list.sessions.append(allocator, try parseSessionSummary(allocator, item.object));
+    }
+    return list;
+}
+
+fn parseSessionCloseResult(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+) !workspace_types.SessionCloseResult {
+    return .{
+        .session_key = try dupRequiredString(allocator, obj, "session_key"),
+        .closed = try getOptionalBool(obj, "closed", false),
+        .active_session = try dupRequiredString(allocator, obj, "active_session"),
+    };
 }
 
 fn parseReconcileStatus(
@@ -1073,4 +1248,50 @@ test "parseAgentInfo reads capabilities and flags" {
     try std.testing.expectEqual(@as(usize, 2), info.capabilities.items.len);
     try std.testing.expectEqualStrings("chat", info.capabilities.items[0]);
     try std.testing.expectEqualStrings("plan", info.capabilities.items[1]);
+}
+
+test "parseSessionList reads active session and entries" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "active_session":"main",
+        \\  "sessions":[
+        \\    {"session_key":"main","agent_id":"mother","project_id":"system"},
+        \\    {"session_key":"work","agent_id":"bob","project_id":null}
+        \\  ]
+        \\}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+
+    var list = try parseSessionList(allocator, parsed.value.object);
+    defer list.deinit(allocator);
+
+    try std.testing.expectEqualStrings("main", list.active_session);
+    try std.testing.expectEqual(@as(usize, 2), list.sessions.items.len);
+    try std.testing.expectEqualStrings("work", list.sessions.items[1].session_key);
+    try std.testing.expectEqualStrings("bob", list.sessions.items[1].agent_id);
+    try std.testing.expect(list.sessions.items[1].project_id == null);
+}
+
+test "parseSessionCloseResult reads close response" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "session_key":"work",
+        \\  "closed":true,
+        \\  "active_session":"main"
+        \\}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+
+    var result = try parseSessionCloseResult(allocator, parsed.value.object);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqualStrings("work", result.session_key);
+    try std.testing.expect(result.closed);
+    try std.testing.expectEqualStrings("main", result.active_session);
 }

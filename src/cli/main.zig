@@ -205,6 +205,19 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 },
             }
         },
+        .session => {
+            switch (cmd.verb) {
+                .list => try executeSessionList(allocator, options, cmd),
+                .status => try executeSessionStatus(allocator, options, cmd),
+                .attach => try executeSessionAttach(allocator, options, cmd),
+                .resume_job => try executeSessionResume(allocator, options, cmd),
+                .close => try executeSessionClose(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown session verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
         .node => {
             switch (cmd.verb) {
                 .list => try executeNodeList(allocator, options, cmd),
@@ -984,6 +997,187 @@ fn executeAgentInfo(allocator: std.mem.Allocator, options: args.Options, cmd: ar
             try stdout.print("    - {s}\n", .{capability});
         }
     }
+}
+
+fn printSessionAttachStatus(stdout: anytype, status: *const workspace_types.SessionAttachStatus) !void {
+    try stdout.print("Session: {s}\n", .{status.session_key});
+    try stdout.print("  Agent: {s}\n", .{status.agent_id});
+    if (status.project_id) |project_id| {
+        try stdout.print("  Project: {s}\n", .{project_id});
+    } else {
+        try stdout.print("  Project: (none)\n", .{});
+    }
+    try stdout.print(
+        "  Attach state: {s} (runtime_ready={s}, mount_ready={s})\n",
+        .{
+            status.state,
+            if (status.runtime_ready) "yes" else "no",
+            if (status.mount_ready) "yes" else "no",
+        },
+    );
+    try stdout.print("  Updated: {d}\n", .{status.updated_at_ms});
+    if (status.error_code) |code| {
+        try stdout.print(
+            "  Error: {s}{s}{s}\n",
+            .{
+                code,
+                if (status.error_message != null) " - " else "",
+                if (status.error_message) |message| message else "",
+            },
+        );
+    }
+}
+
+fn executeSessionList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    _ = cmd;
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var list = try control_plane.listSessions(allocator, client, &g_control_request_counter);
+    defer list.deinit(allocator);
+
+    try stdout.print("Active session: {s}\n", .{list.active_session});
+    if (list.sessions.items.len == 0) {
+        try stdout.print("(no sessions)\n", .{});
+        return;
+    }
+
+    try stdout.print("Sessions:\n", .{});
+    for (list.sessions.items) |session| {
+        const marker = if (std.mem.eql(u8, session.session_key, list.active_session)) "*" else " ";
+        if (session.project_id) |project_id| {
+            try stdout.print(
+                "{s} {s}  agent={s}  project={s}\n",
+                .{ marker, session.session_key, session.agent_id, project_id },
+            );
+        } else {
+            try stdout.print(
+                "{s} {s}  agent={s}  project=(none)\n",
+                .{ marker, session.session_key, session.agent_id },
+            );
+        }
+    }
+}
+
+fn executeSessionStatus(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len > 1) {
+        logger.err("session status accepts zero or one session_key", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var status = try control_plane.sessionStatus(
+        allocator,
+        client,
+        &g_control_request_counter,
+        if (cmd.args.len == 1) cmd.args[0] else null,
+    );
+    defer status.deinit(allocator);
+    try printSessionAttachStatus(stdout, &status);
+}
+
+const SessionAttachArgs = struct {
+    session_key: []const u8,
+    agent_id: []const u8,
+    project_id: ?[]const u8 = null,
+    project_token: ?[]const u8 = null,
+};
+
+fn parseSessionAttachArgs(options: args.Options, cmd: args.Command) !SessionAttachArgs {
+    var parsed = SessionAttachArgs{
+        .session_key = undefined,
+        .agent_id = undefined,
+        .project_id = options.project,
+        .project_token = options.project_token,
+    };
+
+    var positional: [2][]const u8 = undefined;
+    var positional_count: usize = 0;
+    var i: usize = 0;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--project")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            parsed.project_id = cmd.args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--project-token")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            parsed.project_token = cmd.args[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
+        if (positional_count >= positional.len) return error.InvalidArguments;
+        positional[positional_count] = arg;
+        positional_count += 1;
+    }
+
+    if (positional_count != 2) return error.InvalidArguments;
+    parsed.session_key = positional[0];
+    parsed.agent_id = positional[1];
+    return parsed;
+}
+
+fn executeSessionAttach(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    const parsed = parseSessionAttachArgs(options, cmd) catch {
+        logger.err("session attach usage: session attach <session_key> <agent_id> [--project <project_id>] [--project-token <token>]", .{});
+        return error.InvalidArguments;
+    };
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var status = try control_plane.sessionAttach(
+        allocator,
+        client,
+        &g_control_request_counter,
+        parsed.session_key,
+        parsed.agent_id,
+        parsed.project_id,
+        parsed.project_token,
+    );
+    defer status.deinit(allocator);
+    try printSessionAttachStatus(stdout, &status);
+}
+
+fn executeSessionResume(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len != 1) {
+        logger.err("session resume requires a session_key", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var status = try control_plane.sessionResume(allocator, client, &g_control_request_counter, cmd.args[0]);
+    defer status.deinit(allocator);
+    try printSessionAttachStatus(stdout, &status);
+}
+
+fn executeSessionClose(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len != 1) {
+        logger.err("session close requires a session_key", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var result = try control_plane.closeSession(allocator, client, &g_control_request_counter, cmd.args[0]);
+    defer result.deinit(allocator);
+
+    try stdout.print("Closed: {s}\n", .{if (result.closed) "yes" else "no"});
+    try stdout.print("Session: {s}\n", .{result.session_key});
+    try stdout.print("Active session: {s}\n", .{result.active_session});
 }
 
 fn executeNodeList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {

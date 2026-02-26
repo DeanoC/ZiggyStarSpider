@@ -212,6 +212,43 @@ pub const SessionAttachStatus = struct {
     }
 };
 
+pub const SessionSummary = struct {
+    session_key: []u8,
+    agent_id: []u8,
+    project_id: ?[]u8 = null,
+
+    pub fn deinit(self: *SessionSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_key);
+        allocator.free(self.agent_id);
+        if (self.project_id) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+pub const SessionList = struct {
+    active_session: []u8,
+    sessions: std.ArrayListUnmanaged(SessionSummary) = .{},
+
+    pub fn deinit(self: *SessionList, allocator: std.mem.Allocator) void {
+        allocator.free(self.active_session);
+        for (self.sessions.items) |*session| session.deinit(allocator);
+        self.sessions.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const SessionCloseResult = struct {
+    session_key: []u8,
+    closed: bool,
+    active_session: []u8,
+
+    pub fn deinit(self: *SessionCloseResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_key);
+        allocator.free(self.active_session);
+        self.* = undefined;
+    }
+};
+
 pub fn deinitProjectList(allocator: std.mem.Allocator, projects: *std.ArrayListUnmanaged(ProjectSummary)) void {
     for (projects.items) |*project| project.deinit(allocator);
     projects.deinit(allocator);

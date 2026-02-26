@@ -62,6 +62,11 @@ ziggystarspider fs read /spiderweb/projects/proj-1/workspace/README.md
 
 # Agent chat via FS-RPC capability path
 ziggystarspider chat send "summarize current mounts"
+
+# Session control
+ziggystarspider session list
+ziggystarspider session attach review mother --project system
+ziggystarspider session resume review
 ```
 
 Useful options:
