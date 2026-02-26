@@ -2,7 +2,7 @@ const std = @import("std");
 const ws_client_mod = @import("websocket_client.zig");
 const control_plane = @import("control_plane");
 
-const fsrpc_default_timeout_ms: u32 = 15_000;
+const fsrpc_default_timeout_ms: u32 = 30_000;
 const fsrpc_clunk_timeout_ms: u32 = 1_000;
 const control_session_attach_timeout_ms: i64 = 20_000;
 
@@ -701,6 +701,17 @@ pub const FilesystemWorker = struct {
     }
 
     fn listDirectory(self: *FilesystemWorker, path: []const u8) ![]u8 {
+        return self.listDirectoryOnce(path) catch |err| {
+            if (shouldRetryTransient(err)) {
+                std.log.warn("[FS worker] listDirectory retry after {s} for path {s}", .{ @errorName(err), path });
+                self.disconnectClient();
+                return self.listDirectoryOnce(path);
+            }
+            return err;
+        };
+    }
+
+    fn listDirectoryOnce(self: *FilesystemWorker, path: []const u8) ![]u8 {
         const client = try self.ensureConnected();
         try self.ensureFsrpcReady(client);
         const fid = try self.walkPath(client, path);
@@ -712,6 +723,17 @@ pub const FilesystemWorker = struct {
     }
 
     fn readFileText(self: *FilesystemWorker, path: []const u8) ![]u8 {
+        return self.readFileTextOnce(path) catch |err| {
+            if (shouldRetryTransient(err)) {
+                std.log.warn("[FS worker] readFile retry after {s} for path {s}", .{ @errorName(err), path });
+                self.disconnectClient();
+                return self.readFileTextOnce(path);
+            }
+            return err;
+        };
+    }
+
+    fn readFileTextOnce(self: *FilesystemWorker, path: []const u8) ![]u8 {
         const client = try self.ensureConnected();
         try self.ensureFsrpcReady(client);
         const fid = try self.walkPath(client, path);
@@ -721,6 +743,17 @@ pub const FilesystemWorker = struct {
     }
 
     fn resolvePathIsDir(self: *FilesystemWorker, path: []const u8) !bool {
+        return self.resolvePathIsDirOnce(path) catch |err| {
+            if (shouldRetryTransient(err)) {
+                std.log.warn("[FS worker] resolvePath retry after {s} for path {s}", .{ @errorName(err), path });
+                self.disconnectClient();
+                return self.resolvePathIsDirOnce(path);
+            }
+            return err;
+        };
+    }
+
+    fn resolvePathIsDirOnce(self: *FilesystemWorker, path: []const u8) !bool {
         const client = try self.ensureConnected();
         try self.ensureFsrpcReady(client);
         const fid = try self.walkPath(client, path);
@@ -734,6 +767,10 @@ fn isDisconnectError(err: anyerror) bool {
         err == error.ConnectionClosed or
         err == error.ConnectionResetByPeer or
         err == error.Closed;
+}
+
+fn shouldRetryTransient(err: anyerror) bool {
+    return err == error.Timeout or isDisconnectError(err);
 }
 
 fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
