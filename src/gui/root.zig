@@ -117,6 +117,19 @@ const FilesystemEntry = struct {
     }
 };
 
+const ContractServiceEntry = struct {
+    service_id: []u8,
+    service_path: []u8,
+    invoke_path: []u8,
+
+    fn deinit(self: *ContractServiceEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.service_id);
+        allocator.free(self.service_path);
+        allocator.free(self.invoke_path);
+        self.* = undefined;
+    }
+};
+
 const FilesystemDirCacheEntry = struct {
     listing: []u8,
     cached_at_ms: i64,
@@ -219,6 +232,7 @@ const SettingsFocusField = enum {
     ui_theme_pack,
     node_watch_filter,
     node_watch_replay_limit,
+    filesystem_contract_payload,
 };
 
 fn isSettingsPanelFocusField(field: SettingsFocusField) bool {
@@ -489,6 +503,8 @@ const App = struct {
     node_service_watch_filter: std.ArrayList(u8) = .empty,
     node_service_watch_replay_limit: std.ArrayList(u8) = .empty,
     node_service_latest_reload_diag: ?[]u8 = null,
+    node_service_diff_preview: ?[]u8 = null,
+    node_service_diff_base_index: ?usize = null,
     debug_panel_id: ?workspace.PanelId = null,
     debug_events: std.ArrayList(DebugEventEntry) = .empty,
     debug_next_event_id: u64 = 1,
@@ -523,6 +539,9 @@ const App = struct {
     filesystem_active_request: ?FilesystemActiveRequest = null,
     filesystem_dir_cache: std.StringHashMapUnmanaged(FilesystemDirCacheEntry) = .{},
     fsrpc_last_remote_error: ?[]u8 = null,
+    contract_services: std.ArrayListUnmanaged(ContractServiceEntry) = .{},
+    contract_service_selected_index: usize = 0,
+    contract_invoke_payload: std.ArrayList(u8) = .empty,
     session_attach_state: SessionAttachUiState = .unknown,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
@@ -676,6 +695,7 @@ const App = struct {
         };
         app.node_service_watch_filter.appendSlice(allocator, "") catch {};
         app.node_service_watch_replay_limit.appendSlice(allocator, "25") catch {};
+        app.contract_invoke_payload.appendSlice(allocator, "{}") catch {};
         app.applyThemeFromSettings();
         app.metrics_context = ui_draw_context.DrawContext.init(
             allocator,
@@ -766,9 +786,12 @@ const App = struct {
         self.clearFilesystemData();
         self.clearFilesystemDirCache();
         self.filesystem_path.deinit(self.allocator);
+        self.clearContractServices();
+        self.contract_invoke_payload.deinit(self.allocator);
         self.node_service_watch_filter.deinit(self.allocator);
         self.node_service_watch_replay_limit.deinit(self.allocator);
         self.clearNodeServiceReloadDiagnostics();
+        self.clearNodeServiceDiffPreview();
 
         zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
 
@@ -2844,6 +2867,7 @@ const App = struct {
             .ui_theme_pack => &self.settings_panel.ui_theme_pack,
             .node_watch_filter => &self.node_service_watch_filter,
             .node_watch_replay_limit => &self.node_service_watch_replay_limit,
+            .filesystem_contract_payload => &self.contract_invoke_payload,
             .none => null,
         };
     }
@@ -3090,6 +3114,13 @@ const App = struct {
             self.allocator.free(value);
             self.filesystem_error = null;
         }
+    }
+
+    fn clearContractServices(self: *App) void {
+        for (self.contract_services.items) |*entry| entry.deinit(self.allocator);
+        self.contract_services.deinit(self.allocator);
+        self.contract_services = .{};
+        self.contract_service_selected_index = 0;
     }
 
     fn setFilesystemError(self: *App, message: []const u8) void {
@@ -5898,6 +5929,146 @@ const App = struct {
         self.clearFilesystemError();
     }
 
+    fn selectedContractService(self: *App) ?*const ContractServiceEntry {
+        if (self.contract_services.items.len == 0) return null;
+        if (self.contract_service_selected_index >= self.contract_services.items.len) return null;
+        return &self.contract_services.items[self.contract_service_selected_index];
+    }
+
+    fn contractStatusPathFromInvokePath(self: *App, invoke_path: []const u8) ![]u8 {
+        const suffix = "/control/invoke.json";
+        if (std.mem.endsWith(u8, invoke_path, suffix)) {
+            const base = invoke_path[0 .. invoke_path.len - suffix.len];
+            return std.fmt.allocPrint(self.allocator, "{s}/status.json", .{base});
+        }
+        const invoke_suffix = "/invoke.json";
+        if (std.mem.endsWith(u8, invoke_path, invoke_suffix)) {
+            const base = invoke_path[0 .. invoke_path.len - invoke_suffix.len];
+            return std.fmt.allocPrint(self.allocator, "{s}/status.json", .{base});
+        }
+        return error.InvalidPath;
+    }
+
+    fn contractResultPathFromInvokePath(self: *App, invoke_path: []const u8) ![]u8 {
+        const suffix = "/control/invoke.json";
+        if (std.mem.endsWith(u8, invoke_path, suffix)) {
+            const base = invoke_path[0 .. invoke_path.len - suffix.len];
+            return std.fmt.allocPrint(self.allocator, "{s}/result.json", .{base});
+        }
+        const invoke_suffix = "/invoke.json";
+        if (std.mem.endsWith(u8, invoke_path, invoke_suffix)) {
+            const base = invoke_path[0 .. invoke_path.len - invoke_suffix.len];
+            return std.fmt.allocPrint(self.allocator, "{s}/result.json", .{base});
+        }
+        return error.InvalidPath;
+    }
+
+    fn refreshContractServices(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        const payload = try self.readFsPathTextGui(client, "/agents/self/services/SERVICES.json");
+        defer self.allocator.free(payload);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{});
+        defer parsed.deinit();
+        if (parsed.value != .array) return error.InvalidResponse;
+
+        self.clearContractServices();
+        for (parsed.value.array.items) |entry| {
+            if (entry != .object) continue;
+            const obj = entry.object;
+            const scope = if (obj.get("scope")) |value| switch (value) {
+                .string => value.string,
+                else => continue,
+            } else continue;
+            if (!std.mem.eql(u8, scope, "agent_contract")) continue;
+            const has_invoke = if (obj.get("has_invoke")) |value| switch (value) {
+                .bool => value.bool,
+                else => false,
+            } else false;
+            if (!has_invoke) continue;
+
+            const service_id = if (obj.get("service_id")) |value| switch (value) {
+                .string => value.string,
+                else => continue,
+            } else continue;
+            const service_path = if (obj.get("service_path")) |value| switch (value) {
+                .string => value.string,
+                else => continue,
+            } else continue;
+            const invoke_path = if (obj.get("invoke_path")) |value| switch (value) {
+                .string => value.string,
+                else => continue,
+            } else continue;
+            if (invoke_path.len == 0) continue;
+
+            try self.contract_services.append(self.allocator, .{
+                .service_id = try self.allocator.dupe(u8, service_id),
+                .service_path = try self.allocator.dupe(u8, service_path),
+                .invoke_path = try self.allocator.dupe(u8, invoke_path),
+            });
+        }
+
+        if (self.contract_services.items.len == 0) {
+            self.contract_service_selected_index = 0;
+        } else if (self.contract_service_selected_index >= self.contract_services.items.len) {
+            self.contract_service_selected_index = 0;
+        }
+        self.clearFilesystemError();
+    }
+
+    fn readSelectedContractServiceStatus(self: *App) !void {
+        const entry = self.selectedContractService() orelse return error.MissingField;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        const status_path = try self.contractStatusPathFromInvokePath(entry.invoke_path);
+        defer self.allocator.free(status_path);
+        const status = try self.readFsPathTextGui(client, status_path);
+        defer self.allocator.free(status);
+        _ = status;
+        try self.applyFilesystemPreview(status_path, status);
+        self.clearFilesystemError();
+    }
+
+    fn readSelectedContractServiceResult(self: *App) !void {
+        const entry = self.selectedContractService() orelse return error.MissingField;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        const result_path = try self.contractResultPathFromInvokePath(entry.invoke_path);
+        defer self.allocator.free(result_path);
+        const result = try self.readFsPathTextGui(client, result_path);
+        defer self.allocator.free(result);
+        try self.applyFilesystemPreview(result_path, result);
+        self.clearFilesystemError();
+    }
+
+    fn invokeSelectedContractService(self: *App) !void {
+        const entry = self.selectedContractService() orelse return error.MissingField;
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+
+        const payload_trimmed = std.mem.trim(u8, self.contract_invoke_payload.items, " \t\r\n");
+        const payload = if (payload_trimmed.len > 0) payload_trimmed else "{}";
+        try self.writeFsPathTextGui(client, entry.invoke_path, payload);
+
+        const status_path = try self.contractStatusPathFromInvokePath(entry.invoke_path);
+        defer self.allocator.free(status_path);
+        const status = try self.readFsPathTextGui(client, status_path);
+        defer self.allocator.free(status);
+
+        const result_path = try self.contractResultPathFromInvokePath(entry.invoke_path);
+        defer self.allocator.free(result_path);
+        const result = try self.readFsPathTextGui(client, result_path);
+        defer self.allocator.free(result);
+        try self.applyFilesystemPreview(result_path, result);
+        self.clearFilesystemError();
+    }
+
+    fn openSelectedContractServicePath(self: *App) !void {
+        const entry = self.selectedContractService() orelse return error.MissingField;
+        try self.queueFilesystemPathLoad(entry.service_path, true, false);
+    }
+
     fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         _ = manager;
         const layout = self.panelLayoutMetrics();
@@ -6128,6 +6299,151 @@ const App = struct {
 
             y += row_h + layout.row_gap;
         }
+
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            "Agent Contract Services",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.4;
+
+        const contract_disabled = self.connection_state != .connected or self.filesystem_busy;
+        const contract_button_w: f32 = @max(100.0, (content_width - pad * 3.0) / 4.0);
+        const contract_refresh_rect = Rect.fromXYWH(rect.min[0] + pad, y, contract_button_w, row_h);
+        const contract_prev_rect = Rect.fromXYWH(contract_refresh_rect.max[0] + pad, y, contract_button_w, row_h);
+        const contract_next_rect = Rect.fromXYWH(contract_prev_rect.max[0] + pad, y, contract_button_w, row_h);
+        const contract_open_rect = Rect.fromXYWH(contract_next_rect.max[0] + pad, y, contract_button_w, row_h);
+
+        if (self.drawButtonWidget(
+            contract_refresh_rect,
+            "Refresh Contracts",
+            .{ .variant = .secondary, .disabled = contract_disabled },
+        )) {
+            self.refreshContractServices() catch |err| {
+                const msg = self.formatFilesystemOpError("Contract refresh failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setFilesystemError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            contract_prev_rect,
+            "Prev",
+            .{ .variant = .secondary, .disabled = contract_disabled or self.contract_services.items.len <= 1 },
+        )) {
+            if (self.contract_services.items.len > 1) {
+                if (self.contract_service_selected_index == 0) {
+                    self.contract_service_selected_index = self.contract_services.items.len - 1;
+                } else {
+                    self.contract_service_selected_index -= 1;
+                }
+            }
+        }
+        if (self.drawButtonWidget(
+            contract_next_rect,
+            "Next",
+            .{ .variant = .secondary, .disabled = contract_disabled or self.contract_services.items.len <= 1 },
+        )) {
+            if (self.contract_services.items.len > 1) {
+                self.contract_service_selected_index = (self.contract_service_selected_index + 1) % self.contract_services.items.len;
+            }
+        }
+        if (self.drawButtonWidget(
+            contract_open_rect,
+            "Open Service Dir",
+            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
+        )) {
+            self.openSelectedContractServicePath() catch |err| {
+                const msg = self.formatFilesystemOpError("Open contract service path failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setFilesystemError(text);
+                }
+            };
+        }
+        y += row_h + layout.row_gap * 0.45;
+
+        const selected_contract_label = if (self.selectedContractService()) |entry|
+            std.fmt.allocPrint(
+                self.allocator,
+                "Selected: {s} ({d}/{d})",
+                .{ entry.service_id, self.contract_service_selected_index + 1, self.contract_services.items.len },
+            ) catch null
+        else
+            self.allocator.dupe(u8, "Selected: (none loaded)") catch null;
+        defer if (selected_contract_label) |value| self.allocator.free(value);
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            selected_contract_label orelse "Selected: (none loaded)",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.35;
+
+        const payload_rect = Rect.fromXYWH(rect.min[0] + pad, y, content_width, row_h);
+        const payload_focused = self.drawTextInputWidget(
+            payload_rect,
+            self.contract_invoke_payload.items,
+            self.settings_panel.focused_field == .filesystem_contract_payload,
+            .{ .placeholder = "{\"tool_name\":\"memory_search\",\"arguments\":{\"query\":\"...\"}}" },
+        );
+        if (payload_focused) self.settings_panel.focused_field = .filesystem_contract_payload;
+        y += row_h + layout.row_gap * 0.45;
+
+        const invoke_rect = Rect.fromXYWH(rect.min[0] + pad, y, contract_button_w, row_h);
+        const status_rect = Rect.fromXYWH(invoke_rect.max[0] + pad, y, contract_button_w, row_h);
+        const result_rect = Rect.fromXYWH(status_rect.max[0] + pad, y, contract_button_w, row_h);
+        if (self.drawButtonWidget(
+            invoke_rect,
+            "Invoke",
+            .{ .variant = .primary, .disabled = contract_disabled or self.selectedContractService() == null },
+        )) {
+            self.invokeSelectedContractService() catch |err| {
+                const msg = self.formatFilesystemOpError("Contract invoke failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setFilesystemError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            status_rect,
+            "Read Status",
+            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
+        )) {
+            self.readSelectedContractServiceStatus() catch |err| {
+                const msg = self.formatFilesystemOpError("Contract status read failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setFilesystemError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            result_rect,
+            "Read Result",
+            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
+        )) {
+            self.readSelectedContractServiceResult() catch |err| {
+                const msg = self.formatFilesystemOpError("Contract result read failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setFilesystemError(text);
+                }
+            };
+        }
+        if (self.mouse_released and
+            self.settings_panel.focused_field == .filesystem_contract_payload and
+            !payload_rect.contains(.{ self.mouse_x, self.mouse_y }))
+        {
+            self.settings_panel.focused_field = .none;
+        }
+
+        y += row_h + layout.row_gap;
 
         const listing_height = @max(140.0, (rect.max[1] - y - pad * 2.0) * 0.52);
         const listing_rect = Rect.fromXYWH(rect.min[0] + pad, y, content_width, listing_height);
@@ -6423,9 +6739,158 @@ const App = struct {
             y += row_height + layout.row_gap * 0.45;
         }
 
+        if (self.selectedNodeServiceEventIndex()) |selected_idx| {
+            const set_base_rect = Rect.fromXYWH(
+                rect.min[0] + pad,
+                y,
+                @max(140.0, width * 0.2),
+                row_height,
+            );
+            const clear_base_rect = Rect.fromXYWH(
+                set_base_rect.max[0] + layout.inner_inset,
+                y,
+                @max(126.0, width * 0.18),
+                row_height,
+            );
+            const generate_diff_rect = Rect.fromXYWH(
+                clear_base_rect.max[0] + layout.inner_inset,
+                y,
+                @max(134.0, width * 0.2),
+                row_height,
+            );
+            const copy_diff_rect = Rect.fromXYWH(
+                generate_diff_rect.max[0] + layout.inner_inset,
+                y,
+                @max(98.0, width * 0.14),
+                row_height,
+            );
+            const export_diff_rect = Rect.fromXYWH(
+                copy_diff_rect.max[0] + layout.inner_inset,
+                y,
+                @max(102.0, width * 0.14),
+                row_height,
+            );
+
+            const base_idx_opt = self.node_service_diff_base_index;
+            const can_diff = if (base_idx_opt) |idx|
+                idx < self.debug_events.items.len and idx != selected_idx
+            else
+                false;
+
+            if (self.drawButtonWidget(set_base_rect, "Set Diff Base", .{ .variant = .secondary })) {
+                self.node_service_diff_base_index = selected_idx;
+                self.clearNodeServiceDiffPreview();
+                const msg = std.fmt.allocPrint(self.allocator, "Node diff base set to event #{d}", .{self.debug_events.items[selected_idx].id}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.appendMessage("system", value, null) catch {};
+            }
+            if (self.drawButtonWidget(
+                clear_base_rect,
+                "Clear Base",
+                .{ .variant = .secondary, .disabled = self.node_service_diff_base_index == null and self.node_service_diff_preview == null },
+            )) {
+                self.node_service_diff_base_index = null;
+                self.clearNodeServiceDiffPreview();
+            }
+            if (self.drawButtonWidget(
+                generate_diff_rect,
+                "Generate Diff",
+                .{ .variant = .secondary, .disabled = !can_diff },
+            )) {
+                if (base_idx_opt) |base_idx| {
+                    if (base_idx < self.debug_events.items.len and base_idx != selected_idx) {
+                        if (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null) |diff| {
+                            self.clearNodeServiceDiffPreview();
+                            self.node_service_diff_preview = diff;
+                        } else {
+                            self.appendMessage("system", "Unable to build node service diff from selected events.", null) catch {};
+                        }
+                    }
+                }
+            }
+            if (self.drawButtonWidget(
+                copy_diff_rect,
+                "Copy Diff",
+                .{ .variant = .secondary, .disabled = !can_diff },
+            )) {
+                if (base_idx_opt) |base_idx| {
+                    if (base_idx < self.debug_events.items.len and base_idx != selected_idx) {
+                        const diff_text = if (self.node_service_diff_preview) |value|
+                            self.allocator.dupe(u8, value) catch null
+                        else
+                            (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null);
+                        defer if (diff_text) |value| self.allocator.free(value);
+                        if (diff_text) |value| {
+                            const buf = self.allocator.alloc(u8, value.len + 1) catch null;
+                            if (buf) |zbuf| {
+                                @memcpy(zbuf[0..value.len], value);
+                                zbuf[value.len] = 0;
+                                const zslice: [:0]const u8 = zbuf[0..value.len :0];
+                                zapp.clipboard.setTextZ(zslice);
+                                self.allocator.free(zbuf);
+                                self.appendMessage("system", "Copied node service diff snapshot to clipboard.", null) catch {};
+                            }
+                        }
+                    }
+                }
+            }
+            if (self.drawButtonWidget(
+                export_diff_rect,
+                "Export Diff",
+                .{ .variant = .primary, .disabled = !can_diff },
+            )) {
+                if (base_idx_opt) |base_idx| {
+                    if (base_idx < self.debug_events.items.len and base_idx != selected_idx) {
+                        const diff_text = if (self.node_service_diff_preview) |value|
+                            self.allocator.dupe(u8, value) catch null
+                        else
+                            (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null);
+                        defer if (diff_text) |value| self.allocator.free(value);
+                        if (diff_text) |value| {
+                            const export_path = self.exportNodeServiceDiffSnapshot(
+                                value,
+                                self.debug_events.items[base_idx].id,
+                                self.debug_events.items[selected_idx].id,
+                            ) catch null;
+                            defer if (export_path) |path| self.allocator.free(path);
+                            if (export_path) |path| {
+                                const msg = std.fmt.allocPrint(self.allocator, "Exported node diff snapshot to {s}", .{path}) catch null;
+                                defer if (msg) |text| self.allocator.free(text);
+                                if (msg) |text| self.appendMessage("system", text, null) catch {};
+                            } else {
+                                self.appendMessage("system", "Failed to export node diff snapshot.", null) catch {};
+                            }
+                        }
+                    }
+                }
+            }
+            y += row_height + layout.row_gap * 0.45;
+
+            const base_label = if (self.node_service_diff_base_index) |idx|
+                if (idx < self.debug_events.items.len)
+                    std.fmt.allocPrint(
+                        self.allocator,
+                        "Diff base event: #{d}",
+                        .{self.debug_events.items[idx].id},
+                    ) catch null
+                else
+                    self.allocator.dupe(u8, "Diff base event: (stale selection)") catch null
+            else
+                self.allocator.dupe(u8, "Diff base event: (not set)") catch null;
+            defer if (base_label) |value| self.allocator.free(value);
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                y,
+                content_width,
+                base_label orelse "Diff base event: (unknown)",
+                self.theme.colors.text_secondary,
+            );
+            y += line_height;
+        }
+
         const selected_diag = self.selectedNodeServiceDeltaDiagnosticsText();
         defer if (selected_diag) |value| self.allocator.free(value);
-        if (self.node_service_latest_reload_diag != null or selected_diag != null) {
+        if (self.node_service_latest_reload_diag != null or selected_diag != null or self.node_service_diff_preview != null) {
             self.drawLabel(
                 rect.min[0] + pad,
                 y,
@@ -6465,6 +6930,24 @@ const App = struct {
                     y,
                     content_width,
                     diag,
+                    self.theme.colors.text_primary,
+                );
+                y += layout.row_gap * 0.4;
+            }
+            if (self.node_service_diff_preview) |diff_text| {
+                self.drawTextTrimmed(
+                    rect.min[0] + pad,
+                    y,
+                    content_width,
+                    "Historical event diff snapshot",
+                    self.theme.colors.text_secondary,
+                );
+                y += line_height;
+                y += self.drawTextWrapped(
+                    rect.min[0] + pad,
+                    y,
+                    content_width,
+                    diff_text,
                     self.theme.colors.text_primary,
                 );
                 y += layout.row_gap * 0.4;
@@ -7033,12 +7516,143 @@ const App = struct {
         return self.allocator.dupe(u8, node_id) catch null;
     }
 
+    fn selectedNodeServiceEventIndex(self: *App) ?usize {
+        const selected_idx = self.debug_selected_index orelse return null;
+        if (selected_idx >= self.debug_events.items.len) return null;
+        const entry = self.debug_events.items[selected_idx];
+        if (!std.mem.eql(u8, entry.category, "control.node_service_event")) return null;
+        return selected_idx;
+    }
+
     fn selectedNodeServiceDeltaDiagnosticsText(self: *App) ?[]u8 {
         const selected_idx = self.debug_selected_index orelse return null;
         if (selected_idx >= self.debug_events.items.len) return null;
         const entry = self.debug_events.items[selected_idx];
         if (!std.mem.eql(u8, entry.category, "control.node_service_event")) return null;
         return self.buildNodeServiceDeltaDiagnosticsTextFromJson(entry.payload_json) catch null;
+    }
+
+    fn collectUniqueLinesOrdered(
+        self: *App,
+        text: []const u8,
+        out: *std.ArrayListUnmanaged([]u8),
+    ) !void {
+        var iter = std.mem.splitScalar(u8, text, '\n');
+        while (iter.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, " \t\r");
+            if (line.len == 0) continue;
+            var exists = false;
+            for (out.items) |existing| {
+                if (std.mem.eql(u8, existing, line)) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (exists) continue;
+            try out.append(self.allocator, try self.allocator.dupe(u8, line));
+        }
+    }
+
+    fn freeOwnedLines(self: *App, lines: *std.ArrayListUnmanaged([]u8)) void {
+        for (lines.items) |line| self.allocator.free(line);
+        lines.deinit(self.allocator);
+        lines.* = .{};
+    }
+
+    fn lineListContains(lines: []const []const u8, candidate: []const u8) bool {
+        for (lines) |line| {
+            if (std.mem.eql(u8, line, candidate)) return true;
+        }
+        return false;
+    }
+
+    fn buildNodeServiceEventDiffText(
+        self: *App,
+        base_idx: usize,
+        compare_idx: usize,
+    ) !?[]u8 {
+        if (base_idx >= self.debug_events.items.len or compare_idx >= self.debug_events.items.len) return null;
+        const base_entry = self.debug_events.items[base_idx];
+        const compare_entry = self.debug_events.items[compare_idx];
+        if (!std.mem.eql(u8, base_entry.category, "control.node_service_event")) return null;
+        if (!std.mem.eql(u8, compare_entry.category, "control.node_service_event")) return null;
+
+        const base_diag_opt = try self.buildNodeServiceDeltaDiagnosticsTextFromJson(base_entry.payload_json);
+        defer if (base_diag_opt) |value| self.allocator.free(value);
+        const compare_diag_opt = try self.buildNodeServiceDeltaDiagnosticsTextFromJson(compare_entry.payload_json);
+        defer if (compare_diag_opt) |value| self.allocator.free(value);
+        const base_diag = base_diag_opt orelse return null;
+        const compare_diag = compare_diag_opt orelse return null;
+
+        var base_lines: std.ArrayListUnmanaged([]u8) = .{};
+        defer self.freeOwnedLines(&base_lines);
+        var compare_lines: std.ArrayListUnmanaged([]u8) = .{};
+        defer self.freeOwnedLines(&compare_lines);
+        try self.collectUniqueLinesOrdered(base_diag, &base_lines);
+        try self.collectUniqueLinesOrdered(compare_diag, &compare_lines);
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        try out.writer(self.allocator).print(
+            "node_service_event_diff\nbase_event_id={d} base_timestamp_ms={d}\ncompare_event_id={d} compare_timestamp_ms={d}",
+            .{ base_entry.id, base_entry.timestamp_ms, compare_entry.id, compare_entry.timestamp_ms },
+        );
+        try out.appendSlice(self.allocator, "\n\n--- base_diagnostics ---\n");
+        try out.appendSlice(self.allocator, base_diag);
+        try out.appendSlice(self.allocator, "\n\n--- compare_diagnostics ---\n");
+        try out.appendSlice(self.allocator, compare_diag);
+
+        try out.appendSlice(self.allocator, "\n\n--- only_in_compare ---");
+        var compare_delta_count: usize = 0;
+        for (compare_lines.items) |line| {
+            if (lineListContains(base_lines.items, line)) continue;
+            compare_delta_count += 1;
+            try out.writer(self.allocator).print("\n+ {s}", .{line});
+        }
+        if (compare_delta_count == 0) try out.appendSlice(self.allocator, "\n(none)");
+
+        try out.appendSlice(self.allocator, "\n\n--- only_in_base ---");
+        var base_delta_count: usize = 0;
+        for (base_lines.items) |line| {
+            if (lineListContains(compare_lines.items, line)) continue;
+            base_delta_count += 1;
+            try out.writer(self.allocator).print("\n- {s}", .{line});
+        }
+        if (base_delta_count == 0) try out.appendSlice(self.allocator, "\n(none)");
+
+        try out.writer(self.allocator).print(
+            "\n\nsummary: compare_only={d} base_only={d}",
+            .{ compare_delta_count, base_delta_count },
+        );
+
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    fn exportNodeServiceDiffSnapshot(
+        self: *App,
+        diff_text: []const u8,
+        base_event_id: u64,
+        compare_event_id: u64,
+    ) ![]u8 {
+        const filename = try std.fmt.allocPrint(
+            self.allocator,
+            "node-service-diff-{d}-to-{d}-{d}.txt",
+            .{ base_event_id, compare_event_id, std.time.milliTimestamp() },
+        );
+        defer self.allocator.free(filename);
+
+        try std.fs.cwd().writeFile(.{
+            .sub_path = filename,
+            .data = diff_text,
+        });
+
+        const cwd = std.fs.cwd().realpathAlloc(self.allocator, ".") catch return self.allocator.dupe(u8, filename);
+        defer self.allocator.free(cwd);
+        return std.fmt.allocPrint(
+            self.allocator,
+            "{s}{s}{s}",
+            .{ cwd, std.fs.path.sep_str, filename },
+        );
     }
 
     fn buildNodeServiceDeltaDiagnosticsTextFromJson(self: *App, payload_json: []const u8) !?[]u8 {
@@ -8034,6 +8648,7 @@ const App = struct {
         self.session_attach_state = .unknown;
         self.stopFilesystemWorker();
         self.clearFilesystemDirCache();
+        self.clearContractServices();
         if (self.ws_client) |*existing| {
             while (existing.tryReceive()) |msg| self.allocator.free(msg);
             existing.deinit();
@@ -10255,7 +10870,9 @@ const App = struct {
         self.debug_events.clearRetainingCapacity();
         self.debug_folded_blocks.clearRetainingCapacity();
         self.debug_next_event_id = 1;
+        self.node_service_diff_base_index = null;
         self.clearNodeServiceReloadDiagnostics();
+        self.clearNodeServiceDiffPreview();
     }
 
     fn clearNodeServiceReloadDiagnostics(self: *App) void {
@@ -10265,11 +10882,26 @@ const App = struct {
         }
     }
 
+    fn clearNodeServiceDiffPreview(self: *App) void {
+        if (self.node_service_diff_preview) |value| {
+            self.allocator.free(value);
+            self.node_service_diff_preview = null;
+        }
+    }
+
     fn appendDebugEvent(self: *App, timestamp_ms: i64, category: []const u8, correlation_id: ?[]const u8, payload_json: []const u8) !void {
         while (self.debug_events.items.len >= MAX_DEBUG_EVENTS) {
             var removed = self.debug_events.orderedRemove(0);
             self.pruneDebugFoldStateForEvent(removed.id);
             removed.deinit(self.allocator);
+            if (self.node_service_diff_base_index) |idx| {
+                if (idx == 0) {
+                    self.node_service_diff_base_index = null;
+                    self.clearNodeServiceDiffPreview();
+                } else {
+                    self.node_service_diff_base_index = idx - 1;
+                }
+            }
         }
 
         const category_copy = try self.allocator.dupe(u8, category);
@@ -10407,6 +11039,7 @@ const App = struct {
         }
         manager.focusPanel(panel_id);
         self.refreshFilesystemBrowser() catch {};
+        self.refreshContractServices() catch {};
         return panel_id;
     }
 
