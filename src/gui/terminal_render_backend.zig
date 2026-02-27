@@ -15,11 +15,39 @@ const ParserState = enum {
 
 const Line = struct {
     bytes: std.ArrayListUnmanaged(u8) = .{},
+    styles: std.ArrayListUnmanaged(Style) = .{},
 
     fn deinit(self: *Line, allocator: std.mem.Allocator) void {
         self.bytes.deinit(allocator);
+        self.styles.deinit(allocator);
         self.* = undefined;
     }
+};
+
+pub const Color = union(enum) {
+    default,
+    indexed: u8,
+    rgb: [3]u8,
+};
+
+pub const Style = struct {
+    fg: Color = .default,
+    bg: Color = .default,
+    bold: bool = false,
+    dim: bool = false,
+    italic: bool = false,
+    underline: bool = false,
+    inverse: bool = false,
+    strikethrough: bool = false,
+
+    fn reset(self: *Style) void {
+        self.* = .{};
+    }
+};
+
+pub const StyledLine = struct {
+    bytes: []const u8,
+    styles: []const Style,
 };
 
 const GhosttyResult = c_int;
@@ -148,6 +176,7 @@ const PlainTextBackend = struct {
     cursor_col: usize = 0,
     saved_row: usize = 0,
     saved_col: usize = 0,
+    current_style: Style = .{},
     max_bytes: usize,
     dirty: bool = true,
 
@@ -175,6 +204,7 @@ const PlainTextBackend = struct {
         self.cursor_col = 0;
         self.saved_row = 0;
         self.saved_col = 0;
+        self.current_style.reset();
         self.dirty = true;
     }
 
@@ -257,17 +287,13 @@ const PlainTextBackend = struct {
             else => {
                 if (ch < 0x20) return;
                 var line = try self.ensureLine(allocator, self.cursor_row);
-                if (line.bytes.items.len < self.cursor_col) {
-                    try line.bytes.appendNTimes(
-                        allocator,
-                        ' ',
-                        self.cursor_col - line.bytes.items.len,
-                    );
-                }
+                try self.padLineToCursor(allocator, line);
                 if (self.cursor_col < line.bytes.items.len) {
                     line.bytes.items[self.cursor_col] = ch;
+                    line.styles.items[self.cursor_col] = self.current_style;
                 } else {
                     try line.bytes.append(allocator, ch);
+                    try line.styles.append(allocator, self.current_style);
                 }
                 self.cursor_col += 1;
                 self.dirty = true;
@@ -329,6 +355,7 @@ const PlainTextBackend = struct {
                         var line = try self.ensureLine(allocator, self.cursor_row);
                         if (self.cursor_col < line.bytes.items.len) {
                             line.bytes.shrinkRetainingCapacity(self.cursor_col);
+                            line.styles.shrinkRetainingCapacity(self.cursor_col);
                             self.dirty = true;
                         }
                         while (self.lines.items.len > self.cursor_row + 1) {
@@ -346,16 +373,19 @@ const PlainTextBackend = struct {
                     0 => {
                         if (self.cursor_col < line.bytes.items.len) {
                             line.bytes.shrinkRetainingCapacity(self.cursor_col);
+                            line.styles.shrinkRetainingCapacity(self.cursor_col);
                             self.dirty = true;
                         }
                     },
                     1 => {
                         const upto = @min(self.cursor_col + 1, line.bytes.items.len);
                         @memset(line.bytes.items[0..upto], ' ');
+                        @memset(line.styles.items[0..upto], self.current_style);
                         self.dirty = true;
                     },
                     2 => {
                         line.bytes.clearRetainingCapacity();
+                        line.styles.clearRetainingCapacity();
                         self.dirty = true;
                     },
                     else => {},
@@ -374,8 +404,14 @@ const PlainTextBackend = struct {
                         line.bytes.items[self.cursor_col .. self.cursor_col + tail_len],
                         line.bytes.items[tail_start..],
                     );
+                    std.mem.copyForwards(
+                        Style,
+                        line.styles.items[self.cursor_col .. self.cursor_col + tail_len],
+                        line.styles.items[tail_start..],
+                    );
                 }
                 line.bytes.shrinkRetainingCapacity(line.bytes.items.len - remove_count);
+                line.styles.shrinkRetainingCapacity(line.styles.items.len - remove_count);
                 self.dirty = true;
             },
             'X' => {
@@ -387,11 +423,18 @@ const PlainTextBackend = struct {
                         ' ',
                         self.cursor_col + count - line.bytes.items.len,
                     );
+                    try line.styles.appendNTimes(
+                        allocator,
+                        self.current_style,
+                        self.cursor_col + count - line.styles.items.len,
+                    );
                 }
                 @memset(line.bytes.items[self.cursor_col .. self.cursor_col + count], ' ');
+                @memset(line.styles.items[self.cursor_col .. self.cursor_col + count], self.current_style);
                 self.dirty = true;
             },
             'm' => {
+                self.applySgrParams(params_text, is_private);
                 if (ghostty_runtime) |runtime| {
                     runtime.consumeSgr(allocator, params_text, is_private);
                 }
@@ -441,12 +484,126 @@ const PlainTextBackend = struct {
         return params[idx];
     }
 
+    fn padLineToCursor(self: *PlainTextBackend, allocator: std.mem.Allocator, line: *Line) !void {
+        if (line.bytes.items.len >= self.cursor_col) return;
+        const missing = self.cursor_col - line.bytes.items.len;
+        try line.bytes.appendNTimes(allocator, ' ', missing);
+        try line.styles.appendNTimes(allocator, self.current_style, missing);
+    }
+
+    fn sgrDefaultColorFg() Color {
+        return .default;
+    }
+
+    fn sgrDefaultColorBg() Color {
+        return .default;
+    }
+
+    fn applySgrParams(self: *PlainTextBackend, params_text: []const u8, is_private: bool) void {
+        const params_slice = if (is_private and params_text.len > 0) params_text[1..] else params_text;
+        if (params_slice.len == 0) {
+            self.current_style.reset();
+            return;
+        }
+
+        var values_buf: [32]usize = [_]usize{0} ** 32;
+        var count: usize = 0;
+        var token_start: usize = 0;
+        var i: usize = 0;
+        while (i <= params_slice.len) : (i += 1) {
+            if (i == params_slice.len or params_slice[i] == ';' or params_slice[i] == ':') {
+                if (count < values_buf.len) {
+                    const token = std.mem.trim(u8, params_slice[token_start..i], " \t");
+                    values_buf[count] = if (token.len == 0)
+                        0
+                    else
+                        (std.fmt.parseUnsigned(usize, token, 10) catch 0);
+                    count += 1;
+                }
+                token_start = i + 1;
+            }
+        }
+
+        if (count == 0) {
+            self.current_style.reset();
+            return;
+        }
+
+        var idx: usize = 0;
+        while (idx < count) {
+            const code = values_buf[idx];
+            switch (code) {
+                0 => self.current_style.reset(),
+                1 => self.current_style.bold = true,
+                2 => self.current_style.dim = true,
+                3 => self.current_style.italic = true,
+                4 => self.current_style.underline = true,
+                7 => self.current_style.inverse = true,
+                9 => self.current_style.strikethrough = true,
+                22 => {
+                    self.current_style.bold = false;
+                    self.current_style.dim = false;
+                },
+                23 => self.current_style.italic = false,
+                24 => self.current_style.underline = false,
+                27 => self.current_style.inverse = false,
+                29 => self.current_style.strikethrough = false,
+                30...37 => self.current_style.fg = .{ .indexed = @intCast(code - 30) },
+                39 => self.current_style.fg = sgrDefaultColorFg(),
+                40...47 => self.current_style.bg = .{ .indexed = @intCast(code - 40) },
+                49 => self.current_style.bg = sgrDefaultColorBg(),
+                90...97 => self.current_style.fg = .{ .indexed = @intCast((code - 90) + 8) },
+                100...107 => self.current_style.bg = .{ .indexed = @intCast((code - 100) + 8) },
+                38, 48 => {
+                    const is_fg = code == 38;
+                    if (idx + 1 >= count) break;
+                    const color_mode = values_buf[idx + 1];
+                    if (color_mode == 5) {
+                        if (idx + 2 >= count) break;
+                        const color_idx: u8 = @intCast(@min(values_buf[idx + 2], 255));
+                        if (is_fg) {
+                            self.current_style.fg = .{ .indexed = color_idx };
+                        } else {
+                            self.current_style.bg = .{ .indexed = color_idx };
+                        }
+                        idx += 2;
+                    } else if (color_mode == 2) {
+                        if (idx + 4 >= count) break;
+                        const rgb: [3]u8 = .{
+                            @intCast(@min(values_buf[idx + 2], 255)),
+                            @intCast(@min(values_buf[idx + 3], 255)),
+                            @intCast(@min(values_buf[idx + 4], 255)),
+                        };
+                        if (is_fg) {
+                            self.current_style.fg = .{ .rgb = rgb };
+                        } else {
+                            self.current_style.bg = .{ .rgb = rgb };
+                        }
+                        idx += 4;
+                    }
+                },
+                else => {},
+            }
+            idx += 1;
+        }
+    }
+
     fn ensureLine(self: *PlainTextBackend, allocator: std.mem.Allocator, row: usize) !*Line {
         while (self.lines.items.len <= row) {
             try self.lines.append(allocator, .{});
             self.dirty = true;
         }
-        return &self.lines.items[row];
+        var line = &self.lines.items[row];
+        if (line.styles.items.len < line.bytes.items.len) {
+            try line.styles.appendNTimes(
+                allocator,
+                self.current_style,
+                line.bytes.items.len - line.styles.items.len,
+            );
+        } else if (line.styles.items.len > line.bytes.items.len) {
+            line.styles.shrinkRetainingCapacity(line.bytes.items.len);
+        }
+        return line;
     }
 
     fn totalTextBytes(self: *const PlainTextBackend) usize {
@@ -482,8 +639,10 @@ const PlainTextBackend = struct {
             const remain = line.bytes.items.len - trim;
             if (remain > 0) {
                 std.mem.copyForwards(u8, line.bytes.items[0..remain], line.bytes.items[trim..]);
+                std.mem.copyForwards(Style, line.styles.items[0..remain], line.styles.items[trim..]);
             }
             line.bytes.shrinkRetainingCapacity(remain);
+            line.styles.shrinkRetainingCapacity(remain);
             if (self.cursor_row == 0) {
                 if (trim >= self.cursor_col) self.cursor_col = 0 else self.cursor_col -= trim;
             }
@@ -519,6 +678,18 @@ pub const Backend = struct {
         ghostty_vt,
     };
 
+    pub fn parseKind(value: []const u8) Kind {
+        if (std.mem.eql(u8, value, "ghostty-vt")) return .ghostty_vt;
+        return .plain_text;
+    }
+
+    pub fn kindName(kind: Kind) []const u8 {
+        return switch (kind) {
+            .plain_text => "plain",
+            .ghostty_vt => "ghostty-vt",
+        };
+    }
+
     pub fn initPlain(options: Options) Backend {
         return .{
             .kind = .plain_text,
@@ -533,6 +704,13 @@ pub const Backend = struct {
         };
         out.ghostty_runtime = GhosttySgrRuntime.tryInit();
         return out;
+    }
+
+    pub fn initForKind(kind: Kind, options: Options) Backend {
+        return switch (kind) {
+            .plain_text => initPlain(options),
+            .ghostty_vt => initGhosttyVt(options),
+        };
     }
 
     pub fn deinit(self: *Backend, allocator: std.mem.Allocator) void {
@@ -565,6 +743,30 @@ pub const Backend = struct {
                 "ghostty-vt(unavailable,fallback)+ansi",
         };
     }
+
+    pub fn statusDetail(self: *const Backend) ?[]const u8 {
+        return switch (self.kind) {
+            .plain_text => "Plain backend active",
+            .ghostty_vt => if (self.ghostty_runtime != null)
+                "Ghostty SGR dynamic library loaded"
+            else
+                "Ghostty SGR library unavailable; ANSI fallback active",
+        };
+    }
+
+    pub fn lineCount(self: *const Backend) usize {
+        return self.plain_text.lines.items.len;
+    }
+
+    pub fn lineAt(self: *const Backend, idx: usize) ?StyledLine {
+        if (idx >= self.plain_text.lines.items.len) return null;
+        const line = self.plain_text.lines.items[idx];
+        const style_len = @min(line.styles.items.len, line.bytes.items.len);
+        return .{
+            .bytes = line.bytes.items[0..style_len],
+            .styles = line.styles.items[0..style_len],
+        };
+    }
 };
 
 test "terminal backend: carriage return overwrite with clear sequence" {
@@ -592,4 +794,29 @@ test "terminal backend: ansi color escapes are ignored in text output" {
 
     try backend.appendBytes(allocator, "\x1b[31mred\x1b[0m");
     try std.testing.expectEqualStrings("red", backend.text());
+}
+
+test "terminal backend: sgr updates styled line metadata" {
+    const allocator = std.testing.allocator;
+    var backend = Backend.initPlain(.{ .max_bytes = 1024 });
+    defer backend.deinit(allocator);
+
+    try backend.appendBytes(allocator, "\x1b[31mR\x1b[0mD");
+    const line = backend.lineAt(0) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expectEqual(@as(usize, 2), line.bytes.len);
+    try std.testing.expectEqual(@as(u8, 'R'), line.bytes[0]);
+    try std.testing.expectEqual(@as(u8, 'D'), line.bytes[1]);
+    try std.testing.expectEqualStrings("RD", backend.text());
+
+    switch (line.styles[0].fg) {
+        .indexed => |idx| try std.testing.expectEqual(@as(u8, 1), idx),
+        else => {
+            try std.testing.expect(false);
+            return;
+        },
+    }
+    try std.testing.expect(line.styles[1].fg == .default);
 }

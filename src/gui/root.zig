@@ -214,13 +214,12 @@ fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn initTerminalBackend() terminal_render_backend.Backend {
-    if (std.mem.eql(u8, TERMINAL_BACKEND_KIND, "ghostty-vt")) {
-        return terminal_render_backend.Backend.initGhosttyVt(.{
-            .max_bytes = TERMINAL_OUTPUT_MAX_BYTES,
-        });
-    }
-    return terminal_render_backend.Backend.initPlain(.{
+fn defaultTerminalBackendKind() terminal_render_backend.Backend.Kind {
+    return terminal_render_backend.Backend.parseKind(TERMINAL_BACKEND_KIND);
+}
+
+fn initTerminalBackend(kind: terminal_render_backend.Backend.Kind) terminal_render_backend.Backend {
+    return terminal_render_backend.Backend.initForKind(kind, .{
         .max_bytes = TERMINAL_OUTPUT_MAX_BYTES,
     });
 }
@@ -305,6 +304,7 @@ const SettingsPanel = struct {
     ui_profile: std.ArrayList(u8) = .empty,
     ui_theme_pack: std.ArrayList(u8) = .empty,
     watch_theme_pack: bool = false,
+    terminal_backend_kind: terminal_render_backend.Backend.Kind = .plain_text,
     auto_connect_on_launch: bool = true,
     focused_field: SettingsFocusField = .server_url,
     // Vertical scroll offsets per form panel
@@ -324,6 +324,7 @@ const SettingsPanel = struct {
         panel.project_mount_export_name.appendSlice(allocator, "") catch {};
         panel.default_session.appendSlice(allocator, "main") catch {};
         panel.default_agent.appendSlice(allocator, "") catch {};
+        panel.terminal_backend_kind = defaultTerminalBackendKind();
         return panel;
     }
 
@@ -565,6 +566,7 @@ const App = struct {
     contract_services: std.ArrayListUnmanaged(ContractServiceEntry) = .{},
     contract_service_selected_index: usize = 0,
     contract_invoke_payload: std.ArrayList(u8) = .empty,
+    terminal_backend_kind: terminal_render_backend.Backend.Kind = .plain_text,
     terminal_backend: terminal_render_backend.Backend,
     terminal_input: std.ArrayList(u8) = .empty,
     terminal_status: ?[]u8 = null,
@@ -704,6 +706,9 @@ const App = struct {
         }
         settings_panel.watch_theme_pack = config.ui_watch_theme_pack;
         settings_panel.auto_connect_on_launch = config.auto_connect_on_launch;
+        settings_panel.terminal_backend_kind = terminal_render_backend.Backend.parseKind(
+            config.selectedTerminalBackend() orelse TERMINAL_BACKEND_KIND,
+        );
 
         var app = App{
             .allocator = allocator,
@@ -721,7 +726,8 @@ const App = struct {
             .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
             .frame_clock = zapp.frame_clock.FrameClock.init(60),
             .debug_folded_blocks = std.AutoHashMap(DebugFoldKey, void).init(allocator),
-            .terminal_backend = initTerminalBackend(),
+            .terminal_backend_kind = settings_panel.terminal_backend_kind,
+            .terminal_backend = initTerminalBackend(settings_panel.terminal_backend_kind),
             .manager = undefined,
         };
         app.node_service_watch_filter.appendSlice(allocator, "") catch {};
@@ -3123,8 +3129,10 @@ const App = struct {
         try self.config.setProfile(if (self.settings_panel.ui_profile.items.len > 0) self.settings_panel.ui_profile.items else null);
         try self.config.setThemePack(if (self.settings_panel.ui_theme_pack.items.len > 0) self.settings_panel.ui_theme_pack.items else null);
         self.config.setWatchThemePack(self.settings_panel.watch_theme_pack);
+        try self.config.setTerminalBackend(terminal_render_backend.Backend.kindName(self.settings_panel.terminal_backend_kind));
         try self.config.save();
 
+        self.applySelectedTerminalBackend();
         self.applyThemeFromSettings();
     }
 
@@ -3221,6 +3229,30 @@ const App = struct {
         self.terminal_next_poll_at_ms = 0;
         self.clearTerminalStatus();
         self.clearTerminalError();
+    }
+
+    fn applySelectedTerminalBackend(self: *App) void {
+        const next_kind = self.settings_panel.terminal_backend_kind;
+        if (self.terminal_backend_kind == next_kind) return;
+
+        const snapshot = self.allocator.dupe(u8, self.terminal_backend.text()) catch null;
+        defer if (snapshot) |value| self.allocator.free(value);
+
+        self.terminal_backend.deinit(self.allocator);
+        self.terminal_backend = initTerminalBackend(next_kind);
+        self.terminal_backend_kind = next_kind;
+
+        if (snapshot) |value| {
+            _ = self.terminal_backend.appendBytes(self.allocator, value) catch {};
+        }
+
+        const status = std.fmt.allocPrint(
+            self.allocator,
+            "Terminal backend switched to {s}",
+            .{terminal_render_backend.Backend.kindName(self.terminal_backend_kind)},
+        ) catch null;
+        defer if (status) |value| self.allocator.free(value);
+        self.setTerminalStatus(status orelse "Terminal backend switched");
     }
 
     fn clearFilesystemDirCache(self: *App) void {
@@ -5024,6 +5056,52 @@ const App = struct {
             self.settings_panel.auto_connect_on_launch = !self.settings_panel.auto_connect_on_launch;
         }
 
+        y += button_height + layout.row_gap;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Terminal renderer",
+            self.theme.colors.text_primary,
+        );
+        y += 20.0 * self.ui_scale;
+        const backend_button_width: f32 = @max(120.0, (rect_width - pad * 3.0) * 0.5);
+        const backend_plain_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            backend_button_width,
+            button_height,
+        );
+        const backend_ghostty_rect = Rect.fromXYWH(
+            backend_plain_rect.max[0] + pad,
+            y,
+            backend_button_width,
+            button_height,
+        );
+        if (self.drawButtonWidget(
+            backend_plain_rect,
+            "Plain",
+            .{ .variant = if (self.settings_panel.terminal_backend_kind == .plain_text) .primary else .secondary },
+        )) {
+            self.settings_panel.terminal_backend_kind = .plain_text;
+            self.applySelectedTerminalBackend();
+        }
+        if (self.drawButtonWidget(
+            backend_ghostty_rect,
+            "Ghostty-VT",
+            .{ .variant = if (self.settings_panel.terminal_backend_kind == .ghostty_vt) .primary else .secondary },
+        )) {
+            self.settings_panel.terminal_backend_kind = .ghostty_vt;
+            self.applySelectedTerminalBackend();
+        }
+        y += button_height + layout.row_gap * 0.6;
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            input_width,
+            "Runtime selection; saved when you press Save Config.",
+            self.theme.colors.text_secondary,
+        );
+
         if (self.mouse_released and
             isSettingsPanelFocusField(self.settings_panel.focused_field) and
             !input_rect.contains(.{ self.mouse_x, self.mouse_y }) and
@@ -5038,7 +5116,7 @@ const App = struct {
 
         const button_width: f32 = @max(148.0 * self.ui_scale, rect_width * 0.25);
         const control_ready = self.connection_state == .connected;
-        const action_row_y = y + button_height + layout.section_gap;
+        const action_row_y = y + layout.line_height + layout.section_gap * 0.45;
         const connect_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             action_row_y,
@@ -6425,8 +6503,12 @@ const App = struct {
         y += layout.title_gap;
         const backend_line = std.fmt.allocPrint(
             self.allocator,
-            "Backend: {s} (build option: --terminal-backend={s})",
-            .{ self.terminal_backend.label(), TERMINAL_BACKEND_KIND },
+            "Backend: {s} (selected: {s}, build default: {s})",
+            .{
+                self.terminal_backend.label(),
+                terminal_render_backend.Backend.kindName(self.terminal_backend_kind),
+                TERMINAL_BACKEND_KIND,
+            },
         ) catch null;
         defer if (backend_line) |value| self.allocator.free(value);
         self.drawTextTrimmed(
@@ -6437,6 +6519,16 @@ const App = struct {
             self.theme.colors.text_secondary,
         );
         y += layout.line_height;
+        if (self.terminal_backend.statusDetail()) |detail| {
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                y,
+                content_width,
+                detail,
+                self.theme.colors.text_secondary,
+            );
+            y += layout.line_height;
+        }
 
         const session_line = if (self.terminal_session_id) |id|
             std.fmt.allocPrint(self.allocator, "Session: {s}", .{id}) catch null
@@ -6605,8 +6697,7 @@ const App = struct {
         );
         self.drawSurfacePanel(output_rect);
 
-        const output = self.terminal_backend.text();
-        if (output.len == 0) {
+        if (self.terminal_backend.lineCount() == 0 or self.terminal_backend.text().len == 0) {
             self.drawTextTrimmed(
                 output_rect.min[0] + inner,
                 output_rect.min[1] + inner,
@@ -6617,13 +6708,165 @@ const App = struct {
             return;
         }
 
-        _ = self.drawTextWrapped(
-            output_rect.min[0] + inner,
-            output_rect.min[1] + inner,
-            output_rect.width() - inner * 2.0,
-            output,
-            self.theme.colors.text_primary,
-        );
+        self.drawTerminalStyledOutput(output_rect, inner);
+    }
+
+    fn terminalIndexedColor(index: u8) [4]f32 {
+        const base16 = [_][3]u8{
+            .{ 0, 0, 0 },
+            .{ 205, 49, 49 },
+            .{ 13, 188, 121 },
+            .{ 229, 229, 16 },
+            .{ 36, 114, 200 },
+            .{ 188, 63, 188 },
+            .{ 17, 168, 205 },
+            .{ 229, 229, 229 },
+            .{ 102, 102, 102 },
+            .{ 241, 76, 76 },
+            .{ 35, 209, 139 },
+            .{ 245, 245, 67 },
+            .{ 59, 142, 234 },
+            .{ 214, 112, 214 },
+            .{ 41, 184, 219 },
+            .{ 255, 255, 255 },
+        };
+        if (index < 16) {
+            const rgb = base16[index];
+            return zcolors.rgba(rgb[0], rgb[1], rgb[2], 255);
+        }
+        if (index < 232) {
+            const v = index - 16;
+            const r = v / 36;
+            const g = (v / 6) % 6;
+            const b = v % 6;
+            const scale = [_]u8{ 0, 95, 135, 175, 215, 255 };
+            return zcolors.rgba(scale[r], scale[g], scale[b], 255);
+        }
+        const gray = @as(u8, @intCast(8 + (index - 232) * 10));
+        return zcolors.rgba(gray, gray, gray, 255);
+    }
+
+    fn terminalColorToRgba(
+        self: *App,
+        color: terminal_render_backend.Color,
+        default_color: [4]f32,
+    ) [4]f32 {
+        _ = self;
+        return switch (color) {
+            .default => default_color,
+            .indexed => |idx| terminalIndexedColor(idx),
+            .rgb => |rgb| zcolors.rgba(rgb[0], rgb[1], rgb[2], 255),
+        };
+    }
+
+    fn terminalStyleColors(
+        self: *App,
+        style: terminal_render_backend.Style,
+    ) struct { fg: [4]f32, bg: ?[4]f32 } {
+        var fg = self.terminalColorToRgba(style.fg, self.theme.colors.text_primary);
+        var bg_opt: ?[4]f32 = if (style.bg == .default)
+            null
+        else
+            self.terminalColorToRgba(style.bg, self.theme.colors.background);
+
+        if (style.inverse) {
+            const swapped_fg = if (bg_opt) |bg| bg else self.theme.colors.background;
+            const swapped_bg = self.terminalColorToRgba(style.fg, self.theme.colors.text_primary);
+            fg = swapped_fg;
+            bg_opt = swapped_bg;
+        }
+        if (style.dim) {
+            fg = zcolors.blend(fg, self.theme.colors.background, 0.45);
+        }
+        if (style.bold) {
+            fg = zcolors.blend(fg, zcolors.rgba(255, 255, 255, 255), 0.22);
+        }
+        if (style.italic) {
+            fg = zcolors.blend(fg, self.theme.colors.primary, 0.12);
+        }
+        return .{ .fg = fg, .bg = bg_opt };
+    }
+
+    fn fitTextToWidth(self: *App, text: []const u8, max_w: f32) usize {
+        if (text.len == 0 or max_w <= 0.0) return 0;
+        if (self.measureText(text) <= max_w) return text.len;
+
+        var idx: usize = 0;
+        var best_end: usize = 0;
+        while (idx < text.len) {
+            const next = nextUtf8Boundary(text, idx);
+            if (next <= idx) break;
+            if (self.measureText(text[0..next]) > max_w) break;
+            best_end = next;
+            idx = next;
+        }
+        return best_end;
+    }
+
+    fn drawTerminalStyledLine(
+        self: *App,
+        x: f32,
+        y: f32,
+        max_w: f32,
+        line: terminal_render_backend.StyledLine,
+    ) void {
+        var cursor_x = x;
+        const max_x = x + @max(1.0, max_w);
+        var i: usize = 0;
+        while (i < line.bytes.len and i < line.styles.len and cursor_x < max_x) {
+            const style = line.styles[i];
+            var end = i + 1;
+            while (end < line.bytes.len and end < line.styles.len and std.meta.eql(line.styles[end], style)) : (end += 1) {}
+            const run_text = line.bytes[i..end];
+            const remaining_w = max_x - cursor_x;
+            const fit_end = self.fitTextToWidth(run_text, remaining_w);
+            if (fit_end == 0) break;
+            const segment = run_text[0..fit_end];
+            const colors = self.terminalStyleColors(style);
+            const segment_w = self.measureText(segment);
+            if (colors.bg) |bg| {
+                self.drawFilledRect(Rect.fromXYWH(cursor_x, y, segment_w, self.textLineHeight()), zcolors.withAlpha(bg, 0.22));
+            }
+            self.drawText(cursor_x, y, segment, colors.fg);
+            if (style.underline) {
+                self.drawFilledRect(
+                    Rect.fromXYWH(cursor_x, y + self.textLineHeight() - @max(1.0, self.ui_scale), segment_w, @max(1.0, self.ui_scale)),
+                    zcolors.withAlpha(colors.fg, 0.9),
+                );
+            }
+            if (style.strikethrough) {
+                self.drawFilledRect(
+                    Rect.fromXYWH(cursor_x, y + self.textLineHeight() * 0.48, segment_w, @max(1.0, self.ui_scale)),
+                    zcolors.withAlpha(colors.fg, 0.75),
+                );
+            }
+            cursor_x += segment_w;
+            if (fit_end < run_text.len) break;
+            i = end;
+        }
+    }
+
+    fn drawTerminalStyledOutput(self: *App, output_rect: Rect, inner: f32) void {
+        const line_height = self.textLineHeight();
+        const usable_height = @max(1.0, output_rect.height() - inner * 2.0);
+        const max_lines_float = @floor(usable_height / line_height);
+        if (max_lines_float < 1.0) return;
+        const max_lines: usize = @intFromFloat(max_lines_float);
+
+        const total_lines = self.terminal_backend.lineCount();
+        if (total_lines == 0) return;
+        const start_line = if (total_lines > max_lines) total_lines - max_lines else 0;
+        const draw_x = output_rect.min[0] + inner;
+        const draw_w = @max(1.0, output_rect.width() - inner * 2.0);
+        const max_y = output_rect.max[1] - inner;
+
+        var y = output_rect.min[1] + inner;
+        var line_idx = start_line;
+        while (line_idx < total_lines and y + line_height <= max_y + 0.5) : (line_idx += 1) {
+            const line = self.terminal_backend.lineAt(line_idx) orelse continue;
+            self.drawTerminalStyledLine(draw_x, y, draw_w, line);
+            y += line_height;
+        }
     }
 
     fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {

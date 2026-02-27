@@ -41,6 +41,11 @@ zig build gui -Dterminal-backend=ghostty-vt
 
 GUI binary: `zig-out/bin/zss-gui`
 
+Terminal backend notes:
+- build option sets the default (`plain` or `ghostty-vt`)
+- runtime selection is available in **Settings -> Terminal renderer**
+- selection is persisted in config when using **Save Config**
+
 ## CLI Quickstart
 
 ```bash
@@ -120,6 +125,8 @@ Useful options:
 
 ```bash
 ./scripts/smoke-matrix.sh
+# GUI terminal backend matrix (Linux + Windows/Wine startup)
+./scripts/smoke-gui-terminal-backends.sh
 ```
 
 Environment knobs:
@@ -127,6 +134,7 @@ Environment knobs:
 - `SMOKE_SKIP_BUILD=1`
 - `SMOKE_SKIP_GUI_BUILD=1`
 - `SMOKE_SKIP_CHAT=1`
+- `SMOKE_SKIP_WINDOWS=1` (for `smoke-gui-terminal-backends.sh`)
 
 ## License
 
