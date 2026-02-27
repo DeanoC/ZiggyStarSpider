@@ -3314,6 +3314,40 @@ const App = struct {
         return null;
     }
 
+    fn nodeWatchHintForRemote(self: *App, remote: []const u8) ?[]u8 {
+        if (std.mem.indexOf(u8, remote, "disabled for user role") != null) {
+            return self.allocator.dupe(
+                u8,
+                "User watch is disabled server-side. Ask admin to enable SPIDERWEB_NODE_SERVICE_WATCH_ALLOW_USER.",
+            ) catch null;
+        }
+        if (std.mem.indexOf(u8, remote, "disabled for admin role") != null) {
+            return self.allocator.dupe(
+                u8,
+                "Admin watch is disabled server-side. Check SPIDERWEB_NODE_SERVICE_WATCH_ALLOW_ADMIN.",
+            ) catch null;
+        }
+        if (std.mem.indexOf(u8, remote, "observe access denied for active project") != null) {
+            return self.allocator.dupe(
+                u8,
+                "Project observe policy denied this stream. Check access_policy.actions.observe and agent overrides.",
+            ) catch null;
+        }
+        if (std.mem.indexOf(u8, remote, "watch requires a project-scoped session binding") != null) {
+            return self.allocator.dupe(
+                u8,
+                "Attach the session to a project first (project selection + reconnect/session attach).",
+            ) catch null;
+        }
+        if (std.mem.indexOf(u8, remote, "forbidden") != null) {
+            return self.allocator.dupe(
+                u8,
+                "Watch access is policy-gated for your role/session.",
+            ) catch null;
+        }
+        return null;
+    }
+
     fn formatControlRemoteMessage(self: *App, operation: []const u8, remote: []const u8) ?[]u8 {
         const hint = self.controlAuthHintForRemote(remote);
         defer if (hint) |value| self.allocator.free(value);
@@ -6231,6 +6265,39 @@ const App = struct {
         );
         y += line_height;
 
+        const role_name = if (self.config.active_role == .admin) "admin" else "user";
+        const scope_preview = if (self.selectedProjectId()) |project_id| blk: {
+            const token_present = if (self.selectedProjectToken(project_id)) |token| token.len > 0 else false;
+            break :blk std.fmt.allocPrint(
+                self.allocator,
+                "Node watch scope: role={s} project={s} token={s}",
+                .{ role_name, project_id, if (token_present) "set" else "none" },
+            ) catch null;
+        } else std.fmt.allocPrint(
+            self.allocator,
+            "Node watch scope: role={s} project=(session default)",
+            .{role_name},
+        ) catch null;
+        defer if (scope_preview) |value| self.allocator.free(value);
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            scope_preview orelse "Node watch scope: unknown",
+            self.theme.colors.text_secondary,
+        );
+        y += line_height;
+        if (self.config.active_role == .user) {
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                y,
+                content_width,
+                "User watch stream is filtered to mounted nodes allowed by project observe policy.",
+                self.theme.colors.text_secondary,
+            );
+            y += line_height;
+        }
+
         const toggle_rect = Rect.fromXYWH(
             rect.min[0] + pad,
             y,
@@ -8066,11 +8133,15 @@ const App = struct {
             try self.appendMessage("system", "Node service watch updated", null);
             return;
         }
-        try self.appendMessage(
-            "system",
-            control_plane.lastRemoteError() orelse "Node service watch request failed",
-            null,
-        );
+        const remote = control_plane.lastRemoteError() orelse "Node service watch request failed";
+        const hint = self.nodeWatchHintForRemote(remote);
+        defer if (hint) |value| self.allocator.free(value);
+        const message = if (hint) |value|
+            std.fmt.allocPrint(self.allocator, "Node watch failed: {s} {s}", .{ remote, value }) catch null
+        else
+            std.fmt.allocPrint(self.allocator, "Node watch failed: {s}", .{remote}) catch null;
+        defer if (message) |value| self.allocator.free(value);
+        try self.appendMessage("system", message orelse remote, null);
         return error.ControlRequestFailed;
     }
 

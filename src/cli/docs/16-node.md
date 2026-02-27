@@ -115,14 +115,18 @@ ziggystarspider node service-runtime node-2 camera-main invoke '{"op":"capture"}
 ziggystarspider node service-runtime node-2 camera-main restart
 ```
 
-## node watch [node_id]
+## node watch [node_id] [--replay-limit <n>]
 
 Subscribe to live `control.node_service_event` updates pushed by Spiderweb when node service catalogs change.
 
 Use `node_id` to filter to one node, or omit it to watch all nodes.
+Use `--replay-limit <n>` (or `--replay-limit=<n>`) to request recent historical
+events first before live streaming. Default is `25` and maximum is `10000`.
 
 **Examples:**
 ```bash
 ziggystarspider node watch
 ziggystarspider node watch node-2
+ziggystarspider node watch --replay-limit 100
+ziggystarspider node watch node-2 --replay-limit=250
 ```

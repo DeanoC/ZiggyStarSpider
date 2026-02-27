@@ -1507,20 +1507,61 @@ fn printNodeServiceEventPayload(
 }
 
 fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
-    if (cmd.args.len > 1) {
-        logger.err("node watch accepts at most one optional <node_id> filter", .{});
-        return error.InvalidArguments;
+    var node_filter: ?[]const u8 = null;
+    var replay_limit: usize = 25;
+    var i: usize = 0;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--replay-limit")) {
+            i += 1;
+            if (i >= cmd.args.len) {
+                logger.err("node watch --replay-limit requires a numeric value", .{});
+                return error.InvalidArguments;
+            }
+            replay_limit = std.fmt.parseUnsigned(usize, cmd.args[i], 10) catch {
+                logger.err("node watch --replay-limit must be an unsigned integer", .{});
+                return error.InvalidArguments;
+            };
+            if (replay_limit > 10_000) replay_limit = 10_000;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--replay-limit=")) {
+            const value = arg["--replay-limit=".len..];
+            replay_limit = std.fmt.parseUnsigned(usize, value, 10) catch {
+                logger.err("node watch --replay-limit must be an unsigned integer", .{});
+                return error.InvalidArguments;
+            };
+            if (replay_limit > 10_000) replay_limit = 10_000;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) {
+            logger.err("node watch unknown option: {s}", .{arg});
+            return error.InvalidArguments;
+        }
+        if (node_filter != null) {
+            logger.err("node watch accepts at most one optional <node_id> filter", .{});
+            return error.InvalidArguments;
+        }
+        node_filter = arg;
     }
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
-    const watch_payload = if (cmd.args.len == 1) blk: {
-        const escaped_node = try unified.jsonEscape(allocator, cmd.args[0]);
+    const watch_payload = if (node_filter) |node_id| blk: {
+        const escaped_node = try unified.jsonEscape(allocator, node_id);
         defer allocator.free(escaped_node);
-        break :blk try std.fmt.allocPrint(allocator, "{{\"node_id\":\"{s}\"}}", .{escaped_node});
-    } else try allocator.dupe(u8, "{}");
+        break :blk try std.fmt.allocPrint(
+            allocator,
+            "{{\"node_id\":\"{s}\",\"replay_limit\":{d}}}",
+            .{ escaped_node, replay_limit },
+        );
+    } else try std.fmt.allocPrint(
+        allocator,
+        "{{\"replay_limit\":{d}}}",
+        .{replay_limit},
+    );
     defer allocator.free(watch_payload);
 
     const watch_ack = try control_plane.requestControlPayloadJson(
@@ -1532,10 +1573,16 @@ fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, 
     );
     defer allocator.free(watch_ack);
 
-    if (cmd.args.len == 1) {
-        try stdout.print("Watching node service events for node {s} (Ctrl+C to stop)\n", .{cmd.args[0]});
+    if (node_filter) |node_id| {
+        try stdout.print(
+            "Watching node service events for node {s} (replay_limit={d}, Ctrl+C to stop)\n",
+            .{ node_id, replay_limit },
+        );
     } else {
-        try stdout.print("Watching node service events for all nodes (Ctrl+C to stop)\n", .{});
+        try stdout.print(
+            "Watching node service events for all nodes (replay_limit={d}, Ctrl+C to stop)\n",
+            .{replay_limit},
+        );
     }
 
     while (true) {
