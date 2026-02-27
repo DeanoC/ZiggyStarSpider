@@ -3,6 +3,7 @@ const zui = @import("ziggy-ui");
 const ws_client_mod = @import("websocket_client.zig");
 const config_mod = @import("client-config");
 const control_plane = @import("control_plane");
+const build_options = @import("build_options");
 const workspace_types = control_plane.workspace_types;
 const panels_bridge = @import("panels_bridge.zig");
 
@@ -23,6 +24,7 @@ const client_agents = zui.client.agent_registry;
 const font_system = zui.ui.font_system;
 const protocol_messages = @import("protocol_messages.zig");
 const fs_worker_mod = @import("filesystem_worker.zig");
+const terminal_render_backend = @import("terminal_render_backend.zig");
 
 const workspace = zui.ui.workspace;
 const panel_manager = zui.ui.panel_manager;
@@ -58,6 +60,14 @@ const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
 const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
 const WS_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
 const FILESYSTEM_DIR_CACHE_TTL_MS: i64 = 5_000;
+const TERMINAL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
+const TERMINAL_READ_POLL_INTERVAL_MS: i64 = 120;
+const TERMINAL_READ_TIMEOUT_MS: u32 = 1;
+const TERMINAL_READ_MAX_BYTES: usize = 8 * 1024;
+const TERMINAL_BACKEND_KIND = if (@hasDecl(build_options, "terminal_backend"))
+    build_options.terminal_backend
+else
+    "plain";
 
 const ChatAttachment = zui.protocol.types.ChatAttachment;
 const ChatMessage = zui.protocol.types.ChatMessage;
@@ -204,6 +214,17 @@ fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
+fn initTerminalBackend() terminal_render_backend.Backend {
+    if (std.mem.eql(u8, TERMINAL_BACKEND_KIND, "ghostty-vt")) {
+        return terminal_render_backend.Backend.initGhosttyVt(.{
+            .max_bytes = TERMINAL_OUTPUT_MAX_BYTES,
+        });
+    }
+    return terminal_render_backend.Backend.initPlain(.{
+        .max_bytes = TERMINAL_OUTPUT_MAX_BYTES,
+    });
+}
+
 fn maskTokenForDisplay(allocator: std.mem.Allocator, token: []const u8) ![]u8 {
     if (token.len == 0) return allocator.dupe(u8, "(empty)");
     if (token.len <= 8) return allocator.dupe(u8, "****");
@@ -233,6 +254,7 @@ const SettingsFocusField = enum {
     node_watch_filter,
     node_watch_replay_limit,
     filesystem_contract_payload,
+    terminal_command_input,
 };
 
 fn isSettingsPanelFocusField(field: SettingsFocusField) bool {
@@ -528,6 +550,7 @@ const App = struct {
     project_panel_id: ?workspace.PanelId = null,
     project_selector_open: bool = false,
     filesystem_panel_id: ?workspace.PanelId = null,
+    terminal_panel_id: ?workspace.PanelId = null,
     filesystem_worker: ?fs_worker_mod.FilesystemWorker = null,
     filesystem_path: std.ArrayList(u8) = .empty,
     filesystem_entries: std.ArrayListUnmanaged(FilesystemEntry) = .{},
@@ -542,6 +565,13 @@ const App = struct {
     contract_services: std.ArrayListUnmanaged(ContractServiceEntry) = .{},
     contract_service_selected_index: usize = 0,
     contract_invoke_payload: std.ArrayList(u8) = .empty,
+    terminal_backend: terminal_render_backend.Backend,
+    terminal_input: std.ArrayList(u8) = .empty,
+    terminal_status: ?[]u8 = null,
+    terminal_error: ?[]u8 = null,
+    terminal_session_id: ?[]u8 = null,
+    terminal_auto_poll: bool = true,
+    terminal_next_poll_at_ms: i64 = 0,
     session_attach_state: SessionAttachUiState = .unknown,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
@@ -691,6 +721,7 @@ const App = struct {
             .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
             .frame_clock = zapp.frame_clock.FrameClock.init(60),
             .debug_folded_blocks = std.AutoHashMap(DebugFoldKey, void).init(allocator),
+            .terminal_backend = initTerminalBackend(),
             .manager = undefined,
         };
         app.node_service_watch_filter.appendSlice(allocator, "") catch {};
@@ -788,6 +819,9 @@ const App = struct {
         self.filesystem_path.deinit(self.allocator);
         self.clearContractServices();
         self.contract_invoke_payload.deinit(self.allocator);
+        self.clearTerminalState();
+        self.terminal_input.deinit(self.allocator);
+        self.terminal_backend.deinit(self.allocator);
         self.node_service_watch_filter.deinit(self.allocator);
         self.node_service_watch_replay_limit.deinit(self.allocator);
         self.clearNodeServiceReloadDiagnostics();
@@ -900,6 +934,7 @@ const App = struct {
 
             try self.pollWebSocket();
             self.pollFilesystemWorker();
+            self.pollTerminalSession();
             if (self.pending_send_job_id != null and self.ws_client != null) {
                 _ = self.tryResumePendingSendJob() catch {};
             }
@@ -2719,6 +2754,7 @@ const App = struct {
                 self.debug_stream_pending = false;
                 self.clearPendingDebugRequest();
                 self.stopFilesystemWorker();
+                self.clearTerminalState();
 
                 client.deinit();
                 self.ws_client = null;
@@ -2868,6 +2904,7 @@ const App = struct {
             .node_watch_filter => &self.node_service_watch_filter,
             .node_watch_replay_limit => &self.node_service_watch_replay_limit,
             .filesystem_contract_payload => &self.contract_invoke_payload,
+            .terminal_command_input => &self.terminal_input,
             .none => null,
         };
     }
@@ -2910,6 +2947,14 @@ const App = struct {
             .enter, .keypad_enter => {
                 if (self.settings_panel.focused_field == .server_url) {
                     try self.tryConnect(manager);
+                } else if (self.settings_panel.focused_field == .terminal_command_input) {
+                    self.sendTerminalInputFromUi() catch |err| {
+                        const msg = self.formatFilesystemOpError("Terminal send failed", err);
+                        if (msg) |text| {
+                            defer self.allocator.free(text);
+                            self.setTerminalError(text);
+                        }
+                    };
                 }
             },
             .v => {
@@ -3136,6 +3181,46 @@ const App = struct {
             self.allocator.free(value);
             self.filesystem_error = null;
         }
+    }
+
+    fn setTerminalStatus(self: *App, message: []const u8) void {
+        if (self.terminal_status) |value| {
+            self.allocator.free(value);
+            self.terminal_status = null;
+        }
+        self.terminal_status = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearTerminalStatus(self: *App) void {
+        if (self.terminal_status) |value| {
+            self.allocator.free(value);
+            self.terminal_status = null;
+        }
+    }
+
+    fn setTerminalError(self: *App, message: []const u8) void {
+        if (self.terminal_error) |value| {
+            self.allocator.free(value);
+            self.terminal_error = null;
+        }
+        self.terminal_error = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearTerminalError(self: *App) void {
+        if (self.terminal_error) |value| {
+            self.allocator.free(value);
+            self.terminal_error = null;
+        }
+    }
+
+    fn clearTerminalState(self: *App) void {
+        if (self.terminal_session_id) |value| {
+            self.allocator.free(value);
+            self.terminal_session_id = null;
+        }
+        self.terminal_next_poll_at_ms = 0;
+        self.clearTerminalStatus();
+        self.clearTerminalError();
     }
 
     fn clearFilesystemDirCache(self: *App) void {
@@ -4139,7 +4224,7 @@ const App = struct {
                 272.0 * self.ui_scale,
                 self.measureText("Filesystem Browser (Open/Focus)") + layout.inner_inset * 2.8,
             );
-            const rows: usize = 6;
+            const rows: usize = 7;
             const menu_h = layout.inner_inset * 2.0 +
                 row_h * @as(f32, @floatFromInt(rows)) +
                 row_gap * @as(f32, @floatFromInt(rows - 1));
@@ -4195,6 +4280,18 @@ const App = struct {
             )) {
                 _ = self.ensureFilesystemPanel(ui_window.manager) catch |err| {
                     std.log.err("Windows menu failed to open Filesystem Browser: {s}", .{@errorName(err)});
+                };
+                self.windows_menu_open_window_id = null;
+            }
+            row_y += row_h + row_gap;
+
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                if (self.hasPanelWithTitle(ui_window.manager, "Terminal") or self.terminal_panel_id != null) "Terminal (Focus)" else "Terminal (Open)",
+                .{ .variant = .secondary },
+            )) {
+                _ = self.ensureTerminalPanel(ui_window.manager) catch |err| {
+                    std.log.err("Windows menu failed to open Terminal: {s}", .{@errorName(err)});
                 };
                 self.windows_menu_open_window_id = null;
             }
@@ -4702,6 +4799,8 @@ const App = struct {
                     self.drawProjectPanel(manager, rect);
                 } else if (self.filesystem_panel_id != null and self.filesystem_panel_id.? == panel.id) {
                     self.drawFilesystemPanel(manager, rect);
+                } else if (self.terminal_panel_id != null and self.terminal_panel_id.? == panel.id) {
+                    self.drawTerminalPanel(manager, rect);
                 } else if (std.mem.eql(u8, panel.title, "Debug Stream")) {
                     self.debug_panel_id = panel.id;
                     self.drawDebugPanel(manager, rect);
@@ -4711,6 +4810,9 @@ const App = struct {
                 } else if (std.mem.eql(u8, panel.title, "Filesystem Browser")) {
                     self.filesystem_panel_id = panel.id;
                     self.drawFilesystemPanel(manager, rect);
+                } else if (std.mem.eql(u8, panel.title, "Terminal")) {
+                    self.terminal_panel_id = panel.id;
+                    self.drawTerminalPanel(manager, rect);
                 } else {
                     self.drawText(
                         rect.min[0] + inset,
@@ -6025,7 +6127,6 @@ const App = struct {
         defer self.allocator.free(status_path);
         const status = try self.readFsPathTextGui(client, status_path);
         defer self.allocator.free(status);
-        _ = status;
         try self.applyFilesystemPreview(status_path, status);
         self.clearFilesystemError();
     }
@@ -6067,6 +6168,462 @@ const App = struct {
     fn openSelectedContractServicePath(self: *App) !void {
         const entry = self.selectedContractService() orelse return error.MissingField;
         try self.queueFilesystemPathLoad(entry.service_path, true, false);
+    }
+
+    fn writeTerminalControl(self: *App, control_name: []const u8, payload: []const u8) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        const control_path = try std.fmt.allocPrint(
+            self.allocator,
+            "/agents/self/terminal/control/{s}",
+            .{control_name},
+        );
+        defer self.allocator.free(control_path);
+        try self.writeFsPathTextGui(client, control_path, payload);
+    }
+
+    fn readTerminalPath(self: *App, path: []const u8) ![]u8 {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        return self.readFsPathTextGui(client, path);
+    }
+
+    fn ensureTerminalSession(self: *App) !void {
+        if (self.terminal_session_id != null) return;
+
+        const session_id = try std.fmt.allocPrint(self.allocator, "gui-{d}", .{std.time.milliTimestamp()});
+        defer self.allocator.free(session_id);
+        const escaped_session = try jsonEscape(self.allocator, session_id);
+        defer self.allocator.free(escaped_session);
+
+        const payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"session_id\":\"{s}\",\"label\":\"zss-gui\"}}",
+            .{escaped_session},
+        );
+        defer self.allocator.free(payload);
+        try self.writeTerminalControl("create.json", payload);
+
+        self.clearTerminalState();
+        self.terminal_session_id = try self.allocator.dupe(u8, session_id);
+        self.setTerminalStatus("Terminal session ready");
+        self.terminal_next_poll_at_ms = std.time.milliTimestamp() + TERMINAL_READ_POLL_INTERVAL_MS;
+    }
+
+    fn closeTerminalSession(self: *App) !void {
+        if (self.terminal_session_id == null) return;
+        const session_id = self.terminal_session_id.?;
+        const escaped_session = try jsonEscape(self.allocator, session_id);
+        defer self.allocator.free(escaped_session);
+        const payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"session_id\":\"{s}\"}}",
+            .{escaped_session},
+        );
+        defer self.allocator.free(payload);
+        try self.writeTerminalControl("close.json", payload);
+        self.clearTerminalState();
+        self.setTerminalStatus("Terminal session closed");
+    }
+
+    fn resizeTerminalSession(self: *App, cols: u32, rows: u32) !void {
+        if (self.terminal_session_id == null) return error.InvalidState;
+        const session_id = self.terminal_session_id.?;
+        const escaped_session = try jsonEscape(self.allocator, session_id);
+        defer self.allocator.free(escaped_session);
+        const payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"session_id\":\"{s}\",\"cols\":{d},\"rows\":{d}}}",
+            .{ escaped_session, cols, rows },
+        );
+        defer self.allocator.free(payload);
+        try self.writeTerminalControl("resize.json", payload);
+        const status = try std.fmt.allocPrint(self.allocator, "Resized to {d}x{d}", .{ cols, rows });
+        defer self.allocator.free(status);
+        self.setTerminalStatus(status);
+    }
+
+    fn sendTerminalControlC(self: *App) !void {
+        try self.ensureTerminalSession();
+        if (self.terminal_session_id == null) return error.InvalidState;
+        const session_id = self.terminal_session_id.?;
+        const escaped_session = try jsonEscape(self.allocator, session_id);
+        defer self.allocator.free(escaped_session);
+
+        const payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"session_id\":\"{s}\",\"data_b64\":\"Aw==\",\"append_newline\":false}}",
+            .{escaped_session},
+        );
+        defer self.allocator.free(payload);
+        try self.writeTerminalControl("write.json", payload);
+        self.clearTerminalError();
+        self.setTerminalStatus("Sent Ctrl+C");
+    }
+
+    fn sendTerminalInputRaw(self: *App, input: []const u8, append_newline: bool) !void {
+        try self.ensureTerminalSession();
+        if (self.terminal_session_id == null) return error.InvalidState;
+
+        const session_id = self.terminal_session_id.?;
+        const escaped_session = try jsonEscape(self.allocator, session_id);
+        defer self.allocator.free(escaped_session);
+        const escaped_input = try jsonEscape(self.allocator, input);
+        defer self.allocator.free(escaped_input);
+        const payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"session_id\":\"{s}\",\"input\":\"{s}\",\"append_newline\":{s}}}",
+            .{
+                escaped_session,
+                escaped_input,
+                if (append_newline) "true" else "false",
+            },
+        );
+        defer self.allocator.free(payload);
+        try self.writeTerminalControl("write.json", payload);
+
+        const status = try std.fmt.allocPrint(self.allocator, "Wrote {d} bytes", .{input.len});
+        defer self.allocator.free(status);
+        self.clearTerminalError();
+        self.setTerminalStatus(status);
+    }
+
+    fn sendTerminalInputFromUi(self: *App) !void {
+        const input = std.mem.trim(u8, self.terminal_input.items, " \t\r\n");
+        if (input.len == 0) return;
+        try self.sendTerminalInputRaw(input, true);
+        self.terminal_input.clearRetainingCapacity();
+        self.terminalReadOnce(25) catch |err| switch (err) {
+            error.RemoteError => {},
+            else => return err,
+        };
+    }
+
+    fn terminalReadOnce(self: *App, timeout_ms: u32) !void {
+        if (self.terminal_session_id == null) return;
+        const session_id = self.terminal_session_id.?;
+        const escaped_session = try jsonEscape(self.allocator, session_id);
+        defer self.allocator.free(escaped_session);
+        const payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"session_id\":\"{s}\",\"timeout_ms\":{d},\"max_bytes\":{d}}}",
+            .{ escaped_session, timeout_ms, TERMINAL_READ_MAX_BYTES },
+        );
+        defer self.allocator.free(payload);
+        try self.writeTerminalControl("read.json", payload);
+
+        const result_payload = try self.readTerminalPath("/agents/self/terminal/result.json");
+        defer self.allocator.free(result_payload);
+        try self.applyTerminalReadResult(result_payload);
+        self.terminal_next_poll_at_ms = std.time.milliTimestamp() + TERMINAL_READ_POLL_INTERVAL_MS;
+    }
+
+    fn applyTerminalReadResult(self: *App, payload: []const u8) !void {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const obj = parsed.value.object;
+
+        const ok = if (obj.get("ok")) |value| switch (value) {
+            .bool => value.bool,
+            else => false,
+        } else false;
+
+        if (!ok) {
+            var message: []const u8 = "terminal operation failed";
+            if (obj.get("error")) |error_value| {
+                if (error_value == .object) {
+                    if (error_value.object.get("message")) |msg_value| {
+                        if (msg_value == .string and msg_value.string.len > 0) {
+                            message = msg_value.string;
+                        }
+                    }
+                }
+            }
+            self.setTerminalError(message);
+            return error.RemoteError;
+        }
+
+        const operation = if (obj.get("operation")) |value| switch (value) {
+            .string => value.string,
+            else => "",
+        } else "";
+        if (!std.mem.eql(u8, operation, "read")) return;
+
+        const result_obj = if (obj.get("result")) |result_value| switch (result_value) {
+            .object => result_value.object,
+            else => return error.InvalidResponse,
+        } else return error.InvalidResponse;
+
+        const data_b64 = if (result_obj.get("data_b64")) |value| switch (value) {
+            .string => value.string,
+            else => "",
+        } else "";
+        const eof = if (result_obj.get("eof")) |value| switch (value) {
+            .bool => value.bool,
+            else => false,
+        } else false;
+
+        if (data_b64.len > 0) {
+            const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(data_b64);
+            const decoded = try self.allocator.alloc(u8, decoded_len);
+            defer self.allocator.free(decoded);
+            try std.base64.standard.Decoder.decode(decoded, data_b64);
+            try self.terminal_backend.appendBytes(self.allocator, decoded);
+        }
+
+        if (eof) {
+            if (self.terminal_session_id) |value| {
+                self.allocator.free(value);
+                self.terminal_session_id = null;
+            }
+            self.setTerminalStatus("Session closed (EOF)");
+        } else {
+            const count = if (result_obj.get("n")) |value| switch (value) {
+                .integer => @max(@as(i64, 0), value.integer),
+                else => 0,
+            } else 0;
+            const status = try std.fmt.allocPrint(self.allocator, "Read {d} bytes", .{count});
+            defer self.allocator.free(status);
+            self.setTerminalStatus(status);
+        }
+        self.clearTerminalError();
+    }
+
+    fn pollTerminalSession(self: *App) void {
+        if (!self.terminal_auto_poll) return;
+        if (self.terminal_session_id == null) return;
+        if (self.ws_client == null) return;
+
+        const now_ms = std.time.milliTimestamp();
+        if (now_ms < self.terminal_next_poll_at_ms) return;
+
+        self.terminalReadOnce(TERMINAL_READ_TIMEOUT_MS) catch |err| {
+            if (err != error.RemoteError) {
+                const msg = self.formatFilesystemOpError("Terminal read failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setTerminalError(text);
+                }
+            }
+            self.terminal_next_poll_at_ms = now_ms + 500;
+            return;
+        };
+    }
+
+    fn drawTerminalPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        _ = manager;
+        const layout = self.panelLayoutMetrics();
+        const pad = layout.inset;
+        const inner = layout.inner_inset;
+        const row_h = layout.button_height;
+        const width = rect.max[0] - rect.min[0];
+        const content_width = @max(220.0, width - pad * 2.0);
+        var y = rect.min[1] + pad;
+
+        self.drawLabel(rect.min[0] + pad, y, "Terminal", self.theme.colors.text_primary);
+        y += layout.title_gap;
+        const backend_line = std.fmt.allocPrint(
+            self.allocator,
+            "Backend: {s} (build option: --terminal-backend={s})",
+            .{ self.terminal_backend.label(), TERMINAL_BACKEND_KIND },
+        ) catch null;
+        defer if (backend_line) |value| self.allocator.free(value);
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            backend_line orelse "Backend: unknown",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height;
+
+        const session_line = if (self.terminal_session_id) |id|
+            std.fmt.allocPrint(self.allocator, "Session: {s}", .{id}) catch null
+        else
+            self.allocator.dupe(u8, "Session: (not started)") catch null;
+        defer if (session_line) |value| self.allocator.free(value);
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            session_line orelse "Session: (unknown)",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height;
+
+        if (self.terminal_status) |status| {
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                y,
+                content_width,
+                status,
+                self.theme.colors.text_secondary,
+            );
+            y += layout.line_height;
+        }
+        if (self.terminal_error) |err_text| {
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                y,
+                content_width,
+                err_text,
+                zcolors.rgba(220, 80, 80, 255),
+            );
+            y += layout.line_height;
+        }
+
+        const button_w = @max(108.0, (content_width - pad * 4.0) / 5.0);
+        const disconnected = self.connection_state != .connected;
+        const start_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_w, row_h);
+        const stop_rect = Rect.fromXYWH(start_rect.max[0] + pad, y, button_w, row_h);
+        const poll_rect = Rect.fromXYWH(stop_rect.max[0] + pad, y, button_w, row_h);
+        const resize_rect = Rect.fromXYWH(poll_rect.max[0] + pad, y, button_w, row_h);
+        const clear_rect = Rect.fromXYWH(resize_rect.max[0] + pad, y, button_w, row_h);
+
+        if (self.drawButtonWidget(
+            start_rect,
+            if (self.terminal_session_id == null) "Start" else "Restart",
+            .{ .variant = .primary, .disabled = disconnected },
+        )) {
+            if (self.terminal_session_id != null) {
+                self.closeTerminalSession() catch {};
+            }
+            self.ensureTerminalSession() catch |err| {
+                const msg = self.formatFilesystemOpError("Terminal start failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setTerminalError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            stop_rect,
+            "Stop",
+            .{ .variant = .secondary, .disabled = disconnected or self.terminal_session_id == null },
+        )) {
+            self.closeTerminalSession() catch |err| {
+                const msg = self.formatFilesystemOpError("Terminal close failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setTerminalError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            poll_rect,
+            "Read",
+            .{ .variant = .secondary, .disabled = disconnected or self.terminal_session_id == null },
+        )) {
+            self.terminalReadOnce(50) catch |err| {
+                const msg = self.formatFilesystemOpError("Terminal read failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setTerminalError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            resize_rect,
+            "Resize 120x36",
+            .{ .variant = .secondary, .disabled = disconnected or self.terminal_session_id == null },
+        )) {
+            self.resizeTerminalSession(120, 36) catch |err| {
+                const msg = self.formatFilesystemOpError("Terminal resize failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setTerminalError(text);
+                }
+            };
+        }
+        if (self.drawButtonWidget(clear_rect, "Clear Output", .{ .variant = .secondary })) {
+            self.terminal_backend.clear(self.allocator);
+            self.clearTerminalError();
+            self.setTerminalStatus("Output cleared");
+        }
+        y += row_h + layout.row_gap * 0.5;
+
+        const auto_poll_rect = Rect.fromXYWH(rect.min[0] + pad, y, @max(180.0, button_w * 1.2), row_h);
+        if (self.drawButtonWidget(
+            auto_poll_rect,
+            if (self.terminal_auto_poll) "Auto Poll: On" else "Auto Poll: Off",
+            .{ .variant = .secondary },
+        )) {
+            self.terminal_auto_poll = !self.terminal_auto_poll;
+        }
+        const ctrl_c_rect = Rect.fromXYWH(auto_poll_rect.max[0] + pad, y, @max(108.0, button_w), row_h);
+        if (self.drawButtonWidget(
+            ctrl_c_rect,
+            "Send Ctrl+C",
+            .{ .variant = .secondary, .disabled = disconnected or self.terminal_session_id == null },
+        )) {
+            self.sendTerminalControlC() catch |err| {
+                const msg = self.formatFilesystemOpError("Terminal control failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setTerminalError(text);
+                }
+            };
+        }
+        y += row_h + layout.row_gap * 0.5;
+
+        const input_rect = Rect.fromXYWH(rect.min[0] + pad, y, @max(220.0, content_width - button_w - pad), row_h);
+        const send_rect = Rect.fromXYWH(input_rect.max[0] + pad, y, button_w, row_h);
+        const input_focused = self.drawTextInputWidget(
+            input_rect,
+            self.terminal_input.items,
+            self.settings_panel.focused_field == .terminal_command_input,
+            .{ .placeholder = "Type command and press Enter (or Send)" },
+        );
+        if (input_focused) self.settings_panel.focused_field = .terminal_command_input;
+        if (self.drawButtonWidget(
+            send_rect,
+            "Send",
+            .{ .variant = .primary, .disabled = disconnected or self.terminal_input.items.len == 0 },
+        )) {
+            self.sendTerminalInputFromUi() catch |err| {
+                const msg = self.formatFilesystemOpError("Terminal send failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setTerminalError(text);
+                }
+            };
+        }
+        if (self.mouse_released and
+            self.settings_panel.focused_field == .terminal_command_input and
+            !input_rect.contains(.{ self.mouse_x, self.mouse_y }))
+        {
+            self.settings_panel.focused_field = .none;
+        }
+
+        y += row_h + layout.row_gap;
+        const output_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            content_width,
+            @max(120.0, rect.max[1] - y - pad),
+        );
+        self.drawSurfacePanel(output_rect);
+
+        const output = self.terminal_backend.text();
+        if (output.len == 0) {
+            self.drawTextTrimmed(
+                output_rect.min[0] + inner,
+                output_rect.min[1] + inner,
+                output_rect.width() - inner * 2.0,
+                "(terminal output empty)",
+                self.theme.colors.text_secondary,
+            );
+            return;
+        }
+
+        _ = self.drawTextWrapped(
+            output_rect.min[0] + inner,
+            output_rect.min[1] + inner,
+            output_rect.width() - inner * 2.0,
+            output,
+            self.theme.colors.text_primary,
+        );
     }
 
     fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
@@ -7625,7 +8182,7 @@ const App = struct {
             .{ compare_delta_count, base_delta_count },
         );
 
-        return out.toOwnedSlice(self.allocator);
+        return try out.toOwnedSlice(self.allocator);
     }
 
     fn exportNodeServiceDiffSnapshot(
@@ -8649,6 +9206,7 @@ const App = struct {
         self.stopFilesystemWorker();
         self.clearFilesystemDirCache();
         self.clearContractServices();
+        self.clearTerminalState();
         if (self.ws_client) |*existing| {
             while (existing.tryReceive()) |msg| self.allocator.free(msg);
             existing.deinit();
@@ -8974,6 +9532,7 @@ const App = struct {
         self.clearWorkspaceData();
         self.clearFilesystemData();
         self.clearFilesystemDirCache();
+        self.clearTerminalState();
         self.clearNodeServiceReloadDiagnostics();
     }
 
@@ -11040,6 +11599,44 @@ const App = struct {
         manager.focusPanel(panel_id);
         self.refreshFilesystemBrowser() catch {};
         self.refreshContractServices() catch {};
+        return panel_id;
+    }
+
+    fn ensureTerminalPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        if (self.terminal_panel_id) |panel_id| {
+            if (self.findPanelById(manager, panel_id) != null) {
+                manager.focusPanel(panel_id);
+                return panel_id;
+            }
+            self.terminal_panel_id = null;
+        }
+
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Terminal")) {
+                self.terminal_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
+        }
+
+        const tool_name = try self.allocator.dupe(u8, "Acheron Terminal");
+        errdefer self.allocator.free(tool_name);
+        var stdout_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stdout_buf.deinit(self.allocator);
+        var stderr_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stderr_buf.deinit(self.allocator);
+        const panel_data = workspace.PanelData{ .ToolOutput = .{
+            .tool_name = tool_name,
+            .stdout = stdout_buf,
+            .stderr = stderr_buf,
+            .exit_code = 0,
+        } };
+        const panel_id = try manager.openPanel(.ToolOutput, "Terminal", panel_data);
+        self.terminal_panel_id = panel_id;
+        if (manager.workspace.syncDockLayout() catch false) {
+            manager.workspace.markDirty();
+        }
+        manager.focusPanel(panel_id);
         return panel_id;
     }
 

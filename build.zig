@@ -30,6 +30,7 @@ fn addGuiArtifact(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    build_options_module: *std.Build.Module,
 ) ?GuiArtifact {
     const os_tag = target.result.os.tag;
     const desktop_target = os_tag == .linux or os_tag == .windows or os_tag == .macos;
@@ -85,6 +86,7 @@ fn addGuiArtifact(
     gui_module.addImport("ziggy-ui", ziggy_ui_module);
     gui_module.addImport("client-config", client_config_module);
     gui_module.addImport("control_plane", control_plane_module);
+    gui_module.addImport("build_options", build_options_module);
     gui_module.addIncludePath(sdl3.path("include"));
     gui_module.addIncludePath(ziggy_ui_src);
 
@@ -159,9 +161,15 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const git_revision = detectGitRevision(b);
+    const terminal_backend_option = b.option(
+        []const u8,
+        "terminal-backend",
+        "GUI terminal renderer backend: plain | ghostty-vt (dynamic/fallback)",
+    ) orelse "plain";
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "app_version", "0.1.0");
     build_options.addOption([]const u8, "git_revision", git_revision);
+    build_options.addOption([]const u8, "terminal_backend", terminal_backend_option);
     const build_options_module = build_options.createModule();
 
     const websocket = b.dependency("websocket", .{
@@ -245,7 +253,7 @@ pub fn build(b: *std.Build) void {
     const gui_step = b.step("gui", "Build GUI executable for host target");
     const run_gui_step = b.step("run-gui", "Run the GUI app");
 
-    if (addGuiArtifact(b, target, optimize)) |host_gui| {
+    if (addGuiArtifact(b, target, optimize, build_options_module)) |host_gui| {
         gui_step.dependOn(&host_gui.install.step);
 
         const run_gui_cmd = b.addRunArtifact(host_gui.exe);

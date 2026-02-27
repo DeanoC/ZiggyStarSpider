@@ -35,6 +35,8 @@ zig build
 ```bash
 zig build gui
 zig build run-gui
+# optional backend selection (uses libghostty-vt dynamically when available)
+zig build gui -Dterminal-backend=ghostty-vt
 ```
 
 GUI binary: `zig-out/bin/zss-gui`
