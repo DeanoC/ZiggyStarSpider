@@ -488,6 +488,7 @@ const App = struct {
     node_service_watch_enabled: bool = false,
     node_service_watch_filter: std.ArrayList(u8) = .empty,
     node_service_watch_replay_limit: std.ArrayList(u8) = .empty,
+    node_service_latest_reload_diag: ?[]u8 = null,
     debug_panel_id: ?workspace.PanelId = null,
     debug_events: std.ArrayList(DebugEventEntry) = .empty,
     debug_next_event_id: u64 = 1,
@@ -767,6 +768,7 @@ const App = struct {
         self.filesystem_path.deinit(self.allocator);
         self.node_service_watch_filter.deinit(self.allocator);
         self.node_service_watch_replay_limit.deinit(self.allocator);
+        self.clearNodeServiceReloadDiagnostics();
 
         zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
 
@@ -6421,6 +6423,54 @@ const App = struct {
             y += row_height + layout.row_gap * 0.45;
         }
 
+        const selected_diag = self.selectedNodeServiceDeltaDiagnosticsText();
+        defer if (selected_diag) |value| self.allocator.free(value);
+        if (self.node_service_latest_reload_diag != null or selected_diag != null) {
+            self.drawLabel(
+                rect.min[0] + pad,
+                y,
+                "Manifest/Service Diff Diagnostics",
+                self.theme.colors.text_primary,
+            );
+            y += line_height;
+            if (self.node_service_latest_reload_diag) |diag| {
+                self.drawTextTrimmed(
+                    rect.min[0] + pad,
+                    y,
+                    content_width,
+                    "Latest node_service_upsert delta",
+                    self.theme.colors.text_secondary,
+                );
+                y += line_height;
+                y += self.drawTextWrapped(
+                    rect.min[0] + pad,
+                    y,
+                    content_width,
+                    diag,
+                    self.theme.colors.text_primary,
+                );
+                y += layout.row_gap * 0.4;
+            }
+            if (selected_diag) |diag| {
+                self.drawTextTrimmed(
+                    rect.min[0] + pad,
+                    y,
+                    content_width,
+                    "Selected event delta",
+                    self.theme.colors.text_secondary,
+                );
+                y += line_height;
+                y += self.drawTextWrapped(
+                    rect.min[0] + pad,
+                    y,
+                    content_width,
+                    diag,
+                    self.theme.colors.text_primary,
+                );
+                y += layout.row_gap * 0.4;
+            }
+        }
+
         self.drawLabel(
             rect.min[0] + pad,
             y,
@@ -6981,6 +7031,159 @@ const App = struct {
         } else return null;
         if (node_id.len == 0) return null;
         return self.allocator.dupe(u8, node_id) catch null;
+    }
+
+    fn selectedNodeServiceDeltaDiagnosticsText(self: *App) ?[]u8 {
+        const selected_idx = self.debug_selected_index orelse return null;
+        if (selected_idx >= self.debug_events.items.len) return null;
+        const entry = self.debug_events.items[selected_idx];
+        if (!std.mem.eql(u8, entry.category, "control.node_service_event")) return null;
+        return self.buildNodeServiceDeltaDiagnosticsTextFromJson(entry.payload_json) catch null;
+    }
+
+    fn buildNodeServiceDeltaDiagnosticsTextFromJson(self: *App, payload_json: []const u8) !?[]u8 {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload_json, .{});
+        defer parsed.deinit();
+        return self.buildNodeServiceDeltaDiagnosticsTextFromValue(parsed.value);
+    }
+
+    fn buildNodeServiceDeltaDiagnosticsTextFromValue(self: *App, payload: std.json.Value) !?[]u8 {
+        if (payload != .object) return null;
+        const payload_obj = payload.object;
+        const service_delta = payload_obj.get("service_delta") orelse return null;
+        if (service_delta != .object) return null;
+        const delta_obj = service_delta.object;
+
+        const node_id = if (payload_obj.get("node_id")) |value| switch (value) {
+            .string => value.string,
+            else => "unknown",
+        } else "unknown";
+        const changed = if (delta_obj.get("changed")) |value| switch (value) {
+            .bool => value.bool,
+            else => false,
+        } else false;
+        const timestamp_ms: ?i64 = if (delta_obj.get("timestamp_ms")) |value| switch (value) {
+            .integer => value.integer,
+            else => null,
+        } else null;
+
+        const empty_values = &[_]std.json.Value{};
+        const added_items: []const std.json.Value = if (delta_obj.get("added")) |value| switch (value) {
+            .array => value.array.items,
+            else => empty_values,
+        } else empty_values;
+        const updated_items: []const std.json.Value = if (delta_obj.get("updated")) |value| switch (value) {
+            .array => value.array.items,
+            else => empty_values,
+        } else empty_values;
+        const removed_items: []const std.json.Value = if (delta_obj.get("removed")) |value| switch (value) {
+            .array => value.array.items,
+            else => empty_values,
+        } else empty_values;
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        if (timestamp_ms) |value| {
+            try out.writer(self.allocator).print(
+                "node={s} changed={s} timestamp_ms={d}",
+                .{ node_id, if (changed) "true" else "false", value },
+            );
+        } else {
+            try out.writer(self.allocator).print(
+                "node={s} changed={s}",
+                .{ node_id, if (changed) "true" else "false" },
+            );
+        }
+        try out.writer(self.allocator).print(
+            "\nadded={d} updated={d} removed={d}",
+            .{ added_items.len, updated_items.len, removed_items.len },
+        );
+
+        const max_entries: usize = 18;
+        var shown_entries: usize = 0;
+        try self.appendNodeServiceDeltaEntries(&out, "+", added_items, false, max_entries, &shown_entries);
+        try self.appendNodeServiceDeltaEntries(&out, "~", updated_items, true, max_entries, &shown_entries);
+        try self.appendNodeServiceDeltaEntries(&out, "-", removed_items, false, max_entries, &shown_entries);
+
+        const total_entries = added_items.len + updated_items.len + removed_items.len;
+        if (total_entries > shown_entries) {
+            try out.writer(self.allocator).print("\n... {d} more service changes", .{total_entries - shown_entries});
+        }
+        const owned = try out.toOwnedSlice(self.allocator);
+        return @as(?[]u8, owned);
+    }
+
+    fn appendNodeServiceDeltaEntries(
+        self: *App,
+        out: *std.ArrayList(u8),
+        prefix: []const u8,
+        entries: []const std.json.Value,
+        include_previous: bool,
+        max_entries: usize,
+        shown_entries: *usize,
+    ) !void {
+        for (entries) |entry| {
+            if (shown_entries.* >= max_entries) break;
+            if (entry != .object) continue;
+            const obj = entry.object;
+            const service_id = if (obj.get("service_id")) |value| switch (value) {
+                .string => value.string,
+                else => "?",
+            } else "?";
+            const version = if (obj.get("version")) |value| switch (value) {
+                .string => value.string,
+                else => "?",
+            } else "?";
+            const digest = if (obj.get("digest")) |value| switch (value) {
+                .integer => value.integer,
+                else => null,
+            } else null;
+
+            if (include_previous) {
+                const previous_version = if (obj.get("previous_version")) |value| switch (value) {
+                    .string => value.string,
+                    else => "?",
+                } else "?";
+                const previous_digest = if (obj.get("previous_digest")) |value| switch (value) {
+                    .integer => value.integer,
+                    else => null,
+                } else null;
+                if (digest) |digest_value| {
+                    if (previous_digest) |prev_value| {
+                        try out.writer(self.allocator).print(
+                            "\n{s} {s}@{s} digest={d} prev={s}/{d}",
+                            .{ prefix, service_id, version, digest_value, previous_version, prev_value },
+                        );
+                    } else {
+                        try out.writer(self.allocator).print(
+                            "\n{s} {s}@{s} digest={d} prev={s}/n/a",
+                            .{ prefix, service_id, version, digest_value, previous_version },
+                        );
+                    }
+                } else if (previous_digest) |prev_value| {
+                    try out.writer(self.allocator).print(
+                        "\n{s} {s}@{s} digest=n/a prev={s}/{d}",
+                        .{ prefix, service_id, version, previous_version, prev_value },
+                    );
+                } else {
+                    try out.writer(self.allocator).print(
+                        "\n{s} {s}@{s} digest=n/a prev={s}/n/a",
+                        .{ prefix, service_id, version, previous_version },
+                    );
+                }
+            } else if (digest) |digest_value| {
+                try out.writer(self.allocator).print(
+                    "\n{s} {s}@{s} digest={d}",
+                    .{ prefix, service_id, version, digest_value },
+                );
+            } else {
+                try out.writer(self.allocator).print(
+                    "\n{s} {s}@{s} digest=n/a",
+                    .{ prefix, service_id, version },
+                );
+            }
+            shown_entries.* += 1;
+        }
     }
 
     fn jumpFilesystemToNode(self: *App, manager: *panel_manager.PanelManager, node_id: []const u8) !void {
@@ -8041,6 +8244,7 @@ const App = struct {
         self.clearWorkspaceData();
         self.clearFilesystemData();
         self.clearFilesystemDirCache();
+        self.clearNodeServiceReloadDiagnostics();
     }
 
     fn saveConfig(self: *App) !void {
@@ -9442,6 +9646,11 @@ const App = struct {
         const payload_obj = if (payload_value == .object) payload_value.object else null;
         const correlation_id = extractCorrelationId(root, payload_obj);
         try self.appendDebugEvent(timestamp, "control.node_service_event", correlation_id, payload_json);
+
+        if (try self.buildNodeServiceDeltaDiagnosticsTextFromValue(payload_value)) |diag| {
+            self.clearNodeServiceReloadDiagnostics();
+            self.node_service_latest_reload_diag = diag;
+        }
     }
 
     fn handleIncomingMessage(self: *App, msg: []const u8) !void {
@@ -9931,6 +10140,14 @@ const App = struct {
         self.debug_events.clearRetainingCapacity();
         self.debug_folded_blocks.clearRetainingCapacity();
         self.debug_next_event_id = 1;
+        self.clearNodeServiceReloadDiagnostics();
+    }
+
+    fn clearNodeServiceReloadDiagnostics(self: *App) void {
+        if (self.node_service_latest_reload_diag) |value| {
+            self.allocator.free(value);
+            self.node_service_latest_reload_diag = null;
+        }
     }
 
     fn appendDebugEvent(self: *App, timestamp_ms: i64, category: []const u8, correlation_id: ?[]const u8, payload_json: []const u8) !void {
