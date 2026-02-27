@@ -40,6 +40,7 @@ ziggystarspider --help
 - `node deny <request_id>` - Deny pending node join request
 - `node service-get <node_id>` - Show node service catalog
 - `node service-upsert <node_id> <node_secret>` - Update node service catalog metadata
+- `node service-runtime <node_id> <service_id> <action>` - Read/write runtime control files for a service mount
 - `pairing pending` - Refresh and list pending pairing join requests
 - `pairing approve <request_id> [--lease-ttl-ms <ms>]` - Approve pending pairing request
 - `pairing deny <request_id>` - Deny pending pairing request

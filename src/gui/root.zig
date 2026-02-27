@@ -5795,6 +5795,62 @@ const App = struct {
         }
     }
 
+    fn filesystemEntryExists(self: *App, name: []const u8) bool {
+        for (self.filesystem_entries.items) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) return true;
+        }
+        return false;
+    }
+
+    fn filesystemHasServiceRuntimeRoot(self: *App) bool {
+        return self.filesystemEntryExists("control") and
+            self.filesystemEntryExists("status.json") and
+            self.filesystemEntryExists("health.json");
+    }
+
+    fn filesystemServiceRuntimePath(self: *App, name: []const u8) ![]u8 {
+        const current_path = if (self.filesystem_path.items.len > 0) self.filesystem_path.items else "/";
+        return self.joinFilesystemPath(current_path, name);
+    }
+
+    fn readFilesystemServiceRuntimeFile(self: *App, name: []const u8) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+        const path = try self.filesystemServiceRuntimePath(name);
+        defer self.allocator.free(path);
+        const content = try self.readFsPathTextGui(client, path);
+        defer self.allocator.free(content);
+        try self.applyFilesystemPreview(path, content);
+        self.clearFilesystemError();
+    }
+
+    fn writeFilesystemServiceRuntimeControl(self: *App, name: []const u8, payload: []const u8) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        try self.fsrpcBootstrapGui(client);
+
+        const control_dir = try self.filesystemServiceRuntimePath("control");
+        defer self.allocator.free(control_dir);
+        const control_path = try self.joinFilesystemPath(control_dir, name);
+        defer self.allocator.free(control_path);
+        try self.writeFsPathTextGui(client, control_path, payload);
+
+        if (std.mem.eql(u8, name, "invoke.json")) {
+            const result_path = try self.filesystemServiceRuntimePath("result.json");
+            defer self.allocator.free(result_path);
+            const result = try self.readFsPathTextGui(client, result_path);
+            defer self.allocator.free(result);
+            try self.applyFilesystemPreview(result_path, result);
+        } else {
+            const status_path = try self.filesystemServiceRuntimePath("status.json");
+            defer self.allocator.free(status_path);
+            const status = try self.readFsPathTextGui(client, status_path);
+            defer self.allocator.free(status);
+            try self.applyFilesystemPreview(status_path, status);
+        }
+
+        self.clearFilesystemError();
+    }
+
     fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         _ = manager;
         const layout = self.panelLayoutMetrics();
@@ -5906,6 +5962,124 @@ const App = struct {
                 zcolors.rgba(220, 80, 80, 255),
             );
             y += layout.line_height;
+        }
+
+        if (self.filesystemHasServiceRuntimeRoot()) {
+            self.drawTextTrimmed(
+                rect.min[0] + pad,
+                y,
+                content_width,
+                "Service Runtime Controls",
+                self.theme.colors.text_secondary,
+            );
+            y += layout.line_height + layout.row_gap * 0.4;
+
+            const runtime_disabled = self.connection_state != .connected or self.filesystem_busy;
+            const runtime_button_w: f32 = @max(96.0, (content_width - pad * 3.0) / 4.0);
+
+            const status_rect = Rect.fromXYWH(rect.min[0] + pad, y, runtime_button_w, row_h);
+            const health_rect = Rect.fromXYWH(status_rect.max[0] + pad, y, runtime_button_w, row_h);
+            const metrics_rect = Rect.fromXYWH(health_rect.max[0] + pad, y, runtime_button_w, row_h);
+            const config_rect = Rect.fromXYWH(metrics_rect.max[0] + pad, y, runtime_button_w, row_h);
+
+            if (self.drawButtonWidget(status_rect, "Status", .{ .variant = .secondary, .disabled = runtime_disabled })) {
+                self.readFilesystemServiceRuntimeFile("status.json") catch |err| {
+                    const msg = self.formatFilesystemOpError("Runtime status failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+            if (self.drawButtonWidget(health_rect, "Health", .{ .variant = .secondary, .disabled = runtime_disabled })) {
+                self.readFilesystemServiceRuntimeFile("health.json") catch |err| {
+                    const msg = self.formatFilesystemOpError("Runtime health failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+            if (self.drawButtonWidget(metrics_rect, "Metrics", .{ .variant = .secondary, .disabled = runtime_disabled })) {
+                self.readFilesystemServiceRuntimeFile("metrics.json") catch |err| {
+                    const msg = self.formatFilesystemOpError("Runtime metrics failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+            if (self.drawButtonWidget(config_rect, "Config", .{ .variant = .secondary, .disabled = runtime_disabled })) {
+                self.readFilesystemServiceRuntimeFile("config.json") catch |err| {
+                    const msg = self.formatFilesystemOpError("Runtime config failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+
+            y += row_h + layout.row_gap * 0.5;
+            const enable_rect = Rect.fromXYWH(rect.min[0] + pad, y, runtime_button_w, row_h);
+            const disable_rect = Rect.fromXYWH(enable_rect.max[0] + pad, y, runtime_button_w, row_h);
+            const restart_rect = Rect.fromXYWH(disable_rect.max[0] + pad, y, runtime_button_w, row_h);
+            const reset_rect = Rect.fromXYWH(restart_rect.max[0] + pad, y, runtime_button_w, row_h);
+
+            if (self.drawButtonWidget(enable_rect, "Enable", .{ .variant = .secondary, .disabled = runtime_disabled })) {
+                self.writeFilesystemServiceRuntimeControl("enable", "{}") catch |err| {
+                    const msg = self.formatFilesystemOpError("Runtime enable failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+            if (self.drawButtonWidget(disable_rect, "Disable", .{ .variant = .secondary, .disabled = runtime_disabled })) {
+                self.writeFilesystemServiceRuntimeControl("disable", "{}") catch |err| {
+                    const msg = self.formatFilesystemOpError("Runtime disable failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+            if (self.drawButtonWidget(restart_rect, "Restart", .{ .variant = .secondary, .disabled = runtime_disabled })) {
+                self.writeFilesystemServiceRuntimeControl("restart", "{}") catch |err| {
+                    const msg = self.formatFilesystemOpError("Runtime restart failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+            if (self.drawButtonWidget(reset_rect, "Reset", .{ .variant = .secondary, .disabled = runtime_disabled })) {
+                self.writeFilesystemServiceRuntimeControl("reset", "{}") catch |err| {
+                    const msg = self.formatFilesystemOpError("Runtime reset failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+
+            y += row_h + layout.row_gap * 0.5;
+            const invoke_rect = Rect.fromXYWH(
+                rect.min[0] + pad,
+                y,
+                @max(140.0, runtime_button_w * 1.4),
+                row_h,
+            );
+            if (self.drawButtonWidget(invoke_rect, "Invoke {}", .{ .variant = .primary, .disabled = runtime_disabled })) {
+                self.writeFilesystemServiceRuntimeControl("invoke.json", "{}") catch |err| {
+                    const msg = self.formatFilesystemOpError("Runtime invoke failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setFilesystemError(text);
+                    }
+                };
+            }
+
+            y += row_h + layout.row_gap;
         }
 
         const listing_height = @max(140.0, (rect.max[1] - y - pad * 2.0) * 0.52);
@@ -8183,6 +8357,29 @@ const App = struct {
         defer self.fsrpcClunkBestEffort(client, fid);
         try self.fsrpcOpenGui(client, fid, "r");
         return self.fsrpcReadAllTextGui(client, fid);
+    }
+
+    fn fsrpcWriteTextGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32, content: []const u8) !void {
+        const encoded = try encodeDataB64(self.allocator, content);
+        defer self.allocator.free(encoded);
+        const tag = self.nextFsrpcTag();
+        const req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+            .{ tag, fid, encoded },
+        );
+        defer self.allocator.free(req);
+
+        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_CHAT_WRITE_TIMEOUT_MS);
+        defer response.deinit(self.allocator);
+        try self.ensureFsrpcOk(&response);
+    }
+
+    fn writeFsPathTextGui(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8, content: []const u8) !void {
+        const fid = try self.fsrpcWalkPathGui(client, path);
+        defer self.fsrpcClunkBestEffort(client, fid);
+        try self.fsrpcOpenGui(client, fid, "rw");
+        try self.fsrpcWriteTextGui(client, fid, content);
     }
 
     fn joinFilesystemPath(self: *App, parent: []const u8, child: []const u8) ![]u8 {

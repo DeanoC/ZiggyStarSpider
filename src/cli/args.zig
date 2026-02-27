@@ -55,6 +55,7 @@ pub const Verb = enum {
     join_request,
     service_get,
     service_upsert,
+    service_runtime,
     use,
     create,
     up,
@@ -236,6 +237,7 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "join-request")) return .join_request;
             if (std.mem.eql(u8, arg, "service-get")) return .service_get;
             if (std.mem.eql(u8, arg, "service-upsert")) return .service_upsert;
+            if (std.mem.eql(u8, arg, "service-runtime")) return .service_runtime;
         },
         .pairing => {
             if (std.mem.eql(u8, arg, "pending")) return .pending;

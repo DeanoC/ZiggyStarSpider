@@ -90,3 +90,27 @@ Update node service catalog metadata.
 ```bash
 ziggystarspider node service-upsert node-1 secret-abc --label site=hq --label tier=edge --services-json '[{"service_id":"camera","kind":"camera","state":"online","endpoints":["/nodes/node-1/camera"],"capabilities":{"still":true}}]'
 ```
+
+## node service-runtime <node_id> <service_id> <action> [payload]
+
+Interact with a service runtime namespace via control files resolved from the node service catalog.
+
+**Actions:**
+- `status` - Read `status.json`
+- `metrics` - Read `metrics.json`
+- `health` - Read `health.json`
+- `config-get` - Read `config.json`
+- `config-set <json-object>` - Write `config.json`
+- `invoke [json-object]` - Write `control/invoke.json` (`{}` if omitted), then read status/result/error
+- `enable` - Write `control/enable`
+- `disable` - Write `control/disable`
+- `restart` - Write `control/restart`
+- `reset` - Write `control/reset`
+
+**Examples:**
+```bash
+ziggystarspider node service-runtime node-2 camera-main health
+ziggystarspider node service-runtime node-2 camera-main config-set '{"supervision":{"cooldown_ms":5000}}'
+ziggystarspider node service-runtime node-2 camera-main invoke '{"op":"capture"}'
+ziggystarspider node service-runtime node-2 camera-main restart
+```

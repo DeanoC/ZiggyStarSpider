@@ -230,6 +230,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 .join_request => try executeNodeJoinRequest(allocator, options, cmd),
                 .service_get => try executeNodeServiceGet(allocator, options, cmd),
                 .service_upsert => try executeNodeServiceUpsert(allocator, options, cmd),
+                .service_runtime => try executeNodeServiceRuntime(allocator, options, cmd),
                 else => {
                     logger.err("Unknown node verb", .{});
                     return error.InvalidArguments;
@@ -2181,6 +2182,270 @@ fn executeNodeServiceGet(allocator: std.mem.Allocator, options: args.Options, cm
     defer allocator.free(payload_json);
 
     try printNodeServiceCatalogPayload(allocator, stdout, payload_json);
+}
+
+const NodeServiceRuntimeAction = enum {
+    status,
+    metrics,
+    health,
+    config_get,
+    config_set,
+    invoke,
+    enable,
+    disable,
+    restart,
+    reset,
+};
+
+fn parseNodeServiceRuntimeAction(raw: []const u8) ?NodeServiceRuntimeAction {
+    if (std.mem.eql(u8, raw, "status")) return .status;
+    if (std.mem.eql(u8, raw, "metrics")) return .metrics;
+    if (std.mem.eql(u8, raw, "health")) return .health;
+    if (std.mem.eql(u8, raw, "config-get")) return .config_get;
+    if (std.mem.eql(u8, raw, "config-set")) return .config_set;
+    if (std.mem.eql(u8, raw, "invoke")) return .invoke;
+    if (std.mem.eql(u8, raw, "enable")) return .enable;
+    if (std.mem.eql(u8, raw, "disable")) return .disable;
+    if (std.mem.eql(u8, raw, "restart")) return .restart;
+    if (std.mem.eql(u8, raw, "reset")) return .reset;
+    return null;
+}
+
+fn validateJsonObjectPayload(allocator: std.mem.Allocator, payload: []const u8, context: []const u8) !void {
+    const trimmed = std.mem.trim(u8, payload, " \t\r\n");
+    if (trimmed.len == 0) {
+        logger.err("{s} payload must be a non-empty JSON object", .{context});
+        return error.InvalidArguments;
+    }
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch {
+        logger.err("{s} payload must be valid JSON", .{context});
+        return error.InvalidArguments;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        logger.err("{s} payload must be a JSON object", .{context});
+        return error.InvalidArguments;
+    }
+}
+
+fn requestNodeServiceCatalogPayload(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    node_id: []const u8,
+) ![]u8 {
+    const escaped_node = try unified.jsonEscape(allocator, node_id);
+    defer allocator.free(escaped_node);
+    const payload_req = try std.fmt.allocPrint(allocator, "{{\"node_id\":\"{s}\"}}", .{escaped_node});
+    defer allocator.free(payload_req);
+
+    return control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.node_service_get",
+        payload_req,
+    );
+}
+
+fn findNodeServiceRuntimeRootPath(
+    allocator: std.mem.Allocator,
+    catalog_payload_json: []const u8,
+    expected_node_id: []const u8,
+    service_id: []const u8,
+) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, catalog_payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const root = parsed.value.object;
+
+    const node_id = jsonObjectStringOr(root, "node_id", "");
+    if (node_id.len == 0) return error.InvalidResponse;
+    if (!std.mem.eql(u8, node_id, expected_node_id)) return error.InvalidResponse;
+
+    const services_val = root.get("services") orelse return error.ServiceNotFound;
+    if (services_val != .array) return error.InvalidResponse;
+
+    for (services_val.array.items) |service_val| {
+        if (service_val != .object) continue;
+        const service_obj = service_val.object;
+        if (!std.mem.eql(u8, jsonObjectStringOr(service_obj, "service_id", ""), service_id)) continue;
+
+        if (service_obj.get("mounts")) |mounts_val| {
+            if (mounts_val == .array) {
+                for (mounts_val.array.items) |mount_val| {
+                    if (mount_val != .object) continue;
+                    const mount_path = jsonObjectStringOr(mount_val.object, "mount_path", "");
+                    if (mount_path.len == 0 or mount_path[0] != '/') continue;
+                    return allocator.dupe(u8, mount_path);
+                }
+            }
+        }
+
+        if (service_obj.get("endpoints")) |endpoints_val| {
+            if (endpoints_val == .array) {
+                for (endpoints_val.array.items) |endpoint| {
+                    if (endpoint != .string) continue;
+                    if (endpoint.string.len == 0 or endpoint.string[0] != '/') continue;
+                    return allocator.dupe(u8, endpoint.string);
+                }
+            }
+        }
+
+        return error.ServiceMountNotFound;
+    }
+
+    return error.ServiceNotFound;
+}
+
+fn readNodeServiceRuntimeFile(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    runtime_root: []const u8,
+    name: []const u8,
+) ![]u8 {
+    const path = try joinFsPath(allocator, runtime_root, name);
+    defer allocator.free(path);
+    return fsrpcReadPathText(allocator, client, path);
+}
+
+fn writeNodeServiceRuntimeControl(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    runtime_root: []const u8,
+    name: []const u8,
+    payload: []const u8,
+) !void {
+    const control_dir = try joinFsPath(allocator, runtime_root, "control");
+    defer allocator.free(control_dir);
+    const path = try joinFsPath(allocator, control_dir, name);
+    defer allocator.free(path);
+    try fsrpcWritePathText(allocator, client, path, payload);
+}
+
+fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len < 3) {
+        logger.err("node service-runtime requires <node_id> <service_id> <action> [payload]", .{});
+        return error.InvalidArguments;
+    }
+
+    const node_id = cmd.args[0];
+    const service_id = cmd.args[1];
+    const action = parseNodeServiceRuntimeAction(cmd.args[2]) orelse {
+        logger.err("node service-runtime action must be status|metrics|health|config-get|config-set|invoke|enable|disable|restart|reset", .{});
+        return error.InvalidArguments;
+    };
+    const payload_arg = if (cmd.args.len > 3) cmd.args[3] else null;
+
+    switch (action) {
+        .config_set => if (payload_arg == null) {
+            logger.err("node service-runtime config-set requires JSON payload", .{});
+            return error.InvalidArguments;
+        },
+        .invoke => {},
+        else => if (payload_arg != null) {
+            logger.err("node service-runtime {s} does not accept payload", .{@tagName(action)});
+            return error.InvalidArguments;
+        },
+    }
+    if (cmd.args.len > 4) {
+        logger.err("node service-runtime accepts at most one payload argument", .{});
+        return error.InvalidArguments;
+    }
+
+    if (action == .config_set) {
+        try validateJsonObjectPayload(allocator, payload_arg.?, "config-set");
+    } else if (action == .invoke and payload_arg != null) {
+        try validateJsonObjectPayload(allocator, payload_arg.?, "invoke");
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    const catalog_payload = try requestNodeServiceCatalogPayload(allocator, client, node_id);
+    defer allocator.free(catalog_payload);
+    const runtime_root = findNodeServiceRuntimeRootPath(
+        allocator,
+        catalog_payload,
+        node_id,
+        service_id,
+    ) catch |err| {
+        if (err == error.ServiceNotFound) {
+            logger.err("service {s} not found for node {s}", .{ service_id, node_id });
+            return err;
+        }
+        if (err == error.ServiceMountNotFound) {
+            logger.err("service {s} does not expose a runtime mount path", .{service_id});
+            return err;
+        }
+        return err;
+    };
+    defer allocator.free(runtime_root);
+
+    try fsrpcBootstrap(allocator, client);
+
+    switch (action) {
+        .status => {
+            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .metrics => {
+            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "metrics.json");
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .health => {
+            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "health.json");
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .config_get => {
+            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "config.json");
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .config_set => {
+            const path = try joinFsPath(allocator, runtime_root, "config.json");
+            defer allocator.free(path);
+            try fsrpcWritePathText(allocator, client, path, std.mem.trim(u8, payload_arg.?, " \t\r\n"));
+            const health = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "health.json");
+            defer allocator.free(health);
+            try stdout.print("updated config for {s}/{s}\n{s}\n", .{ node_id, service_id, health });
+        },
+        .invoke => {
+            const invoke_payload = if (payload_arg) |value| std.mem.trim(u8, value, " \t\r\n") else "{}";
+            try writeNodeServiceRuntimeControl(allocator, client, runtime_root, "invoke.json", invoke_payload);
+            const status = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
+            defer allocator.free(status);
+            const result = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "result.json");
+            defer allocator.free(result);
+            const last_error = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "last_error.txt");
+            defer allocator.free(last_error);
+            try stdout.print("status:\n{s}\n", .{status});
+            if (std.mem.trim(u8, last_error, " \t\r\n").len > 0) {
+                try stdout.print("last_error:\n{s}\n", .{last_error});
+            }
+            try stdout.print("result:\n{s}\n", .{result});
+        },
+        .enable, .disable, .restart, .reset => {
+            const control_name = switch (action) {
+                .enable => "enable",
+                .disable => "disable",
+                .restart => "restart",
+                .reset => "reset",
+                else => unreachable,
+            };
+            try writeNodeServiceRuntimeControl(allocator, client, runtime_root, control_name, "{}");
+            const health = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "health.json");
+            defer allocator.free(health);
+            const status = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
+            defer allocator.free(status);
+            try stdout.print("{s} applied for {s}/{s}\n", .{ control_name, node_id, service_id });
+            try stdout.print("health:\n{s}\n", .{health});
+            try stdout.print("status:\n{s}\n", .{status});
+        },
+    }
 }
 
 fn executeNodeServiceUpsert(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
