@@ -5,6 +5,7 @@ pub const MessageType = enum {
     session_receive,
     connect_ack,
     debug_event,
+    node_service_event,
     error_response,
     other,
 };
@@ -19,6 +20,7 @@ pub fn classifyTypeString(type_str: []const u8) MessageType {
     if (std.mem.eql(u8, type_str, "control.session_attach")) return .connect_ack;
     if (std.mem.eql(u8, type_str, "control.session_resume")) return .connect_ack;
     if (std.mem.eql(u8, type_str, "debug.event")) return .debug_event;
+    if (std.mem.eql(u8, type_str, "control.node_service_event")) return .node_service_event;
     if (std.mem.eql(u8, type_str, "session.ack")) return .connect_ack; // legacy
     if (std.mem.eql(u8, type_str, "chat_ack")) return .connect_ack; // legacy
     if (std.mem.eql(u8, type_str, "error")) return .error_response;
@@ -159,6 +161,10 @@ test "protocol_messages: parseMessageType recognizes debug.event" {
 
 test "protocol_messages: parseMessageType recognizes control.connect_ack" {
     try std.testing.expectEqual(MessageType.connect_ack, parseMessageType("{\"channel\":\"control\",\"type\":\"control.connect_ack\"}").?);
+}
+
+test "protocol_messages: parseMessageType recognizes control.node_service_event" {
+    try std.testing.expectEqual(MessageType.node_service_event, parseMessageType("{\"channel\":\"control\",\"type\":\"control.node_service_event\"}").?);
 }
 
 test "protocol_messages: buildSessionSend escapes mixed text and JSON safely" {

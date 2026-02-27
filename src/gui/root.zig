@@ -217,6 +217,8 @@ const SettingsFocusField = enum {
     ui_theme,
     ui_profile,
     ui_theme_pack,
+    node_watch_filter,
+    node_watch_replay_limit,
 };
 
 fn isSettingsPanelFocusField(field: SettingsFocusField) bool {
@@ -483,6 +485,9 @@ const App = struct {
     debug_stream_enabled: bool = false,
     debug_stream_pending: bool = false,
     pending_debug_request_id: ?[]u8 = null,
+    node_service_watch_enabled: bool = false,
+    node_service_watch_filter: std.ArrayList(u8) = .empty,
+    node_service_watch_replay_limit: std.ArrayList(u8) = .empty,
     debug_panel_id: ?workspace.PanelId = null,
     debug_events: std.ArrayList(DebugEventEntry) = .empty,
     debug_next_event_id: u64 = 1,
@@ -668,6 +673,8 @@ const App = struct {
             .debug_folded_blocks = std.AutoHashMap(DebugFoldKey, void).init(allocator),
             .manager = undefined,
         };
+        app.node_service_watch_filter.appendSlice(allocator, "") catch {};
+        app.node_service_watch_replay_limit.appendSlice(allocator, "25") catch {};
         app.applyThemeFromSettings();
         app.metrics_context = ui_draw_context.DrawContext.init(
             allocator,
@@ -758,6 +765,8 @@ const App = struct {
         self.clearFilesystemData();
         self.clearFilesystemDirCache();
         self.filesystem_path.deinit(self.allocator);
+        self.node_service_watch_filter.deinit(self.allocator);
+        self.node_service_watch_replay_limit.deinit(self.allocator);
 
         zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
 
@@ -2831,6 +2840,8 @@ const App = struct {
             .ui_theme => &self.settings_panel.ui_theme,
             .ui_profile => &self.settings_panel.ui_profile,
             .ui_theme_pack => &self.settings_panel.ui_theme_pack,
+            .node_watch_filter => &self.node_service_watch_filter,
+            .node_watch_replay_limit => &self.node_service_watch_replay_limit,
             .none => null,
         };
     }
@@ -6175,8 +6186,6 @@ const App = struct {
     }
 
     fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        _ = manager;
-
         const layout = self.panelLayoutMetrics();
         const pad = layout.inset;
         const inner = layout.inner_inset;
@@ -6210,13 +6219,17 @@ const App = struct {
         );
         y += line_height;
 
+        const node_watch_status = if (self.node_service_watch_enabled)
+            "Node service events: watching"
+        else
+            "Node service events: inactive";
         self.drawLabel(
             rect.min[0] + pad,
             y,
-            "Fold nested JSON with [+]/[-].",
+            node_watch_status,
             self.theme.colors.text_secondary,
         );
-        y += line_height + layout.row_gap * 0.45;
+        y += line_height;
 
         const toggle_rect = Rect.fromXYWH(
             rect.min[0] + pad,
@@ -6235,6 +6248,119 @@ const App = struct {
                 std.log.err("Failed to send debug subscription request: {s}", .{@errorName(err)});
             };
         }
+
+        y += row_height + layout.row_gap * 0.65;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Node Watch Filter (optional node_id)",
+            self.theme.colors.text_primary,
+        );
+        y += line_height;
+
+        const node_watch_filter_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, width * 0.44),
+            row_height,
+        );
+        const node_filter_focused = self.drawTextInputWidget(
+            node_watch_filter_rect,
+            self.node_service_watch_filter.items,
+            self.settings_panel.focused_field == .node_watch_filter,
+            .{ .placeholder = "node-2" },
+        );
+        if (node_filter_focused) self.settings_panel.focused_field = .node_watch_filter;
+
+        const node_watch_replay_rect = Rect.fromXYWH(
+            node_watch_filter_rect.max[0] + layout.inner_inset,
+            y,
+            @max(88.0, width * 0.12),
+            row_height,
+        );
+        const replay_focused = self.drawTextInputWidget(
+            node_watch_replay_rect,
+            self.node_service_watch_replay_limit.items,
+            self.settings_panel.focused_field == .node_watch_replay_limit,
+            .{ .placeholder = "25" },
+        );
+        if (replay_focused) self.settings_panel.focused_field = .node_watch_replay_limit;
+
+        const apply_watch_rect = Rect.fromXYWH(
+            node_watch_replay_rect.max[0] + layout.inner_inset,
+            y,
+            @max(136.0, width * 0.20),
+            row_height,
+        );
+        if (self.drawButtonWidget(
+            apply_watch_rect,
+            "Apply Node Watch",
+            .{ .variant = .secondary, .disabled = self.ws_client == null },
+        )) {
+            self.subscribeNodeServiceEventsFromUi() catch |err| {
+                std.log.warn("node watch update failed: {s}", .{@errorName(err)});
+            };
+        }
+
+        const stop_watch_rect = Rect.fromXYWH(
+            apply_watch_rect.max[0] + layout.inner_inset,
+            y,
+            @max(126.0, width * 0.17),
+            row_height,
+        );
+        if (self.drawButtonWidget(
+            stop_watch_rect,
+            "Stop Node Watch",
+            .{ .variant = .secondary, .disabled = self.ws_client == null or !self.node_service_watch_enabled },
+        )) {
+            self.unsubscribeNodeServiceEventsFromUi() catch |err| {
+                std.log.warn("node unwatch failed: {s}", .{@errorName(err)});
+            };
+        }
+
+        if (self.mouse_released and
+            (self.settings_panel.focused_field == .node_watch_filter or
+                self.settings_panel.focused_field == .node_watch_replay_limit) and
+            !node_watch_filter_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !node_watch_replay_rect.contains(.{ self.mouse_x, self.mouse_y }))
+        {
+            self.settings_panel.focused_field = .none;
+        }
+
+        y += row_height + layout.row_gap * 0.65;
+        if (self.selectedNodeServiceEventNodeIdOwned()) |selected_node_id| {
+            defer self.allocator.free(selected_node_id);
+            const jump_label = std.fmt.allocPrint(
+                self.allocator,
+                "Jump To Node FS ({s})",
+                .{selected_node_id},
+            ) catch null;
+            defer if (jump_label) |value| self.allocator.free(value);
+            const jump_rect = Rect.fromXYWH(
+                rect.min[0] + pad,
+                y,
+                @max(220.0, width * 0.45),
+                row_height,
+            );
+            if (self.drawButtonWidget(
+                jump_rect,
+                jump_label orelse "Jump To Node FS",
+                .{ .variant = .secondary },
+            )) {
+                self.jumpFilesystemToNode(manager, selected_node_id) catch |err| {
+                    std.log.warn("jump to node fs failed: {s}", .{@errorName(err)});
+                };
+            }
+            y += row_height + layout.row_gap * 0.45;
+        }
+
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Fold nested JSON with [+]/[-].",
+            self.theme.colors.text_secondary,
+        );
+        y += line_height + layout.row_gap * 0.45;
 
         y += row_height + layout.row_gap;
         const output_rect = Rect.fromXYWH(
@@ -6772,6 +6898,39 @@ const App = struct {
         return rows;
     }
 
+    fn selectedNodeServiceEventNodeIdOwned(self: *App) ?[]u8 {
+        const selected_idx = self.debug_selected_index orelse return null;
+        if (selected_idx >= self.debug_events.items.len) return null;
+        const entry = self.debug_events.items[selected_idx];
+        if (!std.mem.eql(u8, entry.category, "control.node_service_event")) return null;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, entry.payload_json, .{}) catch return null;
+        defer parsed.deinit();
+        if (parsed.value != .object) return null;
+
+        const node_id = if (parsed.value.object.get("node_id")) |value| switch (value) {
+            .string => value.string,
+            else => return null,
+        } else return null;
+        if (node_id.len == 0) return null;
+        return self.allocator.dupe(u8, node_id) catch null;
+    }
+
+    fn jumpFilesystemToNode(self: *App, manager: *panel_manager.PanelManager, node_id: []const u8) !void {
+        const panel_id = try self.ensureFilesystemPanel(manager);
+        manager.focusPanel(panel_id);
+
+        const node_path = try std.fmt.allocPrint(
+            self.allocator,
+            "/nodes/{s}/fs",
+            .{node_id},
+        );
+        defer self.allocator.free(node_path);
+        self.filesystem_path.clearRetainingCapacity();
+        try self.filesystem_path.appendSlice(self.allocator, node_path);
+        try self.queueFilesystemPathLoad(node_path, true, false);
+    }
+
     fn drawChatPanel(self: *App, rect: UiRect) void {
         if (self.render_input_queue == null) {
             self.drawText(
@@ -7226,8 +7385,7 @@ const App = struct {
                     session.agent_id,
                     null,
                     null,
-                ) catch |fallback_err| {
-                    _ = fallback_err;
+                ) catch {
                     return err;
                 };
                 effective_project_id = null;
@@ -7498,6 +7656,7 @@ const App = struct {
         }
         self.debug_stream_enabled = false;
         self.debug_stream_pending = false;
+        self.node_service_watch_enabled = false;
         self.clearPendingDebugRequest();
 
         const effective_url = self.settings_panel.server_url.items;
@@ -7671,6 +7830,8 @@ const App = struct {
                     self.setDefaultAgentInSettings(agent_id) catch {};
                 }
             }
+
+            self.subscribeNodeServiceEvents(client);
         }
 
         self.startFilesystemWorker(
@@ -7807,6 +7968,7 @@ const App = struct {
         self.clearSessions();
         self.debug_stream_enabled = false;
         self.debug_stream_pending = false;
+        self.node_service_watch_enabled = false;
         self.session_attach_state = .unknown;
         self.clearPendingDebugRequest();
         self.clearWorkspaceData();
@@ -7842,6 +8004,92 @@ const App = struct {
         }
 
         try self.appendMessage("system", "Debug stream requires an active websocket connection", null);
+    }
+
+    fn parseNodeServiceWatchReplayLimit(self: *App) usize {
+        const trimmed = std.mem.trim(u8, self.node_service_watch_replay_limit.items, " \t\r\n");
+        if (trimmed.len == 0) return 25;
+        const parsed = std.fmt.parseUnsigned(usize, trimmed, 10) catch return 25;
+        return @min(parsed, 10_000);
+    }
+
+    fn buildNodeServiceWatchPayload(self: *App) ![]u8 {
+        const replay_limit = self.parseNodeServiceWatchReplayLimit();
+        const node_filter_trimmed = std.mem.trim(u8, self.node_service_watch_filter.items, " \t\r\n");
+        if (node_filter_trimmed.len == 0) {
+            return std.fmt.allocPrint(
+                self.allocator,
+                "{{\"replay_limit\":{d}}}",
+                .{replay_limit},
+            );
+        }
+        const escaped_node = try jsonEscape(self.allocator, node_filter_trimmed);
+        defer self.allocator.free(escaped_node);
+        return std.fmt.allocPrint(
+            self.allocator,
+            "{{\"node_id\":\"{s}\",\"replay_limit\":{d}}}",
+            .{ escaped_node, replay_limit },
+        );
+    }
+
+    fn subscribeNodeServiceEvents(self: *App, client: *ws_client_mod.WebSocketClient) void {
+        const payload_json = self.buildNodeServiceWatchPayload() catch |err| {
+            self.node_service_watch_enabled = false;
+            std.log.warn("Failed to build node service watch payload: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.allocator.free(payload_json);
+
+        const ack_payload = control_plane.requestControlPayloadJsonWithTimeout(
+            self.allocator,
+            client,
+            &self.message_counter,
+            "control.node_service_watch",
+            payload_json,
+            CONTROL_CONNECT_TIMEOUT_MS,
+        ) catch |err| {
+            self.node_service_watch_enabled = false;
+            std.log.warn("Failed to subscribe node service event stream: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.allocator.free(ack_payload);
+        self.node_service_watch_enabled = true;
+    }
+
+    fn subscribeNodeServiceEventsFromUi(self: *App) !void {
+        const client = if (self.ws_client) |*value|
+            value
+        else
+            return error.NotConnected;
+        self.subscribeNodeServiceEvents(client);
+        if (self.node_service_watch_enabled) {
+            try self.appendMessage("system", "Node service watch updated", null);
+            return;
+        }
+        try self.appendMessage(
+            "system",
+            control_plane.lastRemoteError() orelse "Node service watch request failed",
+            null,
+        );
+        return error.ControlRequestFailed;
+    }
+
+    fn unsubscribeNodeServiceEventsFromUi(self: *App) !void {
+        const client = if (self.ws_client) |*value|
+            value
+        else
+            return error.NotConnected;
+        const ack_payload = try control_plane.requestControlPayloadJsonWithTimeout(
+            self.allocator,
+            client,
+            &self.message_counter,
+            "control.node_service_unwatch",
+            null,
+            CONTROL_CONNECT_TIMEOUT_MS,
+        );
+        defer self.allocator.free(ack_payload);
+        self.node_service_watch_enabled = false;
+        try self.appendMessage("system", "Node service watch disabled", null);
     }
 
     fn sendChatMessageText(self: *App, text: []const u8) !void {
@@ -9104,6 +9352,27 @@ const App = struct {
         try self.appendDebugEvent(timestamp, category, correlation_id, payload_json);
     }
 
+    fn handleNodeServiceEventMessage(self: *App, root: std.json.ObjectMap) !void {
+        const timestamp = if (root.get("timestamp")) |value| switch (value) {
+            .integer => value.integer,
+            else => std.time.milliTimestamp(),
+        } else std.time.milliTimestamp();
+
+        const payload_value = root.get("payload") orelse {
+            try self.appendDebugEvent(timestamp, "control.node_service_event", null, "{}");
+            return;
+        };
+        const payload_json = if (self.formatDebugPayloadJson(payload_value)) |pretty|
+            pretty
+        else |_|
+            try self.allocator.dupe(u8, "{\"error\":\"failed to format node service payload\"}");
+        defer self.allocator.free(payload_json);
+
+        const payload_obj = if (payload_value == .object) payload_value.object else null;
+        const correlation_id = extractCorrelationId(root, payload_obj);
+        try self.appendDebugEvent(timestamp, "control.node_service_event", correlation_id, payload_json);
+    }
+
     fn handleIncomingMessage(self: *App, msg: []const u8) !void {
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch |err| {
             self.recordDecodeError(@errorName(err), msg) catch {};
@@ -9288,6 +9557,9 @@ const App = struct {
             },
             .debug_event => {
                 try self.handleDebugEventMessage(root);
+            },
+            .node_service_event => {
+                try self.handleNodeServiceEventMessage(root);
             },
             else => {
                 if (self.connection_state == .connected) {
@@ -9758,9 +10030,10 @@ const App = struct {
     fn ensureSessionInList(self: *App, key: []const u8, display_name: []const u8) !void {
         for (self.chat_sessions.items) |*session| {
             if (std.mem.eql(u8, session.key, key)) {
-                if (display_name.len > 0 and !std.mem.eql(u8, session.display_name, display_name)) {
+                const existing_name = session.display_name orelse "";
+                if (display_name.len > 0 and !std.mem.eql(u8, existing_name, display_name)) {
                     const display_name_copy = try self.allocator.dupe(u8, display_name);
-                    self.allocator.free(session.display_name);
+                    if (session.display_name) |value| self.allocator.free(value);
                     session.display_name = display_name_copy;
                 }
                 if (self.shouldLogDebug(120)) {

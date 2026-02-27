@@ -231,6 +231,7 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 .service_get => try executeNodeServiceGet(allocator, options, cmd),
                 .service_upsert => try executeNodeServiceUpsert(allocator, options, cmd),
                 .service_runtime => try executeNodeServiceRuntime(allocator, options, cmd),
+                .watch => try executeNodeServiceWatch(allocator, options, cmd),
                 else => {
                     logger.err("Unknown node verb", .{});
                     return error.InvalidArguments;
@@ -1452,6 +1453,122 @@ fn printNodeServiceCatalogPayload(
         }
     } else {
         try stdout.print("  Services: (none)\n", .{});
+    }
+}
+
+fn jsonArrayLenOr(obj: std.json.ObjectMap, name: []const u8) usize {
+    const value = obj.get(name) orelse return 0;
+    if (value != .array) return 0;
+    return value.array.items.len;
+}
+
+fn printNodeServiceEventPayload(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    payload_value: std.json.Value,
+    verbose: bool,
+) !void {
+    if (payload_value != .object) {
+        try stdout.print("node_service_event payload is not an object\n", .{});
+        return;
+    }
+    const payload = payload_value.object;
+    const node_id = jsonObjectStringOr(payload, "node_id", "(unknown)");
+    const delta_value = payload.get("service_delta");
+    if (delta_value) |value| {
+        if (value == .object) {
+            const delta = value.object;
+            try stdout.print(
+                "node_service_event node={s} changed={} added={d} updated={d} removed={d} ts_ms={d}\n",
+                .{
+                    node_id,
+                    jsonObjectBoolOr(delta, "changed", false),
+                    jsonArrayLenOr(delta, "added"),
+                    jsonArrayLenOr(delta, "updated"),
+                    jsonArrayLenOr(delta, "removed"),
+                    jsonObjectI64Or(delta, "timestamp_ms", 0),
+                },
+            );
+        } else {
+            try stdout.print("node_service_event node={s} (delta malformed)\n", .{node_id});
+        }
+    } else {
+        try stdout.print("node_service_event node={s}\n", .{node_id});
+    }
+
+    if (!verbose) return;
+    const payload_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(payload_value, .{ .whitespace = .indent_2 })},
+    );
+    defer allocator.free(payload_json);
+    try stdout.print("{s}\n", .{payload_json});
+}
+
+fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len > 1) {
+        logger.err("node watch accepts at most one optional <node_id> filter", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    const watch_payload = if (cmd.args.len == 1) blk: {
+        const escaped_node = try unified.jsonEscape(allocator, cmd.args[0]);
+        defer allocator.free(escaped_node);
+        break :blk try std.fmt.allocPrint(allocator, "{{\"node_id\":\"{s}\"}}", .{escaped_node});
+    } else try allocator.dupe(u8, "{}");
+    defer allocator.free(watch_payload);
+
+    const watch_ack = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.node_service_watch",
+        watch_payload,
+    );
+    defer allocator.free(watch_ack);
+
+    if (cmd.args.len == 1) {
+        try stdout.print("Watching node service events for node {s} (Ctrl+C to stop)\n", .{cmd.args[0]});
+    } else {
+        try stdout.print("Watching node service events for all nodes (Ctrl+C to stop)\n", .{});
+    }
+
+    while (true) {
+        const raw = client.readTimeout(1_000) catch |err| {
+            logger.err("node watch connection failed: {s}", .{@errorName(err)});
+            return err;
+        } orelse continue;
+        defer allocator.free(raw);
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch continue;
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const root = parsed.value.object;
+
+        const channel = root.get("channel") orelse continue;
+        if (channel != .string or !std.mem.eql(u8, channel.string, "control")) continue;
+        const typ = root.get("type") orelse continue;
+        if (typ != .string) continue;
+
+        if (std.mem.eql(u8, typ.string, "control.node_service_event")) {
+            const payload = root.get("payload") orelse continue;
+            try printNodeServiceEventPayload(allocator, stdout, payload, options.verbose);
+            continue;
+        }
+
+        if (std.mem.eql(u8, typ.string, "control.error")) {
+            const error_value = root.get("error") orelse continue;
+            if (error_value == .object) {
+                const message = jsonObjectStringOr(error_value.object, "message", "control error");
+                const code = jsonObjectStringOr(error_value.object, "code", "unknown");
+                logger.err("node watch remote error: {s} [{s}]", .{ message, code });
+            }
+        }
     }
 }
 

@@ -62,6 +62,7 @@ pub const Verb = enum {
     doctor,
     info,
     refresh,
+    watch,
     complete,
     logs,
     restore,
@@ -238,6 +239,7 @@ fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
             if (std.mem.eql(u8, arg, "service-get")) return .service_get;
             if (std.mem.eql(u8, arg, "service-upsert")) return .service_upsert;
             if (std.mem.eql(u8, arg, "service-runtime")) return .service_runtime;
+            if (std.mem.eql(u8, arg, "watch")) return .watch;
         },
         .pairing => {
             if (std.mem.eql(u8, arg, "pending")) return .pending;

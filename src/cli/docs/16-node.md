@@ -114,3 +114,15 @@ ziggystarspider node service-runtime node-2 camera-main config-set '{"supervisio
 ziggystarspider node service-runtime node-2 camera-main invoke '{"op":"capture"}'
 ziggystarspider node service-runtime node-2 camera-main restart
 ```
+
+## node watch [node_id]
+
+Subscribe to live `control.node_service_event` updates pushed by Spiderweb when node service catalogs change.
+
+Use `node_id` to filter to one node, or omit it to watch all nodes.
+
+**Examples:**
+```bash
+ziggystarspider node watch
+ziggystarspider node watch node-2
+```
