@@ -10546,7 +10546,7 @@ const App = struct {
             const caret_height = line_height;
 
             const visible_start = self.inputTailStartForWidth(text, max_w);
-            const caret_offset = self.measureText(text[visible_start..]);
+            const caret_offset = self.measureTextFast(text[visible_start..]);
             const caret_x = text_x + @min(caret_offset, max_w - caret_width);
 
             const caret_rect = UiRect.fromMinSize(
@@ -13793,19 +13793,22 @@ const App = struct {
     }
 
     fn inputTailStartForWidth(self: *App, text: []const u8, max_w: f32) usize {
-        if (text.len == 0 or self.measureText(text) <= max_w) return 0;
-        var start: usize = 0;
-        while (start < text.len) {
-            const next = nextUtf8Boundary(text, start);
-            if (next <= start) break;
-            if (self.measureText(text[next..]) <= max_w) return next;
-            start = next;
+        if (text.len == 0 or max_w <= 0.0) return 0;
+        var width: f32 = 0.0;
+        var idx: usize = text.len;
+        while (idx > 0) {
+            var prev = idx - 1;
+            while (prev > 0 and (text[prev] & 0xC0) == 0x80) : (prev -= 1) {}
+            const glyph_w = self.measureGlyphWidth(text[prev..idx]);
+            if (width + glyph_w > max_w) return idx;
+            width += glyph_w;
+            idx = prev;
         }
-        return text.len;
+        return 0;
     }
 
     fn drawCenteredText(self: *App, rect: Rect, text: []const u8, color: [4]f32) void {
-        const text_w = self.measureText(text);
+        const text_w = self.measureTextFast(text);
         const line_height = self.textLineHeight();
         const x = rect.min[0] + @max(0.0, (rect.width() - text_w) * 0.5);
         const y = rect.min[1] + @max(0.0, (rect.height() - line_height) * 0.5);
@@ -13869,9 +13872,21 @@ const App = struct {
         return self.metrics_context.measureText(text, 0.0)[0];
     }
 
+    fn measureTextFast(self: *App, text: []const u8) f32 {
+        var width: f32 = 0.0;
+        var idx: usize = 0;
+        while (idx < text.len) {
+            const next = nextUtf8Boundary(text, idx);
+            if (next <= idx) break;
+            width += self.measureGlyphWidth(text[idx..next]);
+            idx = next;
+        }
+        return width;
+    }
+
     fn drawTextCenteredTrimmed(self: *App, center_x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
         if (max_w <= 0.0) return;
-        const measured = self.measureText(text);
+        const measured = self.measureTextFast(text);
         if (measured <= max_w) {
             self.drawText(center_x - measured * 0.5, y, text, color);
             return;
@@ -13881,14 +13896,14 @@ const App = struct {
 
     fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
         if (max_w <= 0.0) return;
-        const text_w = self.measureText(text);
+        const text_w = self.measureTextFast(text);
         if (text_w <= max_w) {
             self.drawText(x, y, text, color);
             return;
         }
 
         const ellipsis = "...";
-        const ellipsis_w = self.measureText(ellipsis);
+        const ellipsis_w = self.measureTextFast(ellipsis);
         if (ellipsis_w > max_w) return;
 
         const limit = max_w - ellipsis_w;
@@ -13898,7 +13913,7 @@ const App = struct {
         while (idx < text.len) {
             const next = nextUtf8Boundary(text, idx);
             if (next <= idx) break;
-            const glyph_w = self.measureText(text[idx..next]);
+            const glyph_w = self.measureGlyphWidth(text[idx..next]);
             if (width + glyph_w > limit) break;
             width += glyph_w;
             best_end = next;
