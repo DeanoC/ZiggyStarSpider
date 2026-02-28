@@ -3425,6 +3425,20 @@ const App = struct {
         self.drag_mouse_capture_active = enabled;
     }
 
+    fn windowToFramebufferScale(win: *c.SDL_Window) [2]f32 {
+        var w: c_int = 0;
+        var h: c_int = 0;
+        _ = c.SDL_GetWindowSize(win, &w, &h);
+        var pw: c_int = 0;
+        var ph: c_int = 0;
+        _ = c.SDL_GetWindowSizeInPixels(win, &pw, &ph);
+        if (w <= 0 or h <= 0 or pw <= 0 or ph <= 0) return .{ 1.0, 1.0 };
+        return .{
+            @as(f32, @floatFromInt(pw)) / @as(f32, @floatFromInt(w)),
+            @as(f32, @floatFromInt(ph)) / @as(f32, @floatFromInt(h)),
+        };
+    }
+
     fn syncMouseStateFromGlobal(self: *App, ui_window: *UiWindow) void {
         var mouse_global_x: f32 = 0.0;
         var mouse_global_y: f32 = 0.0;
@@ -3433,21 +3447,9 @@ const App = struct {
         var window_x: c_int = 0;
         var window_y: c_int = 0;
         _ = c.SDL_GetWindowPosition(ui_window.window, &window_x, &window_y);
-        var border_top: c_int = 0;
-        var border_left: c_int = 0;
-        var border_bottom: c_int = 0;
-        var border_right: c_int = 0;
-        if (!c.SDL_GetWindowBordersSize(ui_window.window, &border_top, &border_left, &border_bottom, &border_right)) {
-            border_top = 0;
-            border_left = 0;
-            border_bottom = 0;
-            border_right = 0;
-        }
-
-        const content_min_x = @as(f32, @floatFromInt(window_x + border_left));
-        const content_min_y = @as(f32, @floatFromInt(window_y + border_top));
-        self.mouse_x = mouse_global_x - content_min_x;
-        self.mouse_y = mouse_global_y - content_min_y;
+        const scale = windowToFramebufferScale(ui_window.window);
+        self.mouse_x = (mouse_global_x - @as(f32, @floatFromInt(window_x))) * scale[0];
+        self.mouse_y = (mouse_global_y - @as(f32, @floatFromInt(window_y))) * scale[1];
         self.mouse_down = (buttons & c.SDL_BUTTON_LMASK) != 0;
     }
 
