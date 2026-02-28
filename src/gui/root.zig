@@ -1520,6 +1520,9 @@ const App = struct {
         self.mouse_x = queue.state.mouse_pos[0];
         self.mouse_y = queue.state.mouse_pos[1];
         self.mouse_down = queue.state.mouse_down_left;
+        if (self.drag_mouse_capture_active) {
+            self.syncMouseStateFromGlobal(ui_window);
+        }
 
         for (queue.events.items) |evt| {
             switch (evt) {
@@ -3420,6 +3423,32 @@ const App = struct {
         if (self.drag_mouse_capture_active == enabled) return;
         _ = c.SDL_CaptureMouse(enabled);
         self.drag_mouse_capture_active = enabled;
+    }
+
+    fn syncMouseStateFromGlobal(self: *App, ui_window: *UiWindow) void {
+        var mouse_global_x: f32 = 0.0;
+        var mouse_global_y: f32 = 0.0;
+        const buttons = c.SDL_GetGlobalMouseState(&mouse_global_x, &mouse_global_y);
+
+        var window_x: c_int = 0;
+        var window_y: c_int = 0;
+        _ = c.SDL_GetWindowPosition(ui_window.window, &window_x, &window_y);
+        var border_top: c_int = 0;
+        var border_left: c_int = 0;
+        var border_bottom: c_int = 0;
+        var border_right: c_int = 0;
+        if (!c.SDL_GetWindowBordersSize(ui_window.window, &border_top, &border_left, &border_bottom, &border_right)) {
+            border_top = 0;
+            border_left = 0;
+            border_bottom = 0;
+            border_right = 0;
+        }
+
+        const content_min_x = @as(f32, @floatFromInt(window_x + border_left));
+        const content_min_y = @as(f32, @floatFromInt(window_y + border_top));
+        self.mouse_x = mouse_global_x - content_min_x;
+        self.mouse_y = mouse_global_y - content_min_y;
+        self.mouse_down = (buttons & c.SDL_BUTTON_LMASK) != 0;
     }
 
     fn focusedSettingsBuffer(self: *App) ?*std.ArrayList(u8) {
