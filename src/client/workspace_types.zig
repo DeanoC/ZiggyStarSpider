@@ -77,6 +77,7 @@ pub const ProjectSummary = struct {
     status: []u8,
     kind: ?[]u8 = null,
     is_delete_protected: bool = false,
+    token_locked: bool = false,
     mount_count: usize,
     created_at_ms: i64,
     updated_at_ms: i64,
@@ -98,6 +99,7 @@ pub const ProjectDetail = struct {
     status: []u8,
     kind: ?[]u8 = null,
     is_delete_protected: bool = false,
+    token_locked: bool = false,
     created_at_ms: i64,
     updated_at_ms: i64,
     project_token: ?[]u8 = null,
@@ -132,6 +134,25 @@ pub const NodeInfo = struct {
     }
 };
 
+pub const AgentInfo = struct {
+    id: []u8,
+    name: []u8,
+    description: []u8,
+    is_default: bool = false,
+    identity_loaded: bool = false,
+    needs_hatching: bool = false,
+    capabilities: std.ArrayListUnmanaged([]u8) = .{},
+
+    pub fn deinit(self: *AgentInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.name);
+        allocator.free(self.description);
+        for (self.capabilities.items) |capability| allocator.free(capability);
+        self.capabilities.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const WorkspaceStatus = struct {
     agent_id: []u8,
     project_id: ?[]u8 = null,
@@ -146,6 +167,10 @@ pub const WorkspaceStatus = struct {
     last_success_ms: i64 = 0,
     last_error: ?[]u8 = null,
     queue_depth: usize = 0,
+    availability_mounts_total: usize = 0,
+    availability_online: usize = 0,
+    availability_degraded: usize = 0,
+    availability_missing: usize = 0,
 
     pub fn deinit(self: *WorkspaceStatus, allocator: std.mem.Allocator) void {
         allocator.free(self.agent_id);
@@ -187,6 +212,57 @@ pub const SessionAttachStatus = struct {
     }
 };
 
+pub const SessionSummary = struct {
+    session_key: []u8,
+    agent_id: []u8,
+    project_id: ?[]u8 = null,
+    last_active_ms: i64 = 0,
+    message_count: u64 = 0,
+    summary: ?[]u8 = null,
+
+    pub fn deinit(self: *SessionSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_key);
+        allocator.free(self.agent_id);
+        if (self.project_id) |value| allocator.free(value);
+        if (self.summary) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+pub const SessionList = struct {
+    active_session: []u8,
+    sessions: std.ArrayListUnmanaged(SessionSummary) = .{},
+
+    pub fn deinit(self: *SessionList, allocator: std.mem.Allocator) void {
+        allocator.free(self.active_session);
+        for (self.sessions.items) |*session| session.deinit(allocator);
+        self.sessions.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+pub const SessionCloseResult = struct {
+    session_key: []u8,
+    closed: bool,
+    active_session: []u8,
+
+    pub fn deinit(self: *SessionCloseResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_key);
+        allocator.free(self.active_session);
+        self.* = undefined;
+    }
+};
+
+pub const SessionRestoreResult = struct {
+    found: bool,
+    session: ?SessionSummary = null,
+
+    pub fn deinit(self: *SessionRestoreResult, allocator: std.mem.Allocator) void {
+        if (self.session) |*value| value.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub fn deinitProjectList(allocator: std.mem.Allocator, projects: *std.ArrayListUnmanaged(ProjectSummary)) void {
     for (projects.items) |*project| project.deinit(allocator);
     projects.deinit(allocator);
@@ -197,4 +273,10 @@ pub fn deinitNodeList(allocator: std.mem.Allocator, nodes: *std.ArrayListUnmanag
     for (nodes.items) |*node| node.deinit(allocator);
     nodes.deinit(allocator);
     nodes.* = .{};
+}
+
+pub fn deinitAgentList(allocator: std.mem.Allocator, agents: *std.ArrayListUnmanaged(AgentInfo)) void {
+    for (agents.items) |*agent| agent.deinit(allocator);
+    agents.deinit(allocator);
+    agents.* = .{};
 }

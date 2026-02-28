@@ -16,7 +16,7 @@ Status legend:
 - `[x]` ZSS unified-v2 shared client/control modules.
 - `[x]` ZSS project/node/workspace CLI commands.
 - `[x]` ZSS GUI project selection + activation + workspace/node/project visibility.
-- `[x]` ZSS docs aligned to unified-v2 and control/fsrpc split.
+- `[x]` ZSS docs aligned to unified-v2 and control/acheron split.
 
 ## Phase 1: Desired-State Topology API
 
@@ -98,7 +98,7 @@ Status legend:
 - Emit structured audit records for mutating ops.
 
 ### [x] PR-S9 (ZiggySpiderweb): correlation IDs end-to-end
-- Require/pass correlation IDs on control mutations and fsrpc capability jobs.
+- Require/pass correlation IDs on control mutations and Acheron capability jobs.
 - Include IDs in error payloads and metrics labels.
 
 ### [x] PR-C8 (ZiggyStarSpider): correlation visibility

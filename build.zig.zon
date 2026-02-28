@@ -5,20 +5,19 @@
     .minimum_zig_version = "0.15.0",
     .dependencies = .{
         .websocket = .{
-            .url = "https://github.com/DeanoC/ziggy-websocket/archive/refs/heads/master.tar.gz",
-            .hash = "ziggy_websocket-0.1.0-51gnxiEZAwAVuYGcMv3wSN-beE1838tl4Q9Tz0lfkRQU",
+            .path = "deps/websocket",
         },
         .ziggy_core = .{
             .url = "https://github.com/DeanoC/ziggy-core/archive/refs/heads/master.tar.gz",
             .hash = "ziggy_core-0.1.0-q2d-rGiFAAA8ZiSbvWysW_gbVUJMoh-fGGn8PINTljE6",
         },
         .ziggy_spider_protocol = .{
-            .url = "https://github.com/DeanoC/ZiggySpiderProtocol/archive/e1c8d27a9ea2eb3283bdfabc9be16a95ec7b2d71.tar.gz",
-            .hash = "ziggy_spider_protocol-0.1.0-Tn7uqzoBAQCxHJW2NG4XLhyPNdhUNxu43FOdGEa16_Kb",
+            .url = "https://github.com/DeanoC/ZiggySpiderProtocol/archive/2eb0e87000bbdbcaca51c2281fd7c0048ce4bc90.tar.gz",
+            .hash = "ziggy_spider_protocol-0.1.0-Tn7uq8cvCQDowm7A_0nXIXG1ltU5ov_kYbpSqVtcA0cK",
         },
         .ziggy_ui = .{
-            .url = "https://github.com/DeanoC/ziggy-ui/archive/refs/heads/main.tar.gz",
-            .hash = "ziggy_ui-0.1.0-dS4PqOGL8QGukO-FWgx06lBlcqzcL2thOBopFJo1lPwG",
+            .url = "https://github.com/DeanoC/ziggy-ui/archive/f66fb6d8218d4bc42493aead05fa449c6c677cbf.tar.gz",
+            .hash = "ziggy_ui-0.1.0-dS4PqODE8QFJ4vcMimQQGm_DStkTyquXFeyh-ussojL1",
         },
         .sdl3 = .{
             .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",

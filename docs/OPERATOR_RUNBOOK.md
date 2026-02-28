@@ -78,7 +78,7 @@ zss --url ws://127.0.0.1:18790 chat resume <job-id>
    - activate project
 3. Use the onboarding wizard steps in Settings (`connect -> project -> mounts -> activate`).
 4. Open the `Filesystem Browser` panel from Settings.
-5. Open the `Debug Stream` panel for control/fsrpc/audit visibility.
+5. Open the `Debug Stream` panel for control/acheron/audit visibility.
 
 ## 7. Reconnect + Resume Behavior
 

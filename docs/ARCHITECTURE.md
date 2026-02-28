@@ -9,7 +9,7 @@ Primary goals:
 1. Connect to Spiderweb using unified-v2.
 2. Manage project context (list/get/create/use/activate).
 3. Surface node topology and workspace mounts.
-4. Route filesystem and capability IO through `fsrpc.*`.
+4. Route filesystem and capability IO through `acheron.*`.
 
 ## Protocol Model
 
@@ -22,7 +22,7 @@ No legacy compatibility path is maintained in this client.
 - `control`:
   - out-of-band control API and topology/project operations
   - includes handshake and project/node/workspace control calls
-- `fsrpc`:
+- `acheron`:
   - filesystem transport (`t_walk`, `t_open`, `t_read`, `t_write`, etc.)
   - capability IO (for example chat via `/capabilities/chat/control/input`)
 
@@ -112,8 +112,8 @@ The GUI refreshes workspace topology from control-plane APIs and shows selected 
 
 FS-RPC bootstrap sequence:
 
-1. `fsrpc.t_version`
-2. `fsrpc.t_attach` (root fid)
+1. `acheron.t_version`
+2. `acheron.t_attach` (root fid)
 
 Then path-based operations:
 

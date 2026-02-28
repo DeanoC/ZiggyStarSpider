@@ -5,6 +5,7 @@ pub const MessageType = enum {
     session_receive,
     connect_ack,
     debug_event,
+    node_service_event,
     error_response,
     other,
 };
@@ -19,6 +20,7 @@ pub fn classifyTypeString(type_str: []const u8) MessageType {
     if (std.mem.eql(u8, type_str, "control.session_attach")) return .connect_ack;
     if (std.mem.eql(u8, type_str, "control.session_resume")) return .connect_ack;
     if (std.mem.eql(u8, type_str, "debug.event")) return .debug_event;
+    if (std.mem.eql(u8, type_str, "control.node_service_event")) return .node_service_event;
     if (std.mem.eql(u8, type_str, "session.ack")) return .connect_ack; // legacy
     if (std.mem.eql(u8, type_str, "chat_ack")) return .connect_ack; // legacy
     if (std.mem.eql(u8, type_str, "error")) return .error_response;
@@ -85,21 +87,6 @@ pub fn buildAgentControl(
     action: []const u8,
     content: ?[]const u8,
 ) ![]const u8 {
-    if (std.mem.eql(u8, action, "debug.subscribe")) {
-        return std.fmt.allocPrint(
-            allocator,
-            "{{\"channel\":\"control\",\"type\":\"control.debug_subscribe\",\"id\":\"{s}\",\"timestamp\":{d}}}",
-            .{ id, std.time.milliTimestamp() },
-        );
-    }
-    if (std.mem.eql(u8, action, "debug.unsubscribe")) {
-        return std.fmt.allocPrint(
-            allocator,
-            "{{\"channel\":\"control\",\"type\":\"control.debug_unsubscribe\",\"id\":\"{s}\",\"timestamp\":{d}}}",
-            .{ id, std.time.milliTimestamp() },
-        );
-    }
-
     var buffer = std.ArrayListUnmanaged(u8).empty;
     defer buffer.deinit(allocator);
 
@@ -161,6 +148,10 @@ test "protocol_messages: parseMessageType recognizes control.connect_ack" {
     try std.testing.expectEqual(MessageType.connect_ack, parseMessageType("{\"channel\":\"control\",\"type\":\"control.connect_ack\"}").?);
 }
 
+test "protocol_messages: parseMessageType recognizes control.node_service_event" {
+    try std.testing.expectEqual(MessageType.node_service_event, parseMessageType("{\"channel\":\"control\",\"type\":\"control.node_service_event\"}").?);
+}
+
 test "protocol_messages: buildSessionSend escapes mixed text and JSON safely" {
     const allocator = std.testing.allocator;
     const input = "hello {\"a\":1}\nline2 \"quoted\"";
@@ -185,15 +176,6 @@ test "protocol_messages: buildAgentControl emits action envelope" {
 
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"agent.control\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"action\":\"state\"") != null);
-}
-
-test "protocol_messages: buildAgentControl maps debug subscribe to control channel" {
-    const allocator = std.testing.allocator;
-    const payload = try buildAgentControl(allocator, "req-1", "debug.subscribe", null);
-    defer allocator.free(payload);
-
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"channel\":\"control\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"control.debug_subscribe\"") != null);
 }
 
 test "protocol_messages: buildAgentControl escapes content safely" {

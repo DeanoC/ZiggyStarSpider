@@ -1,7 +1,9 @@
 const std = @import("std");
 const ws = @import("websocket");
-const builtin = @import("builtin");
 const protocol_messages = @import("protocol_messages.zig");
+
+const ws_client_max_message_bytes: usize = 16 * 1024 * 1024;
+const ws_client_read_buffer_bytes: usize = 16 * 1024;
 
 const MessageQueue = struct {
     const capacity: usize = 4096;
@@ -78,6 +80,11 @@ const InboundLane = enum {
     debug,
 };
 
+pub const Mode = enum {
+    threaded_queue,
+    direct,
+};
+
 const InboundMessageQueues = struct {
     protocol: MessageQueue,
     debug: MessageQueue,
@@ -131,6 +138,7 @@ pub const WebSocketClient = struct {
     allocator: std.mem.Allocator,
     url_buf: []u8,
     token_buf: []u8,
+    mode: Mode = .threaded_queue,
     client: ?ws.Client = null,
 
     // Threading - using manual read loop (like ZSC)
@@ -138,12 +146,23 @@ pub const WebSocketClient = struct {
     should_stop: std.atomic.Value(bool),
     connection_alive: std.atomic.Value(bool),
     inbound_queues: InboundMessageQueues,
+    verbose_logs: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, url: []const u8, token: []const u8) !WebSocketClient {
+        return initWithMode(allocator, url, token, .threaded_queue);
+    }
+
+    pub fn initWithMode(
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        token: []const u8,
+        mode: Mode,
+    ) !WebSocketClient {
         return .{
             .allocator = allocator,
             .url_buf = try allocator.dupe(u8, url),
             .token_buf = try allocator.dupe(u8, token),
+            .mode = mode,
             .should_stop = std.atomic.Value(bool).init(false),
             .connection_alive = std.atomic.Value(bool).init(false),
             .inbound_queues = InboundMessageQueues.init(allocator),
@@ -154,6 +173,15 @@ pub const WebSocketClient = struct {
         const self = try allocator.create(WebSocketClient);
         self.* = try init(allocator, url, token);
         return self;
+    }
+
+    pub fn setVerboseLogs(self: *WebSocketClient, enabled: bool) void {
+        self.verbose_logs = enabled;
+    }
+
+    fn logVerbose(self: *const WebSocketClient, comptime format: []const u8, args: anytype) void {
+        if (!self.verbose_logs) return;
+        std.log.debug(format, args);
     }
 
     pub fn destroy(self: *WebSocketClient) void {
@@ -179,6 +207,8 @@ pub const WebSocketClient = struct {
             .host = parsed.host,
             .port = parsed.port,
             .tls = parsed.tls,
+            .max_size = ws_client_max_message_bytes,
+            .buffer_size = ws_client_read_buffer_bytes,
         });
         var client_owned_locally = true;
         errdefer if (client_owned_locally) client.deinit();
@@ -200,22 +230,24 @@ pub const WebSocketClient = struct {
             .headers = headers,
         });
 
-        // Set socket to non-blocking so read() returns WouldBlock immediately
-        // when no data is available (required for proper thread behavior)
-        try setClientSocketNonBlocking(&client);
+        // Match CLI behavior: use a short socket read timeout so readLoop's
+        // client.read() returns WouldBlock quickly instead of blocking.
+        try client.readTimeout(1);
 
         self.client = client;
         client_owned_locally = false;
         self.should_stop.store(false, .release);
         self.connection_alive.store(true, .release);
 
-        // Start our own read loop thread (like ZSC does)
-        self.read_thread = try std.Thread.spawn(.{}, readLoop, .{self});
+        // Threaded mode mirrors the GUI main websocket usage.
+        if (self.mode == .threaded_queue) {
+            self.read_thread = try std.Thread.spawn(.{}, readLoop, .{self});
+        }
         std.log.info("WebSocket connected to {s}:{d}", .{ parsed.host, parsed.port });
     }
 
     fn readLoop(self: *WebSocketClient) void {
-        std.log.debug("[WS] readLoop thread started", .{});
+        self.logVerbose("[WS] readLoop thread started", .{});
 
         while (!self.should_stop.load(.acquire)) {
             if (self.client) |*client| {
@@ -253,19 +285,19 @@ pub const WebSocketClient = struct {
                         client.writePong(@constCast(msg.data)) catch {};
                     },
                     .close => {
-                        std.log.debug("[WS] Got close frame", .{});
+                        self.logVerbose("[WS] Got close frame", .{});
                         break;
                     },
                     .pong => {},
                 }
             } else {
-                std.log.debug("[WS] self.client is null, breaking", .{});
+                self.logVerbose("[WS] self.client is null, breaking", .{});
                 break;
             }
         }
 
         self.connection_alive.store(false, .release);
-        std.log.debug("[WS] readLoop thread stopped (should_stop={})", .{self.should_stop.load(.acquire)});
+        self.logVerbose("[WS] readLoop thread stopped (should_stop={})", .{self.should_stop.load(.acquire)});
     }
 
     pub fn disconnect(self: *WebSocketClient) void {
@@ -291,14 +323,14 @@ pub const WebSocketClient = struct {
     pub fn send(self: *WebSocketClient, payload: []const u8) !void {
         if (self.client == null) return error.NotConnected;
         if (!self.connection_alive.load(.acquire)) return error.ConnectionClosed;
-        std.log.debug("[WS] Sending {d} bytes", .{payload.len});
+        self.logVerbose("[WS] Sending {d} bytes", .{payload.len});
         if (self.client) |*client| {
             client.write(@constCast(payload)) catch |err| {
                 std.log.err("[WS] Send failed: {s}", .{@errorName(err)});
                 self.connection_alive.store(false, .release);
                 return err;
             };
-            std.log.debug("[WS] Send successful", .{});
+            self.logVerbose("[WS] Send successful", .{});
             return;
         }
         return error.NotConnected;
@@ -310,11 +342,23 @@ pub const WebSocketClient = struct {
 
     /// Non-blocking check for messages. Returns null if none available.
     pub fn tryReceive(self: *WebSocketClient) ?[]u8 {
+        if (self.mode == .direct) {
+            return self.tryReceiveDirect();
+        }
         return self.inbound_queues.pop();
     }
 
     /// Wait up to timeout_ms for a message. Returns null on timeout.
     pub fn receive(self: *WebSocketClient, timeout_ms: u32) ?[]u8 {
+        if (self.mode == .direct) {
+            const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+            while (std.time.milliTimestamp() <= deadline_ms) {
+                if (self.tryReceiveDirect()) |msg| return msg;
+                if (!self.connection_alive.load(.acquire)) return null;
+                std.Thread.sleep(1 * std.time.ns_per_ms);
+            }
+            return null;
+        }
         return self.inbound_queues.popWait(timeout_ms);
     }
 
@@ -329,25 +373,49 @@ pub const WebSocketClient = struct {
         if (!self.connection_alive.load(.acquire)) return error.ConnectionClosed;
         return error.WouldBlock;
     }
-};
 
-fn setClientSocketNonBlocking(client: *ws.Client) !void {
-    const handle = client.stream.stream.handle;
-    if (comptime builtin.os.tag == .windows) {
-        var mode: u32 = 1;
-        const result = std.os.windows.ws2_32.ioctlsocket(handle, std.os.windows.ws2_32.FIONBIO, &mode);
-        if (result != 0) {
-            return error.Unexpected;
+    fn tryReceiveDirect(self: *WebSocketClient) ?[]u8 {
+        if (self.client == null) return null;
+        if (!self.connection_alive.load(.acquire)) return null;
+
+        if (self.client) |*client| {
+            const msg = client.read() catch |err| switch (err) {
+                error.WouldBlock => return null,
+                error.Closed, error.ConnectionResetByPeer => {
+                    std.log.info("[WS] Connection closed", .{});
+                    self.connection_alive.store(false, .release);
+                    return null;
+                },
+                else => {
+                    std.log.err("[WS] read error: {s}", .{@errorName(err)});
+                    self.connection_alive.store(false, .release);
+                    return null;
+                },
+            } orelse return null;
+            defer client.done(msg);
+
+            switch (msg.type) {
+                .text, .binary => {
+                    return self.allocator.dupe(u8, msg.data) catch |err| {
+                        std.log.err("[WS] Failed to allocate copy: {s}", .{@errorName(err)});
+                        return null;
+                    };
+                },
+                .ping => {
+                    client.writePong(@constCast(msg.data)) catch {};
+                    return null;
+                },
+                .close => {
+                    self.connection_alive.store(false, .release);
+                    return null;
+                },
+                .pong => return null,
+            }
         }
-        return;
-    }
 
-    const socket = handle;
-    const flags = try std.posix.fcntl(socket, std.posix.F.GETFL, 0);
-    const nonblock_mask_u32: u32 = @bitCast(std.posix.O{ .NONBLOCK = true });
-    const nonblock_mask: usize = @intCast(nonblock_mask_u32);
-    _ = try std.posix.fcntl(socket, std.posix.F.SETFL, flags | nonblock_mask);
-}
+        return null;
+    }
+};
 
 const ParsedUrl = struct {
     host: []u8,

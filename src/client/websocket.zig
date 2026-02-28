@@ -2,6 +2,9 @@ const std = @import("std");
 const ws = @import("websocket");
 const logger = @import("ziggy-core").utils.logger;
 
+const ws_client_max_message_bytes: usize = 16 * 1024 * 1024;
+const ws_client_read_buffer_bytes: usize = 16 * 1024;
+
 // Simplified WebSocket client for ZSS
 // Connects to Spiderweb and handles basic message send/receive
 
@@ -58,6 +61,8 @@ pub const WebSocketClient = struct {
             .host = parsed.host,
             .port = parsed.port,
             .tls = parsed.tls,
+            .max_size = ws_client_max_message_bytes,
+            .buffer_size = ws_client_read_buffer_bytes,
         });
         errdefer client.deinit();
 

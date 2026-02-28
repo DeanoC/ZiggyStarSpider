@@ -195,12 +195,59 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
                 },
             }
         },
+        .agent => {
+            switch (cmd.verb) {
+                .list => try executeAgentList(allocator, options, cmd),
+                .info => try executeAgentInfo(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown agent verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
+        .session => {
+            switch (cmd.verb) {
+                .list => try executeSessionList(allocator, options, cmd),
+                .history => try executeSessionHistory(allocator, options, cmd),
+                .status => try executeSessionStatus(allocator, options, cmd),
+                .attach => try executeSessionAttach(allocator, options, cmd),
+                .resume_job => try executeSessionResume(allocator, options, cmd),
+                .close => try executeSessionClose(allocator, options, cmd),
+                .restore => try executeSessionRestore(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown session verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
         .node => {
             switch (cmd.verb) {
                 .list => try executeNodeList(allocator, options, cmd),
                 .info => try executeNodeInfo(allocator, options, cmd),
+                .pending => try executeNodePendingList(allocator, options, cmd),
+                .approve => try executeNodeApprove(allocator, options, cmd),
+                .deny => try executeNodeDeny(allocator, options, cmd),
+                .join_request => try executeNodeJoinRequest(allocator, options, cmd),
+                .service_get => try executeNodeServiceGet(allocator, options, cmd),
+                .service_upsert => try executeNodeServiceUpsert(allocator, options, cmd),
+                .service_runtime => try executeNodeServiceRuntime(allocator, options, cmd),
+                .watch => try executeNodeServiceWatch(allocator, options, cmd),
                 else => {
                     logger.err("Unknown node verb", .{});
+                    return error.InvalidArguments;
+                },
+            }
+        },
+        .pairing => {
+            switch (cmd.verb) {
+                .pending => try executePairingPending(allocator, options, cmd),
+                .approve => try executePairingApprove(allocator, options, cmd),
+                .deny => try executePairingDeny(allocator, options, cmd),
+                .list => try executePairingInviteList(allocator, options, cmd),
+                .create => try executePairingInviteCreate(allocator, options, cmd),
+                .refresh => try executePairingRefresh(allocator, options, cmd),
+                else => {
+                    logger.err("Unknown pairing verb", .{});
                     return error.InvalidArguments;
                 },
             }
@@ -599,8 +646,6 @@ fn executeProjectCreate(allocator: std.mem.Allocator, options: args.Options, cmd
         if (status.workspace_root) |workspace_root| {
             try stdout.print("  Workspace root: {s}\n", .{workspace_root});
         }
-    } else {
-        logger.warn("project created without project token in response", .{});
     }
 }
 
@@ -905,6 +950,358 @@ fn executeProjectDoctor(allocator: std.mem.Allocator, options: args.Options, cmd
     }
 }
 
+fn executeAgentList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    _ = cmd;
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var agents = try control_plane.listAgents(allocator, client, &g_control_request_counter);
+    defer workspace_types.deinitAgentList(allocator, &agents);
+    if (agents.items.len == 0) {
+        try stdout.print("(no agents)\n", .{});
+        return;
+    }
+
+    try stdout.print("Agents:\n", .{});
+    for (agents.items) |agent| {
+        const default_marker = if (agent.is_default) " [default]" else "";
+        const hatching_marker = if (agent.needs_hatching) " [needs_hatching]" else "";
+        try stdout.print(
+            "  - {s} ({s}){s}{s}\n",
+            .{ agent.id, agent.name, default_marker, hatching_marker },
+        );
+    }
+}
+
+fn executeAgentInfo(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("agent info requires an agent ID", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var agent = try control_plane.getAgent(allocator, client, &g_control_request_counter, cmd.args[0]);
+    defer agent.deinit(allocator);
+
+    try stdout.print("Agent {s}\n", .{agent.id});
+    try stdout.print("  Name: {s}\n", .{agent.name});
+    try stdout.print("  Description: {s}\n", .{agent.description});
+    try stdout.print("  Default: {s}\n", .{if (agent.is_default) "yes" else "no"});
+    try stdout.print("  Identity loaded: {s}\n", .{if (agent.identity_loaded) "yes" else "no"});
+    try stdout.print("  Needs hatching: {s}\n", .{if (agent.needs_hatching) "yes" else "no"});
+    if (agent.capabilities.items.len == 0) {
+        try stdout.print("  Capabilities: (none)\n", .{});
+    } else {
+        try stdout.print("  Capabilities:\n", .{});
+        for (agent.capabilities.items) |capability| {
+            try stdout.print("    - {s}\n", .{capability});
+        }
+    }
+}
+
+fn printSessionAttachStatus(stdout: anytype, status: *const workspace_types.SessionAttachStatus) !void {
+    try stdout.print("Session: {s}\n", .{status.session_key});
+    try stdout.print("  Agent: {s}\n", .{status.agent_id});
+    if (status.project_id) |project_id| {
+        try stdout.print("  Project: {s}\n", .{project_id});
+    } else {
+        try stdout.print("  Project: (none)\n", .{});
+    }
+    try stdout.print(
+        "  Attach state: {s} (runtime_ready={s}, mount_ready={s})\n",
+        .{
+            status.state,
+            if (status.runtime_ready) "yes" else "no",
+            if (status.mount_ready) "yes" else "no",
+        },
+    );
+    try stdout.print("  Updated: {d}\n", .{status.updated_at_ms});
+    if (status.error_code) |code| {
+        try stdout.print(
+            "  Error: {s}{s}{s}\n",
+            .{
+                code,
+                if (status.error_message != null) " - " else "",
+                if (status.error_message) |message| message else "",
+            },
+        );
+    }
+}
+
+fn executeSessionList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    _ = cmd;
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var list = try control_plane.listSessions(allocator, client, &g_control_request_counter);
+    defer list.deinit(allocator);
+
+    try stdout.print("Active session: {s}\n", .{list.active_session});
+    if (list.sessions.items.len == 0) {
+        try stdout.print("(no sessions)\n", .{});
+        return;
+    }
+
+    try stdout.print("Sessions:\n", .{});
+    for (list.sessions.items) |session| {
+        const marker = if (std.mem.eql(u8, session.session_key, list.active_session)) "*" else " ";
+        if (session.project_id) |project_id| {
+            try stdout.print(
+                "{s} {s}  agent={s}  project={s}\n",
+                .{ marker, session.session_key, session.agent_id, project_id },
+            );
+        } else {
+            try stdout.print(
+                "{s} {s}  agent={s}  project=(none)\n",
+                .{ marker, session.session_key, session.agent_id },
+            );
+        }
+    }
+}
+
+const SessionHistoryArgs = struct {
+    agent_id: ?[]const u8 = null,
+    limit: usize = 10,
+};
+
+fn parseSessionHistoryArgs(cmd: args.Command) !SessionHistoryArgs {
+    var parsed = SessionHistoryArgs{};
+    var i: usize = 0;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--limit")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            const value = try std.fmt.parseUnsigned(usize, cmd.args[i], 10);
+            parsed.limit = value;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
+        if (parsed.agent_id != null) return error.InvalidArguments;
+        parsed.agent_id = arg;
+    }
+    return parsed;
+}
+
+fn executeSessionHistory(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    const parsed = parseSessionHistoryArgs(cmd) catch {
+        logger.err("session history usage: session history [agent_id] [--limit <n>]", .{});
+        return error.InvalidArguments;
+    };
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var sessions = try control_plane.sessionHistory(
+        allocator,
+        client,
+        &g_control_request_counter,
+        parsed.agent_id,
+        parsed.limit,
+    );
+    defer {
+        for (sessions.items) |*entry| entry.deinit(allocator);
+        sessions.deinit(allocator);
+    }
+    if (sessions.items.len == 0) {
+        try stdout.print("(no persisted sessions)\n", .{});
+        return;
+    }
+
+    try stdout.print("Persisted sessions:\n", .{});
+    for (sessions.items) |session| {
+        try stdout.print(
+            "  - {s}  agent={s}  project={s}  last_active_ms={d}  messages={d}",
+            .{
+                session.session_key,
+                session.agent_id,
+                session.project_id orelse "(none)",
+                session.last_active_ms,
+                session.message_count,
+            },
+        );
+        if (session.summary) |summary| {
+            try stdout.print("  summary={s}", .{summary});
+        }
+        try stdout.print("\n", .{});
+    }
+}
+
+fn executeSessionStatus(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len > 1) {
+        logger.err("session status accepts zero or one session_key", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var status = try control_plane.sessionStatus(
+        allocator,
+        client,
+        &g_control_request_counter,
+        if (cmd.args.len == 1) cmd.args[0] else null,
+    );
+    defer status.deinit(allocator);
+    try printSessionAttachStatus(stdout, &status);
+}
+
+const SessionAttachArgs = struct {
+    session_key: []const u8,
+    agent_id: []const u8,
+    project_id: ?[]const u8 = null,
+    project_token: ?[]const u8 = null,
+};
+
+fn parseSessionAttachArgs(options: args.Options, cmd: args.Command) !SessionAttachArgs {
+    var parsed = SessionAttachArgs{
+        .session_key = undefined,
+        .agent_id = undefined,
+        .project_id = options.project,
+        .project_token = options.project_token,
+    };
+
+    var positional: [2][]const u8 = undefined;
+    var positional_count: usize = 0;
+    var i: usize = 0;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--project")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            parsed.project_id = cmd.args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--project-token")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            parsed.project_token = cmd.args[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
+        if (positional_count >= positional.len) return error.InvalidArguments;
+        positional[positional_count] = arg;
+        positional_count += 1;
+    }
+
+    if (positional_count != 2) return error.InvalidArguments;
+    parsed.session_key = positional[0];
+    parsed.agent_id = positional[1];
+    return parsed;
+}
+
+fn executeSessionAttach(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    const parsed = parseSessionAttachArgs(options, cmd) catch {
+        logger.err("session attach usage: session attach <session_key> <agent_id> [--project <project_id>] [--project-token <token>]", .{});
+        return error.InvalidArguments;
+    };
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var status = try control_plane.sessionAttach(
+        allocator,
+        client,
+        &g_control_request_counter,
+        parsed.session_key,
+        parsed.agent_id,
+        parsed.project_id,
+        parsed.project_token,
+    );
+    defer status.deinit(allocator);
+    try printSessionAttachStatus(stdout, &status);
+}
+
+fn executeSessionResume(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len != 1) {
+        logger.err("session resume requires a session_key", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var status = try control_plane.sessionResume(allocator, client, &g_control_request_counter, cmd.args[0]);
+    defer status.deinit(allocator);
+    try printSessionAttachStatus(stdout, &status);
+}
+
+fn executeSessionClose(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len != 1) {
+        logger.err("session close requires a session_key", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var result = try control_plane.closeSession(allocator, client, &g_control_request_counter, cmd.args[0]);
+    defer result.deinit(allocator);
+
+    try stdout.print("Closed: {s}\n", .{if (result.closed) "yes" else "no"});
+    try stdout.print("Session: {s}\n", .{result.session_key});
+    try stdout.print("Active session: {s}\n", .{result.active_session});
+}
+
+fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len > 1) {
+        logger.err("session restore accepts zero or one agent_id", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    var restored = try control_plane.sessionRestore(
+        allocator,
+        client,
+        &g_control_request_counter,
+        if (cmd.args.len == 1) cmd.args[0] else null,
+    );
+    defer restored.deinit(allocator);
+
+    if (!restored.found or restored.session == null) {
+        try stdout.print("(no persisted session found)\n", .{});
+        return;
+    }
+    const session = restored.session.?;
+    const project_token = if (options.project_token) |token|
+        token
+    else if (session.project_id) |project_id|
+        cfg.getProjectToken(project_id)
+    else
+        null;
+    try stdout.print(
+        "Restoring session {s} (agent={s}, project={s})\n",
+        .{ session.session_key, session.agent_id, session.project_id orelse "(none)" },
+    );
+
+    var status = try control_plane.sessionAttach(
+        allocator,
+        client,
+        &g_control_request_counter,
+        session.session_key,
+        session.agent_id,
+        session.project_id,
+        project_token,
+    );
+    defer status.deinit(allocator);
+    try printSessionAttachStatus(stdout, &status);
+}
+
 fn executeNodeList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     _ = cmd;
     const stdout = std.fs.File.stdout().deprecatedWriter();
@@ -945,6 +1342,1506 @@ fn executeNodeInfo(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     try stdout.print("  Joined: {d}\n", .{node.joined_at_ms});
     try stdout.print("  Last seen: {d}\n", .{node.last_seen_ms});
     try stdout.print("  Lease expires: {d}\n", .{node.lease_expires_at_ms});
+}
+
+const NodeLabelArg = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+fn parseNodeLabelArg(raw: []const u8) !NodeLabelArg {
+    const eq_idx = std.mem.indexOfScalar(u8, raw, '=') orelse return error.InvalidArguments;
+    if (eq_idx == 0) return error.InvalidArguments;
+    return .{
+        .key = raw[0..eq_idx],
+        .value = raw[eq_idx + 1 ..],
+    };
+}
+
+fn jsonObjectStringOr(obj: std.json.ObjectMap, name: []const u8, fallback: []const u8) []const u8 {
+    const value = obj.get(name) orelse return fallback;
+    if (value != .string) return fallback;
+    return value.string;
+}
+
+fn jsonObjectI64Or(obj: std.json.ObjectMap, name: []const u8, fallback: i64) i64 {
+    const value = obj.get(name) orelse return fallback;
+    if (value != .integer) return fallback;
+    return value.integer;
+}
+
+fn jsonObjectBoolOr(obj: std.json.ObjectMap, name: []const u8, fallback: bool) bool {
+    const value = obj.get(name) orelse return fallback;
+    if (value != .bool) return fallback;
+    return value.bool;
+}
+
+fn jsonPlatformFieldOr(root: std.json.ObjectMap, name: []const u8, fallback: []const u8) []const u8 {
+    const platform = root.get("platform") orelse return fallback;
+    if (platform != .object) return fallback;
+    return jsonObjectStringOr(platform.object, name, fallback);
+}
+
+fn printNodeServiceCatalogPayload(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    payload_json: []const u8,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+
+    const root = parsed.value.object;
+    try stdout.print(
+        "Node services for {s} ({s})\n",
+        .{
+            jsonObjectStringOr(root, "node_id", "(unknown)"),
+            jsonObjectStringOr(root, "node_name", "(unknown)"),
+        },
+    );
+    try stdout.print(
+        "  Platform: os={s} arch={s} runtime={s}\n",
+        .{
+            jsonPlatformFieldOr(root, "os", "unknown"),
+            jsonPlatformFieldOr(root, "arch", "unknown"),
+            jsonPlatformFieldOr(root, "runtime_kind", "unknown"),
+        },
+    );
+
+    if (root.get("labels")) |labels_val| {
+        if (labels_val == .object and labels_val.object.count() > 0) {
+            try stdout.print("  Labels:\n", .{});
+            var label_it = labels_val.object.iterator();
+            while (label_it.next()) |entry| {
+                if (entry.value_ptr.* != .string) continue;
+                try stdout.print("    - {s}={s}\n", .{ entry.key_ptr.*, entry.value_ptr.*.string });
+            }
+        } else {
+            try stdout.print("  Labels: (none)\n", .{});
+        }
+    } else {
+        try stdout.print("  Labels: (none)\n", .{});
+    }
+
+    if (root.get("services")) |services_val| {
+        if (services_val == .array and services_val.array.items.len > 0) {
+            try stdout.print("  Services ({d}):\n", .{services_val.array.items.len});
+            for (services_val.array.items) |service_val| {
+                if (service_val != .object) continue;
+                const service = service_val.object;
+                try stdout.print(
+                    "    - {s} kind={s} version={s} state={s}\n",
+                    .{
+                        jsonObjectStringOr(service, "service_id", "(unknown)"),
+                        jsonObjectStringOr(service, "kind", "(unknown)"),
+                        jsonObjectStringOr(service, "version", "1"),
+                        jsonObjectStringOr(service, "state", "(unknown)"),
+                    },
+                );
+                if (service.get("endpoints")) |endpoints_val| {
+                    if (endpoints_val == .array and endpoints_val.array.items.len > 0) {
+                        for (endpoints_val.array.items) |endpoint| {
+                            if (endpoint != .string) continue;
+                            try stdout.print("      endpoint: {s}\n", .{endpoint.string});
+                        }
+                    }
+                }
+                if (service.get("capabilities")) |caps| {
+                    try stdout.print("      capabilities: {f}\n", .{std.json.fmt(caps, .{})});
+                }
+            }
+        } else {
+            try stdout.print("  Services: (none)\n", .{});
+        }
+    } else {
+        try stdout.print("  Services: (none)\n", .{});
+    }
+}
+
+fn jsonArrayLenOr(obj: std.json.ObjectMap, name: []const u8) usize {
+    const value = obj.get(name) orelse return 0;
+    if (value != .array) return 0;
+    return value.array.items.len;
+}
+
+fn printNodeServiceEventPayload(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    payload_value: std.json.Value,
+    verbose: bool,
+) !void {
+    if (payload_value != .object) {
+        try stdout.print("node_service_event payload is not an object\n", .{});
+        return;
+    }
+    const payload = payload_value.object;
+    const node_id = jsonObjectStringOr(payload, "node_id", "(unknown)");
+    const delta_value = payload.get("service_delta");
+    if (delta_value) |value| {
+        if (value == .object) {
+            const delta = value.object;
+            try stdout.print(
+                "node_service_event node={s} changed={} added={d} updated={d} removed={d} ts_ms={d}\n",
+                .{
+                    node_id,
+                    jsonObjectBoolOr(delta, "changed", false),
+                    jsonArrayLenOr(delta, "added"),
+                    jsonArrayLenOr(delta, "updated"),
+                    jsonArrayLenOr(delta, "removed"),
+                    jsonObjectI64Or(delta, "timestamp_ms", 0),
+                },
+            );
+        } else {
+            try stdout.print("node_service_event node={s} (delta malformed)\n", .{node_id});
+        }
+    } else {
+        try stdout.print("node_service_event node={s}\n", .{node_id});
+    }
+
+    if (!verbose) return;
+    const payload_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(payload_value, .{ .whitespace = .indent_2 })},
+    );
+    defer allocator.free(payload_json);
+    try stdout.print("{s}\n", .{payload_json});
+}
+
+fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    var node_filter: ?[]const u8 = null;
+    var replay_limit: usize = 25;
+    var i: usize = 0;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--replay-limit")) {
+            i += 1;
+            if (i >= cmd.args.len) {
+                logger.err("node watch --replay-limit requires a numeric value", .{});
+                return error.InvalidArguments;
+            }
+            replay_limit = std.fmt.parseUnsigned(usize, cmd.args[i], 10) catch {
+                logger.err("node watch --replay-limit must be an unsigned integer", .{});
+                return error.InvalidArguments;
+            };
+            if (replay_limit > 10_000) replay_limit = 10_000;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--replay-limit=")) {
+            const value = arg["--replay-limit=".len..];
+            replay_limit = std.fmt.parseUnsigned(usize, value, 10) catch {
+                logger.err("node watch --replay-limit must be an unsigned integer", .{});
+                return error.InvalidArguments;
+            };
+            if (replay_limit > 10_000) replay_limit = 10_000;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) {
+            logger.err("node watch unknown option: {s}", .{arg});
+            return error.InvalidArguments;
+        }
+        if (node_filter != null) {
+            logger.err("node watch accepts at most one optional <node_id> filter", .{});
+            return error.InvalidArguments;
+        }
+        node_filter = arg;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    const watch_payload = if (node_filter) |node_id| blk: {
+        const escaped_node = try unified.jsonEscape(allocator, node_id);
+        defer allocator.free(escaped_node);
+        break :blk try std.fmt.allocPrint(
+            allocator,
+            "{{\"node_id\":\"{s}\",\"replay_limit\":{d}}}",
+            .{ escaped_node, replay_limit },
+        );
+    } else try std.fmt.allocPrint(
+        allocator,
+        "{{\"replay_limit\":{d}}}",
+        .{replay_limit},
+    );
+    defer allocator.free(watch_payload);
+
+    const watch_ack = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.node_service_watch",
+        watch_payload,
+    );
+    defer allocator.free(watch_ack);
+
+    if (node_filter) |node_id| {
+        try stdout.print(
+            "Watching node service events for node {s} (replay_limit={d}, Ctrl+C to stop)\n",
+            .{ node_id, replay_limit },
+        );
+    } else {
+        try stdout.print(
+            "Watching node service events for all nodes (replay_limit={d}, Ctrl+C to stop)\n",
+            .{replay_limit},
+        );
+    }
+
+    while (true) {
+        const raw = client.readTimeout(1_000) catch |err| {
+            logger.err("node watch connection failed: {s}", .{@errorName(err)});
+            return err;
+        } orelse continue;
+        defer allocator.free(raw);
+
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch continue;
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const root = parsed.value.object;
+
+        const channel = root.get("channel") orelse continue;
+        if (channel != .string or !std.mem.eql(u8, channel.string, "control")) continue;
+        const typ = root.get("type") orelse continue;
+        if (typ != .string) continue;
+
+        if (std.mem.eql(u8, typ.string, "control.node_service_event")) {
+            const payload = root.get("payload") orelse continue;
+            try printNodeServiceEventPayload(allocator, stdout, payload, options.verbose);
+            continue;
+        }
+
+        if (std.mem.eql(u8, typ.string, "control.error")) {
+            const error_value = root.get("error") orelse continue;
+            if (error_value == .object) {
+                const message = jsonObjectStringOr(error_value.object, "message", "control error");
+                const code = jsonObjectStringOr(error_value.object, "code", "unknown");
+                logger.err("node watch remote error: {s} [{s}]", .{ message, code });
+            }
+        }
+    }
+}
+
+fn executeNodeJoinRequest(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("node join-request requires <node_name> [fs_url]", .{});
+        return error.InvalidArguments;
+    }
+
+    var fs_url: ?[]const u8 = null;
+    var platform_os: ?[]const u8 = null;
+    var platform_arch: ?[]const u8 = null;
+    var platform_runtime_kind: ?[]const u8 = null;
+
+    var i: usize = 1;
+    if (i < cmd.args.len and !std.mem.startsWith(u8, cmd.args[i], "--")) {
+        fs_url = cmd.args[i];
+        i += 1;
+    }
+
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--os")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            platform_os = cmd.args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--arch")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            platform_arch = cmd.args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--runtime-kind")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            platform_runtime_kind = cmd.args[i];
+            continue;
+        }
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+
+    const escaped_name = try unified.jsonEscape(allocator, cmd.args[0]);
+    defer allocator.free(escaped_name);
+    try payload.writer(allocator).print("\"node_name\":\"{s}\"", .{escaped_name});
+    if (fs_url) |value| {
+        const escaped_url = try unified.jsonEscape(allocator, value);
+        defer allocator.free(escaped_url);
+        try payload.writer(allocator).print(",\"fs_url\":\"{s}\"", .{escaped_url});
+    }
+
+    if (platform_os != null or platform_arch != null or platform_runtime_kind != null) {
+        try payload.appendSlice(allocator, ",\"platform\":{");
+        var platform_fields: usize = 0;
+        if (platform_os) |value| {
+            const escaped = try unified.jsonEscape(allocator, value);
+            defer allocator.free(escaped);
+            try payload.writer(allocator).print("\"os\":\"{s}\"", .{escaped});
+            platform_fields += 1;
+        }
+        if (platform_arch) |value| {
+            const escaped = try unified.jsonEscape(allocator, value);
+            defer allocator.free(escaped);
+            if (platform_fields > 0) try payload.append(allocator, ',');
+            try payload.writer(allocator).print("\"arch\":\"{s}\"", .{escaped});
+            platform_fields += 1;
+        }
+        if (platform_runtime_kind) |value| {
+            const escaped = try unified.jsonEscape(allocator, value);
+            defer allocator.free(escaped);
+            if (platform_fields > 0) try payload.append(allocator, ',');
+            try payload.writer(allocator).print("\"runtime_kind\":\"{s}\"", .{escaped});
+        }
+        try payload.append(allocator, '}');
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.node_join_request",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+
+    const root = parsed.value.object;
+    try stdout.print("Pending node join request created\n", .{});
+    try stdout.print("  Request: {s}\n", .{jsonObjectStringOr(root, "request_id", "(unknown)")});
+    try stdout.print("  Node: {s}\n", .{jsonObjectStringOr(root, "node_name", "(unknown)")});
+    try stdout.print("  FS URL: {s}\n", .{jsonObjectStringOr(root, "fs_url", "")});
+    try stdout.print(
+        "  Platform: os={s} arch={s} runtime={s}\n",
+        .{
+            jsonPlatformFieldOr(root, "os", "unknown"),
+            jsonPlatformFieldOr(root, "arch", "unknown"),
+            jsonPlatformFieldOr(root, "runtime_kind", "unknown"),
+        },
+    );
+    try stdout.print("  Requested at: {d}\n", .{jsonObjectI64Or(root, "requested_at_ms", 0)});
+}
+
+fn executeNodePendingList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len != 0) {
+        logger.err("node pending does not accept arguments", .{});
+        return error.InvalidArguments;
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    if (resolveOperatorToken(options, &cfg)) |token| {
+        const escaped_token = try unified.jsonEscape(allocator, token);
+        defer allocator.free(escaped_token);
+        try payload.writer(allocator).print("\"operator_token\":\"{s}\"", .{escaped_token});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.node_join_pending_list",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+    const pending_val = parsed.value.object.get("pending") orelse {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    if (pending_val != .array) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+
+    if (pending_val.array.items.len == 0) {
+        try stdout.print("(no pending join requests)\n", .{});
+        return;
+    }
+
+    try stdout.print("Pending join requests:\n", .{});
+    for (pending_val.array.items) |item| {
+        if (item != .object) continue;
+        const request = item.object;
+        try stdout.print(
+            "  - {s} node={s} fs={s} platform={s}/{s}/{s} requested_at_ms={d}\n",
+            .{
+                jsonObjectStringOr(request, "request_id", "(unknown)"),
+                jsonObjectStringOr(request, "node_name", "(unknown)"),
+                jsonObjectStringOr(request, "fs_url", ""),
+                jsonPlatformFieldOr(request, "os", "unknown"),
+                jsonPlatformFieldOr(request, "arch", "unknown"),
+                jsonPlatformFieldOr(request, "runtime_kind", "unknown"),
+                jsonObjectI64Or(request, "requested_at_ms", 0),
+            },
+        );
+    }
+}
+
+fn executeNodeApprove(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("node approve requires <request_id>", .{});
+        return error.InvalidArguments;
+    }
+
+    var lease_ttl_ms: ?u64 = null;
+    var i: usize = 1;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--lease-ttl-ms")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            lease_ttl_ms = try std.fmt.parseInt(u64, cmd.args[i], 10);
+            continue;
+        }
+        return error.InvalidArguments;
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    var appended = false;
+
+    const escaped_request = try unified.jsonEscape(allocator, cmd.args[0]);
+    defer allocator.free(escaped_request);
+    try payload.writer(allocator).print("\"request_id\":\"{s}\"", .{escaped_request});
+    appended = true;
+
+    if (lease_ttl_ms) |value| {
+        if (appended) try payload.append(allocator, ',');
+        try payload.writer(allocator).print("\"lease_ttl_ms\":{d}", .{value});
+        appended = true;
+    }
+    if (resolveOperatorToken(options, &cfg)) |token| {
+        const escaped_token = try unified.jsonEscape(allocator, token);
+        defer allocator.free(escaped_token);
+        if (appended) try payload.append(allocator, ',');
+        try payload.writer(allocator).print("\"operator_token\":\"{s}\"", .{escaped_token});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.node_join_approve",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+    const root = parsed.value.object;
+    try stdout.print("Pending join approved\n", .{});
+    try stdout.print("  Node ID: {s}\n", .{jsonObjectStringOr(root, "node_id", "(unknown)")});
+    try stdout.print("  Node name: {s}\n", .{jsonObjectStringOr(root, "node_name", "(unknown)")});
+    try stdout.print("  FS URL: {s}\n", .{jsonObjectStringOr(root, "fs_url", "")});
+    try stdout.print(
+        "  Platform: os={s} arch={s} runtime={s}\n",
+        .{
+            jsonPlatformFieldOr(root, "os", "unknown"),
+            jsonPlatformFieldOr(root, "arch", "unknown"),
+            jsonPlatformFieldOr(root, "runtime_kind", "unknown"),
+        },
+    );
+    try stdout.print("  Node secret: {s}\n", .{jsonObjectStringOr(root, "node_secret", "(missing)")});
+    try stdout.print("  Lease token: {s}\n", .{jsonObjectStringOr(root, "lease_token", "(missing)")});
+    try stdout.print("  Lease expires: {d}\n", .{jsonObjectI64Or(root, "lease_expires_at_ms", 0)});
+}
+
+fn executeNodeDeny(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len != 1) {
+        logger.err("node deny requires <request_id>", .{});
+        return error.InvalidArguments;
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+
+    const escaped_request = try unified.jsonEscape(allocator, cmd.args[0]);
+    defer allocator.free(escaped_request);
+    try payload.writer(allocator).print("\"request_id\":\"{s}\"", .{escaped_request});
+    if (resolveOperatorToken(options, &cfg)) |token| {
+        const escaped_token = try unified.jsonEscape(allocator, token);
+        defer allocator.free(escaped_token);
+        try payload.writer(allocator).print(",\"operator_token\":\"{s}\"", .{escaped_token});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.node_join_deny",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+    const root = parsed.value.object;
+    try stdout.print(
+        "Pending join {s}: {s}\n",
+        .{
+            if (jsonObjectBoolOr(root, "denied", false)) "denied" else "processed",
+            jsonObjectStringOr(root, "request_id", cmd.args[0]),
+        },
+    );
+}
+
+const pairing_pending_path = "/debug/pairing/pending.json";
+const pairing_last_result_path = "/debug/pairing/last_result.json";
+const pairing_last_error_path = "/debug/pairing/last_error.json";
+const pairing_refresh_path = "/debug/pairing/control/refresh";
+const pairing_approve_path = "/debug/pairing/control/approve.json";
+const pairing_deny_path = "/debug/pairing/control/deny.json";
+const pairing_invites_active_path = "/debug/pairing/invites/active.json";
+const pairing_invites_last_result_path = "/debug/pairing/invites/last_result.json";
+const pairing_invites_last_error_path = "/debug/pairing/invites/last_error.json";
+const pairing_invites_refresh_path = "/debug/pairing/invites/control/refresh";
+const pairing_invites_create_path = "/debug/pairing/invites/control/create.json";
+
+fn appendOptionalOperatorToken(
+    allocator: std.mem.Allocator,
+    payload: *std.ArrayListUnmanaged(u8),
+    options: args.Options,
+    cfg: *const Config,
+    appended: *bool,
+) !void {
+    if (resolveOperatorToken(options, cfg)) |token| {
+        const escaped_token = try unified.jsonEscape(allocator, token);
+        defer allocator.free(escaped_token);
+        if (appended.*) try payload.append(allocator, ',');
+        try payload.writer(allocator).print("\"operator_token\":\"{s}\"", .{escaped_token});
+        appended.* = true;
+    }
+}
+
+fn fsrpcReadPathText(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8) ![]u8 {
+    const fid = try fsrpcWalkPath(allocator, client, path);
+    defer fsrpcClunkBestEffort(allocator, client, fid);
+    try fsrpcOpen(allocator, client, fid, "r");
+    return fsrpcReadAllText(allocator, client, fid);
+}
+
+fn fsrpcWritePathText(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8, content: []const u8) !void {
+    const fid = try fsrpcWalkPath(allocator, client, path);
+    defer fsrpcClunkBestEffort(allocator, client, fid);
+    try fsrpcOpen(allocator, client, fid, "rw");
+    var write = try fsrpcWriteText(allocator, client, fid, content, null);
+    defer write.deinit(allocator);
+}
+
+fn printPendingJoinPayload(stdout: anytype, allocator: std.mem.Allocator, payload_json: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+    const pending_val = parsed.value.object.get("pending") orelse {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    if (pending_val != .array) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+    if (pending_val.array.items.len == 0) {
+        try stdout.print("(no pending join requests)\n", .{});
+        return;
+    }
+
+    try stdout.print("Pending join requests:\n", .{});
+    for (pending_val.array.items) |item| {
+        if (item != .object) continue;
+        const request = item.object;
+        try stdout.print(
+            "  - {s} node={s} fs={s} platform={s}/{s}/{s} requested_at_ms={d}\n",
+            .{
+                jsonObjectStringOr(request, "request_id", "(unknown)"),
+                jsonObjectStringOr(request, "node_name", "(unknown)"),
+                jsonObjectStringOr(request, "fs_url", ""),
+                jsonPlatformFieldOr(request, "os", "unknown"),
+                jsonPlatformFieldOr(request, "arch", "unknown"),
+                jsonPlatformFieldOr(request, "runtime_kind", "unknown"),
+                jsonObjectI64Or(request, "requested_at_ms", 0),
+            },
+        );
+    }
+}
+
+fn printInviteListPayload(stdout: anytype, allocator: std.mem.Allocator, payload_json: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{}) catch {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+    const invites_val = parsed.value.object.get("invites") orelse {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    };
+    if (invites_val != .array) {
+        try stdout.print("{s}\n", .{payload_json});
+        return;
+    }
+    if (invites_val.array.items.len == 0) {
+        try stdout.print("(no active invites)\n", .{});
+        return;
+    }
+
+    try stdout.print("Active invites:\n", .{});
+    for (invites_val.array.items) |item| {
+        if (item != .object) continue;
+        const invite = item.object;
+        try stdout.print(
+            "  - {s} token={s} created_at_ms={d} expires_at_ms={d} redeemed={s} expired={s}\n",
+            .{
+                jsonObjectStringOr(invite, "invite_id", "(unknown)"),
+                jsonObjectStringOr(invite, "invite_token", "(missing)"),
+                jsonObjectI64Or(invite, "created_at_ms", 0),
+                jsonObjectI64Or(invite, "expires_at_ms", 0),
+                if (jsonObjectBoolOr(invite, "redeemed", false)) "true" else "false",
+                if (jsonObjectBoolOr(invite, "expired", false)) "true" else "false",
+            },
+        );
+    }
+}
+
+fn printPairingActionOutcome(
+    stdout: anytype,
+    result_json: []const u8,
+    error_json: []const u8,
+) !void {
+    const trimmed_error = std.mem.trim(u8, error_json, " \t\r\n");
+    if (trimmed_error.len > 0 and !std.mem.eql(u8, trimmed_error, "null")) {
+        try stdout.print("Pairing action failed:\n{s}\n", .{trimmed_error});
+        return error.RemoteError;
+    }
+
+    const trimmed_result = std.mem.trim(u8, result_json, " \t\r\n");
+    if (trimmed_result.len == 0) {
+        try stdout.print("Pairing action completed (no result payload)\n", .{});
+        return;
+    }
+    try stdout.print("{s}\n", .{trimmed_result});
+}
+
+fn refreshPairingPendingSnapshot(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    options: args.Options,
+    cfg: *const Config,
+) !void {
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    var appended = false;
+    try appendOptionalOperatorToken(allocator, &payload, options, cfg, &appended);
+    try payload.append(allocator, '}');
+    try fsrpcWritePathText(allocator, client, pairing_refresh_path, payload.items);
+}
+
+fn refreshPairingInvitesSnapshot(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    options: args.Options,
+    cfg: *const Config,
+) !void {
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    var appended = false;
+    try appendOptionalOperatorToken(allocator, &payload, options, cfg, &appended);
+    try payload.append(allocator, '}');
+    try fsrpcWritePathText(allocator, client, pairing_invites_refresh_path, payload.items);
+}
+
+fn executePairingPending(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len != 0) {
+        logger.err("pairing pending does not accept arguments", .{});
+        return error.InvalidArguments;
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try fsrpcBootstrap(allocator, client);
+
+    try refreshPairingPendingSnapshot(allocator, client, options, &cfg);
+    const pending_json = try fsrpcReadPathText(allocator, client, pairing_pending_path);
+    defer allocator.free(pending_json);
+    try printPendingJoinPayload(stdout, allocator, pending_json);
+}
+
+fn executePairingApprove(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len == 0) {
+        logger.err("pairing approve requires <request_id>", .{});
+        return error.InvalidArguments;
+    }
+    var lease_ttl_ms: ?u64 = null;
+    var i: usize = 1;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--lease-ttl-ms")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            lease_ttl_ms = try std.fmt.parseInt(u64, cmd.args[i], 10);
+            continue;
+        }
+        return error.InvalidArguments;
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try fsrpcBootstrap(allocator, client);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    var appended = false;
+
+    const escaped_request = try unified.jsonEscape(allocator, cmd.args[0]);
+    defer allocator.free(escaped_request);
+    try payload.writer(allocator).print("\"request_id\":\"{s}\"", .{escaped_request});
+    appended = true;
+    if (lease_ttl_ms) |value| {
+        if (appended) try payload.append(allocator, ',');
+        try payload.writer(allocator).print("\"lease_ttl_ms\":{d}", .{value});
+        appended = true;
+    }
+    try appendOptionalOperatorToken(allocator, &payload, options, &cfg, &appended);
+    try payload.append(allocator, '}');
+
+    try fsrpcWritePathText(allocator, client, pairing_approve_path, payload.items);
+    const result_json = try fsrpcReadPathText(allocator, client, pairing_last_result_path);
+    defer allocator.free(result_json);
+    const error_json = try fsrpcReadPathText(allocator, client, pairing_last_error_path);
+    defer allocator.free(error_json);
+    try printPairingActionOutcome(stdout, result_json, error_json);
+}
+
+fn executePairingDeny(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len != 1) {
+        logger.err("pairing deny requires <request_id>", .{});
+        return error.InvalidArguments;
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try fsrpcBootstrap(allocator, client);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    var appended = false;
+
+    const escaped_request = try unified.jsonEscape(allocator, cmd.args[0]);
+    defer allocator.free(escaped_request);
+    try payload.writer(allocator).print("\"request_id\":\"{s}\"", .{escaped_request});
+    appended = true;
+    try appendOptionalOperatorToken(allocator, &payload, options, &cfg, &appended);
+    try payload.append(allocator, '}');
+
+    try fsrpcWritePathText(allocator, client, pairing_deny_path, payload.items);
+    const result_json = try fsrpcReadPathText(allocator, client, pairing_last_result_path);
+    defer allocator.free(result_json);
+    const error_json = try fsrpcReadPathText(allocator, client, pairing_last_error_path);
+    defer allocator.free(error_json);
+    try printPairingActionOutcome(stdout, result_json, error_json);
+}
+
+fn executePairingInviteList(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len != 0) {
+        logger.err("pairing list does not accept arguments", .{});
+        return error.InvalidArguments;
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try fsrpcBootstrap(allocator, client);
+
+    try refreshPairingInvitesSnapshot(allocator, client, options, &cfg);
+    const invites_json = try fsrpcReadPathText(allocator, client, pairing_invites_active_path);
+    defer allocator.free(invites_json);
+    try printInviteListPayload(stdout, allocator, invites_json);
+}
+
+fn executePairingInviteCreate(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    var expires_in_ms: ?u64 = null;
+    var i: usize = 0;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--expires-in-ms")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            expires_in_ms = try std.fmt.parseInt(u64, cmd.args[i], 10);
+            continue;
+        }
+        return error.InvalidArguments;
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try fsrpcBootstrap(allocator, client);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+    var appended = false;
+    if (expires_in_ms) |value| {
+        try payload.writer(allocator).print("\"expires_in_ms\":{d}", .{value});
+        appended = true;
+    }
+    try appendOptionalOperatorToken(allocator, &payload, options, &cfg, &appended);
+    try payload.append(allocator, '}');
+
+    try fsrpcWritePathText(allocator, client, pairing_invites_create_path, payload.items);
+    const result_json = try fsrpcReadPathText(allocator, client, pairing_invites_last_result_path);
+    defer allocator.free(result_json);
+    const error_json = try fsrpcReadPathText(allocator, client, pairing_invites_last_error_path);
+    defer allocator.free(error_json);
+    try printPairingActionOutcome(stdout, result_json, error_json);
+}
+
+fn executePairingRefresh(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    var refresh_pending = true;
+    var refresh_invites = true;
+    if (cmd.args.len > 1) {
+        logger.err("pairing refresh accepts at most one target: pending|invites|all", .{});
+        return error.InvalidArguments;
+    }
+    if (cmd.args.len == 1) {
+        if (std.mem.eql(u8, cmd.args[0], "pending")) {
+            refresh_invites = false;
+        } else if (std.mem.eql(u8, cmd.args[0], "invites")) {
+            refresh_pending = false;
+        } else if (!std.mem.eql(u8, cmd.args[0], "all")) {
+            logger.err("pairing refresh target must be pending|invites|all", .{});
+            return error.InvalidArguments;
+        }
+    }
+
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try fsrpcBootstrap(allocator, client);
+
+    if (refresh_pending) {
+        try refreshPairingPendingSnapshot(allocator, client, options, &cfg);
+        const pending_json = try fsrpcReadPathText(allocator, client, pairing_pending_path);
+        defer allocator.free(pending_json);
+        try printPendingJoinPayload(stdout, allocator, pending_json);
+    }
+    if (refresh_invites) {
+        if (refresh_pending) try stdout.print("\n", .{});
+        try refreshPairingInvitesSnapshot(allocator, client, options, &cfg);
+        const invites_json = try fsrpcReadPathText(allocator, client, pairing_invites_active_path);
+        defer allocator.free(invites_json);
+        try printInviteListPayload(stdout, allocator, invites_json);
+    }
+}
+
+fn executeNodeServiceGet(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len != 1) {
+        logger.err("node service-get requires <node_id>", .{});
+        return error.InvalidArguments;
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    const escaped_node = try unified.jsonEscape(allocator, cmd.args[0]);
+    defer allocator.free(escaped_node);
+    const payload_req = try std.fmt.allocPrint(allocator, "{{\"node_id\":\"{s}\"}}", .{escaped_node});
+    defer allocator.free(payload_req);
+
+    const payload_json = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.node_service_get",
+        payload_req,
+    );
+    defer allocator.free(payload_json);
+
+    try printNodeServiceCatalogPayload(allocator, stdout, payload_json);
+}
+
+const NodeServiceRuntimeAction = enum {
+    help,
+    schema,
+    template,
+    status,
+    metrics,
+    health,
+    config_get,
+    config_set,
+    invoke,
+    enable,
+    disable,
+    restart,
+    reset,
+};
+
+fn parseNodeServiceRuntimeAction(raw: []const u8) ?NodeServiceRuntimeAction {
+    if (std.mem.eql(u8, raw, "help")) return .help;
+    if (std.mem.eql(u8, raw, "schema")) return .schema;
+    if (std.mem.eql(u8, raw, "template")) return .template;
+    if (std.mem.eql(u8, raw, "status")) return .status;
+    if (std.mem.eql(u8, raw, "metrics")) return .metrics;
+    if (std.mem.eql(u8, raw, "health")) return .health;
+    if (std.mem.eql(u8, raw, "config-get")) return .config_get;
+    if (std.mem.eql(u8, raw, "config-set")) return .config_set;
+    if (std.mem.eql(u8, raw, "invoke")) return .invoke;
+    if (std.mem.eql(u8, raw, "enable")) return .enable;
+    if (std.mem.eql(u8, raw, "disable")) return .disable;
+    if (std.mem.eql(u8, raw, "restart")) return .restart;
+    if (std.mem.eql(u8, raw, "reset")) return .reset;
+    return null;
+}
+
+fn validateJsonObjectPayload(allocator: std.mem.Allocator, payload: []const u8, context: []const u8) !void {
+    const trimmed = std.mem.trim(u8, payload, " \t\r\n");
+    if (trimmed.len == 0) {
+        logger.err("{s} payload must be a non-empty JSON object", .{context});
+        return error.InvalidArguments;
+    }
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{}) catch {
+        logger.err("{s} payload must be valid JSON", .{context});
+        return error.InvalidArguments;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        logger.err("{s} payload must be a JSON object", .{context});
+        return error.InvalidArguments;
+    }
+}
+
+fn requestNodeServiceCatalogPayload(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    node_id: []const u8,
+) ![]u8 {
+    const escaped_node = try unified.jsonEscape(allocator, node_id);
+    defer allocator.free(escaped_node);
+    const payload_req = try std.fmt.allocPrint(allocator, "{{\"node_id\":\"{s}\"}}", .{escaped_node});
+    defer allocator.free(payload_req);
+
+    return control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.node_service_get",
+        payload_req,
+    );
+}
+
+fn findNodeServiceRuntimeRootPath(
+    allocator: std.mem.Allocator,
+    catalog_payload_json: []const u8,
+    expected_node_id: []const u8,
+    service_id: []const u8,
+) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, catalog_payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+    const root = parsed.value.object;
+
+    const node_id = jsonObjectStringOr(root, "node_id", "");
+    if (node_id.len == 0) return error.InvalidResponse;
+    if (!std.mem.eql(u8, node_id, expected_node_id)) return error.InvalidResponse;
+
+    const services_val = root.get("services") orelse return error.ServiceNotFound;
+    if (services_val != .array) return error.InvalidResponse;
+
+    for (services_val.array.items) |service_val| {
+        if (service_val != .object) continue;
+        const service_obj = service_val.object;
+        if (!std.mem.eql(u8, jsonObjectStringOr(service_obj, "service_id", ""), service_id)) continue;
+
+        if (service_obj.get("mounts")) |mounts_val| {
+            if (mounts_val == .array) {
+                for (mounts_val.array.items) |mount_val| {
+                    if (mount_val != .object) continue;
+                    const mount_path = jsonObjectStringOr(mount_val.object, "mount_path", "");
+                    if (mount_path.len == 0 or mount_path[0] != '/') continue;
+                    return allocator.dupe(u8, mount_path);
+                }
+            }
+        }
+
+        if (service_obj.get("endpoints")) |endpoints_val| {
+            if (endpoints_val == .array) {
+                for (endpoints_val.array.items) |endpoint| {
+                    if (endpoint != .string) continue;
+                    if (endpoint.string.len == 0 or endpoint.string[0] != '/') continue;
+                    return allocator.dupe(u8, endpoint.string);
+                }
+            }
+        }
+
+        return error.ServiceMountNotFound;
+    }
+
+    return error.ServiceNotFound;
+}
+
+fn readNodeServiceRuntimeFile(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    runtime_root: []const u8,
+    name: []const u8,
+) ![]u8 {
+    const path = try joinFsPath(allocator, runtime_root, name);
+    defer allocator.free(path);
+    return fsrpcReadPathText(allocator, client, path);
+}
+
+fn readNodeServiceRuntimeFileFallback(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    runtime_root: []const u8,
+    primary_name: []const u8,
+    fallback_name: []const u8,
+) ![]u8 {
+    return readNodeServiceRuntimeFile(allocator, client, runtime_root, primary_name) catch {
+        return readNodeServiceRuntimeFile(allocator, client, runtime_root, fallback_name);
+    };
+}
+
+fn resolveNodeServiceRuntimeInvokePayload(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    runtime_root: []const u8,
+    payload_arg: ?[]const u8,
+) ![]u8 {
+    if (payload_arg) |value| {
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        try validateJsonObjectPayload(allocator, trimmed, "invoke");
+        return allocator.dupe(u8, trimmed);
+    }
+
+    const template_text = readNodeServiceRuntimeFileFallback(
+        allocator,
+        client,
+        runtime_root,
+        "TEMPLATE.json",
+        "template.json",
+    ) catch {
+        return allocator.dupe(u8, "{}");
+    };
+    defer allocator.free(template_text);
+    const trimmed = std.mem.trim(u8, template_text, " \t\r\n");
+    if (trimmed.len == 0) return allocator.dupe(u8, "{}");
+
+    validateJsonObjectPayload(allocator, trimmed, "invoke template") catch {
+        logger.warn("service invoke template is not a JSON object; falling back to {{}}", .{});
+        return allocator.dupe(u8, "{}");
+    };
+    return allocator.dupe(u8, trimmed);
+}
+
+fn writeNodeServiceRuntimeControl(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    runtime_root: []const u8,
+    name: []const u8,
+    payload: []const u8,
+) !void {
+    const control_dir = try joinFsPath(allocator, runtime_root, "control");
+    defer allocator.free(control_dir);
+    const path = try joinFsPath(allocator, control_dir, name);
+    defer allocator.free(path);
+    try fsrpcWritePathText(allocator, client, path, payload);
+}
+
+fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len < 3) {
+        logger.err("node service-runtime requires <node_id> <service_id> <action> [payload]", .{});
+        return error.InvalidArguments;
+    }
+
+    const node_id = cmd.args[0];
+    const service_id = cmd.args[1];
+    const action = parseNodeServiceRuntimeAction(cmd.args[2]) orelse {
+        logger.err("node service-runtime action must be help|schema|template|status|metrics|health|config-get|config-set|invoke|enable|disable|restart|reset", .{});
+        return error.InvalidArguments;
+    };
+    const payload_arg = if (cmd.args.len > 3) cmd.args[3] else null;
+
+    switch (action) {
+        .config_set => if (payload_arg == null) {
+            logger.err("node service-runtime config-set requires JSON payload", .{});
+            return error.InvalidArguments;
+        },
+        .invoke => {},
+        else => if (payload_arg != null) {
+            logger.err("node service-runtime {s} does not accept payload", .{@tagName(action)});
+            return error.InvalidArguments;
+        },
+    }
+    if (cmd.args.len > 4) {
+        logger.err("node service-runtime accepts at most one payload argument", .{});
+        return error.InvalidArguments;
+    }
+
+    if (action == .config_set) {
+        try validateJsonObjectPayload(allocator, payload_arg.?, "config-set");
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    const catalog_payload = try requestNodeServiceCatalogPayload(allocator, client, node_id);
+    defer allocator.free(catalog_payload);
+    const runtime_root = findNodeServiceRuntimeRootPath(
+        allocator,
+        catalog_payload,
+        node_id,
+        service_id,
+    ) catch |err| {
+        if (err == error.ServiceNotFound) {
+            logger.err("service {s} not found for node {s}", .{ service_id, node_id });
+            return err;
+        }
+        if (err == error.ServiceMountNotFound) {
+            logger.err("service {s} does not expose a runtime mount path", .{service_id});
+            return err;
+        }
+        return err;
+    };
+    defer allocator.free(runtime_root);
+
+    try fsrpcBootstrap(allocator, client);
+
+    switch (action) {
+        .help => {
+            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "README.md");
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .schema => {
+            const text = try readNodeServiceRuntimeFileFallback(
+                allocator,
+                client,
+                runtime_root,
+                "SCHEMA.json",
+                "schema.json",
+            );
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .template => {
+            const text = try readNodeServiceRuntimeFileFallback(
+                allocator,
+                client,
+                runtime_root,
+                "TEMPLATE.json",
+                "template.json",
+            );
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .status => {
+            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .metrics => {
+            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "metrics.json");
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .health => {
+            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "health.json");
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .config_get => {
+            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "config.json");
+            defer allocator.free(text);
+            try stdout.print("{s}\n", .{text});
+        },
+        .config_set => {
+            const path = try joinFsPath(allocator, runtime_root, "config.json");
+            defer allocator.free(path);
+            try fsrpcWritePathText(allocator, client, path, std.mem.trim(u8, payload_arg.?, " \t\r\n"));
+            const health = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "health.json");
+            defer allocator.free(health);
+            try stdout.print("updated config for {s}/{s}\n{s}\n", .{ node_id, service_id, health });
+        },
+        .invoke => {
+            const invoke_payload = try resolveNodeServiceRuntimeInvokePayload(
+                allocator,
+                client,
+                runtime_root,
+                payload_arg,
+            );
+            defer allocator.free(invoke_payload);
+            try writeNodeServiceRuntimeControl(allocator, client, runtime_root, "invoke.json", invoke_payload);
+            const status = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
+            defer allocator.free(status);
+            const result = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "result.json");
+            defer allocator.free(result);
+            const last_error = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "last_error.txt");
+            defer allocator.free(last_error);
+            try stdout.print("status:\n{s}\n", .{status});
+            if (std.mem.trim(u8, last_error, " \t\r\n").len > 0) {
+                try stdout.print("last_error:\n{s}\n", .{last_error});
+            }
+            try stdout.print("result:\n{s}\n", .{result});
+        },
+        .enable, .disable, .restart, .reset => {
+            const control_name = switch (action) {
+                .enable => "enable",
+                .disable => "disable",
+                .restart => "restart",
+                .reset => "reset",
+                else => unreachable,
+            };
+            try writeNodeServiceRuntimeControl(allocator, client, runtime_root, control_name, "{}");
+            const health = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "health.json");
+            defer allocator.free(health);
+            const status = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
+            defer allocator.free(status);
+            try stdout.print("{s} applied for {s}/{s}\n", .{ control_name, node_id, service_id });
+            try stdout.print("health:\n{s}\n", .{health});
+            try stdout.print("status:\n{s}\n", .{status});
+        },
+    }
+}
+
+fn executeNodeServiceUpsert(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    if (cmd.args.len < 2) {
+        logger.err("node service-upsert requires <node_id> <node_secret>", .{});
+        return error.InvalidArguments;
+    }
+
+    const node_id = cmd.args[0];
+    const node_secret = cmd.args[1];
+    var platform_os: ?[]const u8 = null;
+    var platform_arch: ?[]const u8 = null;
+    var platform_runtime_kind: ?[]const u8 = null;
+    var labels = std.ArrayListUnmanaged(NodeLabelArg){};
+    defer labels.deinit(allocator);
+    var services_json: ?[]const u8 = null;
+    var services_file_raw: ?[]u8 = null;
+    defer if (services_file_raw) |raw| allocator.free(raw);
+
+    var i: usize = 2;
+    while (i < cmd.args.len) : (i += 1) {
+        const arg = cmd.args[i];
+        if (std.mem.eql(u8, arg, "--os")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            platform_os = cmd.args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--arch")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            platform_arch = cmd.args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--runtime-kind")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            platform_runtime_kind = cmd.args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--label")) {
+            i += 1;
+            if (i >= cmd.args.len) return error.InvalidArguments;
+            try labels.append(allocator, try parseNodeLabelArg(cmd.args[i]));
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--services-json")) {
+            i += 1;
+            if (i >= cmd.args.len or services_json != null or services_file_raw != null) return error.InvalidArguments;
+            services_json = std.mem.trim(u8, cmd.args[i], " \t\r\n");
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--services-file")) {
+            i += 1;
+            if (i >= cmd.args.len or services_json != null or services_file_raw != null) return error.InvalidArguments;
+            services_file_raw = try std.fs.cwd().readFileAlloc(allocator, cmd.args[i], 2 * 1024 * 1024);
+            services_json = std.mem.trim(u8, services_file_raw.?, " \t\r\n");
+            continue;
+        }
+        return error.InvalidArguments;
+    }
+
+    if (services_json) |raw| {
+        if (raw.len == 0) return error.InvalidArguments;
+        var parsed_services = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+        defer parsed_services.deinit();
+        if (parsed_services.value != .array) {
+            logger.err("services payload must be a JSON array", .{});
+            return error.InvalidArguments;
+        }
+    }
+
+    const stdout = std.fs.File.stdout().deprecatedWriter();
+    const client = try getOrCreateClient(allocator, options);
+    try ensureUnifiedV2Control(allocator, client);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.append(allocator, '{');
+
+    const escaped_node_id = try unified.jsonEscape(allocator, node_id);
+    defer allocator.free(escaped_node_id);
+    const escaped_node_secret = try unified.jsonEscape(allocator, node_secret);
+    defer allocator.free(escaped_node_secret);
+    try payload.writer(allocator).print(
+        "\"node_id\":\"{s}\",\"node_secret\":\"{s}\"",
+        .{ escaped_node_id, escaped_node_secret },
+    );
+
+    if (platform_os != null or platform_arch != null or platform_runtime_kind != null) {
+        try payload.appendSlice(allocator, ",\"platform\":{");
+        var platform_fields: usize = 0;
+        if (platform_os) |value| {
+            const escaped = try unified.jsonEscape(allocator, value);
+            defer allocator.free(escaped);
+            try payload.writer(allocator).print("\"os\":\"{s}\"", .{escaped});
+            platform_fields += 1;
+        }
+        if (platform_arch) |value| {
+            const escaped = try unified.jsonEscape(allocator, value);
+            defer allocator.free(escaped);
+            if (platform_fields > 0) try payload.append(allocator, ',');
+            try payload.writer(allocator).print("\"arch\":\"{s}\"", .{escaped});
+            platform_fields += 1;
+        }
+        if (platform_runtime_kind) |value| {
+            const escaped = try unified.jsonEscape(allocator, value);
+            defer allocator.free(escaped);
+            if (platform_fields > 0) try payload.append(allocator, ',');
+            try payload.writer(allocator).print("\"runtime_kind\":\"{s}\"", .{escaped});
+        }
+        try payload.append(allocator, '}');
+    }
+
+    if (labels.items.len > 0) {
+        try payload.appendSlice(allocator, ",\"labels\":{");
+        for (labels.items, 0..) |label, idx| {
+            if (idx != 0) try payload.append(allocator, ',');
+            const escaped_key = try unified.jsonEscape(allocator, label.key);
+            defer allocator.free(escaped_key);
+            const escaped_value = try unified.jsonEscape(allocator, label.value);
+            defer allocator.free(escaped_value);
+            try payload.writer(allocator).print("\"{s}\":\"{s}\"", .{ escaped_key, escaped_value });
+        }
+        try payload.append(allocator, '}');
+    }
+
+    if (services_json) |raw| {
+        try payload.writer(allocator).print(",\"services\":{s}", .{raw});
+    }
+
+    try payload.append(allocator, '}');
+
+    const payload_json = try control_plane.requestControlPayloadJson(
+        allocator,
+        client,
+        &g_control_request_counter,
+        "control.node_service_upsert",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    try printNodeServiceCatalogPayload(allocator, stdout, payload_json);
 }
 
 fn executeWorkspaceStatus(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
@@ -1170,7 +3067,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     try fsrpcBootstrap(allocator, client);
 
     logger.info("Submitting chat job...", .{});
-    const chat_input_fid = try fsrpcWalkPath(allocator, client, "/capabilities/chat/control/input");
+    const chat_input_fid = try fsrpcWalkPath(allocator, client, "/agents/self/chat/control/input");
     defer fsrpcClunkBestEffort(allocator, client, chat_input_fid);
     try fsrpcOpen(allocator, client, chat_input_fid, "rw");
 
@@ -1184,7 +3081,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
         return error.InvalidResponse;
     };
 
-    const result_path = try std.fmt.allocPrint(allocator, "/jobs/{s}/result.txt", .{job_name});
+    const result_path = try std.fmt.allocPrint(allocator, "/agents/self/jobs/{s}/result.txt", .{job_name});
     defer allocator.free(result_path);
 
     const result_fid = try fsrpcWalkPath(allocator, client, result_path);
@@ -1247,7 +3144,7 @@ fn parseJobStatusInfo(allocator: std.mem.Allocator, status_json: []const u8) !Jo
 }
 
 fn readJobStatus(allocator: std.mem.Allocator, client: *WebSocketClient, job_name: []const u8) !JobStatusInfo {
-    const status_path = try std.fmt.allocPrint(allocator, "/jobs/{s}/status.json", .{job_name});
+    const status_path = try std.fmt.allocPrint(allocator, "/agents/self/jobs/{s}/status.json", .{job_name});
     defer allocator.free(status_path);
     const status_fid = try fsrpcWalkPath(allocator, client, status_path);
     defer fsrpcClunkBestEffort(allocator, client, status_fid);
@@ -1264,7 +3161,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
     try fsrpcBootstrap(allocator, client);
 
     if (cmd.args.len == 0) {
-        const jobs_fid = try fsrpcWalkPath(allocator, client, "/jobs");
+        const jobs_fid = try fsrpcWalkPath(allocator, client, "/agents/self/jobs");
         defer fsrpcClunkBestEffort(allocator, client, jobs_fid);
         try fsrpcOpen(allocator, client, jobs_fid, "r");
         const listing = try fsrpcReadAllText(allocator, client, jobs_fid);
@@ -1307,7 +3204,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
         return;
     }
 
-    const result_path = try std.fmt.allocPrint(allocator, "/jobs/{s}/result.txt", .{job_name});
+    const result_path = try std.fmt.allocPrint(allocator, "/agents/self/jobs/{s}/result.txt", .{job_name});
     defer allocator.free(result_path);
     const result_fid = try fsrpcWalkPath(allocator, client, result_path);
     defer fsrpcClunkBestEffort(allocator, client, result_fid);
@@ -1530,7 +3427,7 @@ fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void 
     const version_tag = nextFsrpcTag();
     const version_req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"styx-lite-1\"}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"acheron-1\"}}",
         .{version_tag},
     );
     defer allocator.free(version_req);
@@ -1541,7 +3438,7 @@ fn fsrpcBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void 
     const attach_tag = nextFsrpcTag();
     const attach_req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_attach\",\"tag\":{d},\"fid\":1}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_attach\",\"tag\":{d},\"fid\":1}}",
         .{attach_tag},
     );
     defer allocator.free(attach_req);
@@ -1561,7 +3458,7 @@ fn fsrpcWalkPath(allocator: std.mem.Allocator, client: *WebSocketClient, path: [
     const tag = nextFsrpcTag();
     const req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
         .{ tag, new_fid, path_json },
     );
     defer allocator.free(req);
@@ -1579,7 +3476,7 @@ fn fsrpcOpen(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32, m
     const tag = nextFsrpcTag();
     const req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
         .{ tag, fid, escaped_mode },
     );
     defer allocator.free(req);
@@ -1593,7 +3490,7 @@ fn fsrpcReadAllText(allocator: std.mem.Allocator, client: *WebSocketClient, fid:
     const tag = nextFsrpcTag();
     const req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
         .{ tag, fid },
     );
     defer allocator.free(req);
@@ -1631,12 +3528,12 @@ fn fsrpcWriteText(
         defer allocator.free(escaped);
         break :blk try std.fmt.allocPrint(
             allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\",\"correlation_id\":\"{s}\"}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\",\"correlation_id\":\"{s}\"}}",
             .{ tag, fid, encoded, escaped },
         );
     } else try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
         .{ tag, fid, encoded },
     );
     defer allocator.free(req);
@@ -1671,7 +3568,7 @@ fn fsrpcStatRaw(allocator: std.mem.Allocator, client: *WebSocketClient, fid: u32
     const tag = nextFsrpcTag();
     const req = try std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_stat\",\"tag\":{d},\"fid\":{d}}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_stat\",\"tag\":{d},\"fid\":{d}}}",
         .{ tag, fid },
     );
     defer allocator.free(req);
@@ -1692,7 +3589,7 @@ fn fsrpcClunkBestEffort(allocator: std.mem.Allocator, client: *WebSocketClient, 
     const tag = nextFsrpcTag();
     const req = std.fmt.allocPrint(
         allocator,
-        "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
+        "{{\"channel\":\"acheron\",\"type\":\"acheron.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
         .{ tag, fid },
     ) catch return;
     defer allocator.free(req);
@@ -1731,7 +3628,7 @@ fn sendAndAwaitFsrpcWithTimeout(
             if (parsed.value == .object) {
                 const obj = parsed.value.object;
                 if (obj.get("channel")) |channel| {
-                    if (channel == .string and std.mem.eql(u8, channel.string, "fsrpc")) {
+                    if (channel == .string and std.mem.eql(u8, channel.string, "acheron")) {
                         if (obj.get("tag")) |raw_tag| {
                             if (raw_tag == .integer and raw_tag.integer >= 0 and @as(u32, @intCast(raw_tag.integer)) == tag) {
                                 matched = true;

@@ -114,6 +114,6 @@ Actions:
 
 ## Debugging Aids
 
-- Enable Debug Stream panel in GUI for control/fsrpc events and correlation IDs.
+- Enable Debug Stream panel in GUI for control/acheron events and correlation IDs.
 - Use CLI `--verbose` for workspace diagnostics.
 - Run `./scripts/smoke-matrix.sh` for a full workflow check.

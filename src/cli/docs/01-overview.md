@@ -23,8 +23,30 @@ ziggystarspider --help
 - `project create <name> [vision]` - Create a project and store selection/token locally
 - `project up <name>` - One-shot project + mount bootstrap
 - `project doctor` - Readiness checks with actionable failures
+- `agent list` - List discoverable agents
+- `agent info <agent_id>` - Show one agent's metadata
+- `session list` - List known sessions for this connection
+- `session history [agent_id] [--limit N]` - List persisted sessions
+- `session status [session_key]` - Show attach/runtime state for a session
+- `session attach <session_key> <agent_id>` - Create/rebind a session
+- `session resume <session_key>` - Switch active session
+- `session close <session_key>` - Close a non-main session
+- `session restore [agent_id]` - Attach the latest persisted session
 - `node list` - List registered nodes
 - `node info <node_id>` - Show node details
+- `node join-request <node_name> [fs_url]` - Submit pending node join request
+- `node pending` - List pending node join requests
+- `node approve <request_id>` - Approve pending node join request
+- `node deny <request_id>` - Deny pending node join request
+- `node service-get <node_id>` - Show node service catalog
+- `node service-upsert <node_id> <node_secret>` - Update node service catalog metadata
+- `node service-runtime <node_id> <service_id> <action>` - Read/write runtime control files for a service mount
+- `pairing pending` - Refresh and list pending pairing join requests
+- `pairing approve <request_id> [--lease-ttl-ms <ms>]` - Approve pending pairing request
+- `pairing deny <request_id>` - Deny pending pairing request
+- `pairing list` - Refresh and list active pairing invites
+- `pairing create [--expires-in-ms <ms>]` - Create a new pairing invite
+- `pairing refresh [pending|invites|all]` - Refresh pairing snapshots and print results
 - `workspace status [project_id]` - Show active workspace mounts
 - `auth status` - Show Spiderweb auth token status (admin only)
 - `auth rotate <admin|user>` - Rotate Spiderweb auth token (admin only)

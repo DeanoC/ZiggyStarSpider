@@ -2,9 +2,11 @@ const std = @import("std");
 const ws_client_mod = @import("websocket_client.zig");
 const control_plane = @import("control_plane");
 
-const fsrpc_default_timeout_ms: u32 = 15_000;
+const fsrpc_default_timeout_ms: u32 = 30_000;
 const fsrpc_clunk_timeout_ms: u32 = 1_000;
 const control_session_attach_timeout_ms: i64 = 20_000;
+const fsrpc_read_chunk_bytes: u32 = 128 * 1024;
+const fsrpc_read_max_total_bytes: usize = 8 * 1024 * 1024;
 
 pub const RequestKind = enum {
     list_dir,
@@ -170,7 +172,7 @@ pub const FilesystemWorker = struct {
     client: ?ws_client_mod.WebSocketClient = null,
     control_ready: bool = false,
     session_attached: bool = false,
-    fsrpc_ready: bool = false,
+    acheron_ready: bool = false,
     message_counter: u64 = 0,
     next_tag: u32 = 1,
     next_fid: u32 = 2,
@@ -324,13 +326,18 @@ pub const FilesystemWorker = struct {
 
     fn ensureConnected(self: *FilesystemWorker) !*ws_client_mod.WebSocketClient {
         if (self.client == null) {
-            var client = try ws_client_mod.WebSocketClient.init(self.allocator, self.url, self.token);
+            var client = try ws_client_mod.WebSocketClient.initWithMode(
+                self.allocator,
+                self.url,
+                self.token,
+                .direct,
+            );
             errdefer client.deinit();
             try client.connect();
             self.client = client;
             self.control_ready = false;
             self.session_attached = false;
-            self.fsrpc_ready = false;
+            self.acheron_ready = false;
         }
 
         if (self.client) |*client| {
@@ -360,7 +367,7 @@ pub const FilesystemWorker = struct {
         }
         self.control_ready = false;
         self.session_attached = false;
-        self.fsrpc_ready = false;
+        self.acheron_ready = false;
     }
 
     fn clearRemoteError(self: *FilesystemWorker) void {
@@ -435,12 +442,12 @@ pub const FilesystemWorker = struct {
     }
 
     fn ensureFsrpcReady(self: *FilesystemWorker, client: *ws_client_mod.WebSocketClient) !void {
-        if (self.fsrpc_ready) return;
+        if (self.acheron_ready) return;
 
         const version_tag = self.nextTag();
         const version_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"styx-lite-1\"}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"acheron-1\"}}",
             .{version_tag},
         );
         defer self.allocator.free(version_req);
@@ -451,7 +458,7 @@ pub const FilesystemWorker = struct {
         const attach_tag = self.nextTag();
         const attach_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_attach\",\"tag\":{d},\"fid\":1}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_attach\",\"tag\":{d},\"fid\":1}}",
             .{attach_tag},
         );
         defer self.allocator.free(attach_req);
@@ -459,7 +466,7 @@ pub const FilesystemWorker = struct {
         defer attach.deinit(self.allocator);
         try self.ensureFsrpcOk(&attach);
 
-        self.fsrpc_ready = true;
+        self.acheron_ready = true;
     }
 
     fn sendAndAwaitFsrpc(
@@ -484,7 +491,7 @@ pub const FilesystemWorker = struct {
                 if (parsed.value == .object) {
                     const obj = parsed.value.object;
                     if (obj.get("channel")) |channel| {
-                        if (channel == .string and std.mem.eql(u8, channel.string, "fsrpc")) {
+                        if (channel == .string and std.mem.eql(u8, channel.string, "acheron")) {
                             if (obj.get("tag")) |raw_tag| {
                                 if (raw_tag == .integer and raw_tag.integer >= 0 and @as(u32, @intCast(raw_tag.integer)) == tag) {
                                     matched = true;
@@ -617,7 +624,7 @@ pub const FilesystemWorker = struct {
         const tag = self.nextTag();
         const request_json = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
             .{ tag, new_fid, path_json },
         );
         defer self.allocator.free(request_json);
@@ -633,7 +640,7 @@ pub const FilesystemWorker = struct {
         const tag = self.nextTag();
         const request_json = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
             .{ tag, fid, escaped_mode },
         );
         defer self.allocator.free(request_json);
@@ -642,12 +649,18 @@ pub const FilesystemWorker = struct {
         try self.ensureFsrpcOk(&response);
     }
 
-    fn readAllText(self: *FilesystemWorker, client: *ws_client_mod.WebSocketClient, fid: u32) ![]u8 {
+    fn readChunkText(
+        self: *FilesystemWorker,
+        client: *ws_client_mod.WebSocketClient,
+        fid: u32,
+        offset: u64,
+        count: u32,
+    ) ![]u8 {
         const tag = self.nextTag();
         const request_json = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
-            .{ tag, fid },
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":{d},\"count\":{d}}}",
+            .{ tag, fid, offset, count },
         );
         defer self.allocator.free(request_json);
         var response = try self.sendAndAwaitFsrpc(client, request_json, tag, fsrpc_default_timeout_ms);
@@ -667,11 +680,33 @@ pub const FilesystemWorker = struct {
         return decoded;
     }
 
+    fn readAllText(self: *FilesystemWorker, client: *ws_client_mod.WebSocketClient, fid: u32) ![]u8 {
+        var out = std.ArrayListUnmanaged(u8){};
+        errdefer out.deinit(self.allocator);
+
+        var offset: u64 = 0;
+        while (true) {
+            const chunk = try self.readChunkText(client, fid, offset, fsrpc_read_chunk_bytes);
+            defer self.allocator.free(chunk);
+
+            if (chunk.len == 0) break;
+            if (out.items.len + chunk.len > fsrpc_read_max_total_bytes) {
+                return error.ResponseTooLarge;
+            }
+
+            try out.appendSlice(self.allocator, chunk);
+            offset += @as(u64, @intCast(chunk.len));
+            if (chunk.len < @as(usize, fsrpc_read_chunk_bytes)) break;
+        }
+
+        return out.toOwnedSlice(self.allocator);
+    }
+
     fn fidIsDir(self: *FilesystemWorker, client: *ws_client_mod.WebSocketClient, fid: u32) !bool {
         const tag = self.nextTag();
         const request_json = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_stat\",\"tag\":{d},\"fid\":{d}}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_stat\",\"tag\":{d},\"fid\":{d}}}",
             .{ tag, fid },
         );
         defer self.allocator.free(request_json);
@@ -692,7 +727,7 @@ pub const FilesystemWorker = struct {
         const tag = self.nextTag();
         const request_json = std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"fsrpc\",\"type\":\"fsrpc.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
             .{ tag, fid },
         ) catch return;
         defer self.allocator.free(request_json);
@@ -701,6 +736,17 @@ pub const FilesystemWorker = struct {
     }
 
     fn listDirectory(self: *FilesystemWorker, path: []const u8) ![]u8 {
+        return self.listDirectoryOnce(path) catch |err| {
+            if (shouldRetryTransient(err)) {
+                std.log.warn("[FS worker] listDirectory retry after {s} for path {s}", .{ @errorName(err), path });
+                self.disconnectClient();
+                return self.listDirectoryOnce(path);
+            }
+            return err;
+        };
+    }
+
+    fn listDirectoryOnce(self: *FilesystemWorker, path: []const u8) ![]u8 {
         const client = try self.ensureConnected();
         try self.ensureFsrpcReady(client);
         const fid = try self.walkPath(client, path);
@@ -712,6 +758,17 @@ pub const FilesystemWorker = struct {
     }
 
     fn readFileText(self: *FilesystemWorker, path: []const u8) ![]u8 {
+        return self.readFileTextOnce(path) catch |err| {
+            if (shouldRetryTransient(err)) {
+                std.log.warn("[FS worker] readFile retry after {s} for path {s}", .{ @errorName(err), path });
+                self.disconnectClient();
+                return self.readFileTextOnce(path);
+            }
+            return err;
+        };
+    }
+
+    fn readFileTextOnce(self: *FilesystemWorker, path: []const u8) ![]u8 {
         const client = try self.ensureConnected();
         try self.ensureFsrpcReady(client);
         const fid = try self.walkPath(client, path);
@@ -721,6 +778,17 @@ pub const FilesystemWorker = struct {
     }
 
     fn resolvePathIsDir(self: *FilesystemWorker, path: []const u8) !bool {
+        return self.resolvePathIsDirOnce(path) catch |err| {
+            if (shouldRetryTransient(err)) {
+                std.log.warn("[FS worker] resolvePath retry after {s} for path {s}", .{ @errorName(err), path });
+                self.disconnectClient();
+                return self.resolvePathIsDirOnce(path);
+            }
+            return err;
+        };
+    }
+
+    fn resolvePathIsDirOnce(self: *FilesystemWorker, path: []const u8) !bool {
         const client = try self.ensureConnected();
         try self.ensureFsrpcReady(client);
         const fid = try self.walkPath(client, path);
@@ -734,6 +802,10 @@ fn isDisconnectError(err: anyerror) bool {
         err == error.ConnectionClosed or
         err == error.ConnectionResetByPeer or
         err == error.Closed;
+}
+
+fn shouldRetryTransient(err: anyerror) bool {
+    return err == error.Timeout or isDisconnectError(err);
 }
 
 fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {

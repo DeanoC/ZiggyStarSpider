@@ -37,6 +37,8 @@ pub const Config = struct {
     ui_watch_theme_pack: bool = false,
     ui_theme_pack_recent: ?[]const []const u8 = null,
     ui_profile: ?[]const u8 = null,
+    terminal_backend: ?[]const u8 = null,
+    gui_verbose_ws_logs: bool = false,
 
     pub const default_server_url = "ws://127.0.0.1:18790";
 
@@ -105,6 +107,10 @@ pub const Config = struct {
         if (self.ui_profile) |value| {
             self.allocator.free(value);
             self.ui_profile = null;
+        }
+        if (self.terminal_backend) |value| {
+            self.allocator.free(value);
+            self.terminal_backend = null;
         }
     }
 
@@ -284,6 +290,19 @@ pub const Config = struct {
         self.ui_watch_theme_pack = enabled;
     }
 
+    pub fn setTerminalBackend(self: *Config, value: ?[]const u8) !void {
+        const next = if (value) |backend| blk: {
+            if (backend.len == 0) break :blk null;
+            break :blk try self.allocator.dupe(u8, backend);
+        } else null;
+        if (self.terminal_backend) |backend| self.allocator.free(backend);
+        self.terminal_backend = next;
+    }
+
+    pub fn selectedTerminalBackend(self: *const Config) ?[]const u8 {
+        return self.terminal_backend;
+    }
+
     fn duplicateOptionalString(
         allocator: std.mem.Allocator,
         source: ?[]const u8,
@@ -447,6 +466,8 @@ pub const Config = struct {
             .ui_watch_theme_pack = json.ui_watch_theme_pack orelse false,
             .ui_theme_pack_recent = try duplicateOptionalList(allocator, json.ui_theme_pack_recent),
             .ui_profile = try duplicateOptionalString(allocator, json.ui_profile),
+            .terminal_backend = try duplicateOptionalString(allocator, json.terminal_backend),
+            .gui_verbose_ws_logs = json.gui_verbose_ws_logs orelse false,
         };
     }
 
@@ -482,6 +503,8 @@ pub const Config = struct {
             .ui_watch_theme_pack = self.ui_watch_theme_pack,
             .ui_theme_pack_recent = self.ui_theme_pack_recent,
             .ui_profile = self.ui_profile,
+            .terminal_backend = self.terminal_backend,
+            .gui_verbose_ws_logs = self.gui_verbose_ws_logs,
         };
 
         const bytes = try std.json.Stringify.valueAlloc(self.allocator, payload, .{
@@ -515,6 +538,8 @@ const ConfigJson = struct {
     ui_watch_theme_pack: ?bool = null,
     ui_theme_pack_recent: ?[]const []const u8 = null,
     ui_profile: ?[]const u8 = null,
+    terminal_backend: ?[]const u8 = null,
+    gui_verbose_ws_logs: ?bool = null,
 };
 
 fn parseTokenRole(value: ?[]const u8) Config.TokenRole {

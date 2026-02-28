@@ -17,3 +17,34 @@ jobs:
         fi
         grep -q 'ziggy_spider_protocol' build.zig.zon
         grep -q '\.hash =' build.zig.zon
+
+  gui-terminal-smoke:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install GUI smoke dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb wine64 libx11-dev
+
+      - name: Run GUI backend smoke matrix
+        run: |
+          chmod +x scripts/smoke-gui-terminal-backends.sh
+          scripts/smoke-gui-terminal-backends.sh
+
+      - name: Run GUI perf gate
+        env:
+          PERF_GATE_DURATION_MS: 12000
+          PERF_GATE_MIN_FPS: 20
+          PERF_GATE_OPTIMIZE: Debug
+        run: |
+          chmod +x scripts/gui-perf-gate.sh
+          scripts/gui-perf-gate.sh

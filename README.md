@@ -10,11 +10,11 @@ ZiggyStarSpider exposes one project-oriented view of a distributed Spiderweb wor
 - select or create projects
 - activate project workspace mounts
 - inspect nodes and workspace topology
-- browse and read/write the unified filesystem via `fsrpc.*`
+- browse and read/write the unified filesystem via `acheron.*`
 - chat with the agent through FS-RPC chat capabilities
 
 `control.*` is used for out-of-band control API operations.  
-`fsrpc.*` is used for filesystem and capability IO.
+`acheron.*` is used for filesystem and capability IO.
 
 ## Build
 
@@ -35,9 +35,16 @@ zig build
 ```bash
 zig build gui
 zig build run-gui
+# optional backend selection (uses libghostty-vt dynamically when available)
+zig build gui -Dterminal-backend=ghostty-vt
 ```
 
 GUI binary: `zig-out/bin/zss-gui`
+
+Terminal backend notes:
+- build option sets the default (`plain` or `ghostty-vt`)
+- runtime selection is available in **Settings -> Terminal renderer**
+- selection is persisted in config when using **Save Config**
 
 ## CLI Quickstart
 
@@ -62,6 +69,13 @@ ziggystarspider fs read /spiderweb/projects/proj-1/workspace/README.md
 
 # Agent chat via FS-RPC capability path
 ziggystarspider chat send "summarize current mounts"
+
+# Session control
+ziggystarspider session list
+ziggystarspider session history --limit 5
+ziggystarspider session attach review mother --project system
+ziggystarspider session resume review
+ziggystarspider session restore
 ```
 
 Useful options:
@@ -95,9 +109,9 @@ Useful options:
   - `control.node_list`
   - `control.node_get`
 - FS-RPC examples:
-  - `fsrpc.t_version` / `fsrpc.r_version`
-  - `fsrpc.t_attach` / `fsrpc.r_attach`
-  - `fsrpc.t_walk`, `fsrpc.t_open`, `fsrpc.t_read`, `fsrpc.t_write`, `fsrpc.t_stat`, `fsrpc.t_clunk`
+  - `acheron.t_version` / `acheron.r_version`
+  - `acheron.t_attach` / `acheron.r_attach`
+  - `acheron.t_walk`, `acheron.t_open`, `acheron.t_read`, `acheron.t_write`, `acheron.t_stat`, `acheron.t_clunk`
 
 ## Docs
 
@@ -111,6 +125,8 @@ Useful options:
 
 ```bash
 ./scripts/smoke-matrix.sh
+# GUI terminal backend matrix (Linux + Windows/Wine startup)
+./scripts/smoke-gui-terminal-backends.sh
 ```
 
 Environment knobs:
@@ -118,6 +134,7 @@ Environment knobs:
 - `SMOKE_SKIP_BUILD=1`
 - `SMOKE_SKIP_GUI_BUILD=1`
 - `SMOKE_SKIP_CHAT=1`
+- `SMOKE_SKIP_WINDOWS=1` (for `smoke-gui-terminal-backends.sh`)
 
 ## License
 
