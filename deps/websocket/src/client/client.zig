@@ -573,6 +573,13 @@ pub const Stream = struct {
     }
 
     fn setTimeout(self: *const Stream, opt_name: u32, ms: u32) !void {
+        if (builtin.target.os.tag == .windows) {
+            // Winsock SO_RCVTIMEO/SO_SNDTIMEO expect DWORD milliseconds.
+            const timeout_ms = ms;
+            const timeout = std.mem.toBytes(timeout_ms);
+            return self.setsockopt(opt_name, &timeout);
+        }
+
         if (ms == 0) {
             return self.setsockopt(opt_name, &zero_timeout);
         }
@@ -592,38 +599,16 @@ pub const Stream = struct {
 fn readWindows(socket: windows.ws2_32.SOCKET, buf: []u8) !usize {
     if (buf.len == 0) return 0;
 
-    const wsabuf = windows.ws2_32.WSABUF{
-        .len = @intCast(buf.len),
-        .buf = buf.ptr,
-    };
-    const wsabufs = [_]windows.ws2_32.WSABUF{wsabuf};
-    var flags: u32 = 0;
-    var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
-    var n: u32 = 0;
-
-    if (windows.ws2_32.WSARecv(
-        socket,
-        @constCast(wsabufs[0..].ptr),
-        @intCast(wsabufs.len),
-        &n,
-        &flags,
-        &overlapped,
-        null,
-    ) == windows.ws2_32.SOCKET_ERROR) switch (windows.ws2_32.WSAGetLastError()) {
-        .WSAEWOULDBLOCK => return error.WouldBlock,
-        .WSA_IO_PENDING => {
-            var result_flags: u32 = undefined;
-            if (windows.ws2_32.WSAGetOverlappedResult(
-                socket,
-                &overlapped,
-                &n,
-                windows.TRUE,
-                &result_flags,
-            ) == windows.FALSE) try mapRecvError(windows.ws2_32.WSAGetLastError());
-        },
-        else => |err| try mapRecvError(err),
-    };
-
+    // Synchronous recv respects SO_RCVTIMEO and avoids indefinite waits during
+    // shutdown (which can happen with overlapped WSARecv + wait=true).
+    const len: i32 = if (buf.len > std.math.maxInt(i32))
+        std.math.maxInt(i32)
+    else
+        @intCast(buf.len);
+    const n = windows.ws2_32.recv(socket, buf.ptr, len, 0);
+    if (n == windows.ws2_32.SOCKET_ERROR) {
+        try mapRecvError(windows.ws2_32.WSAGetLastError());
+    }
     return @intCast(n);
 }
 
@@ -635,6 +620,9 @@ fn mapRecvError(err: windows.ws2_32.WinsockError) !void {
         .WSAEMSGSIZE => return error.MessageTooBig,
         .WSAENETDOWN => return error.NetworkSubsystemFailed,
         .WSAENOTCONN => return error.SocketNotConnected,
+        .WSAETIMEDOUT => return error.WouldBlock,
+        .WSAESHUTDOWN => return error.Closed,
+        .WSAENOTSOCK => return error.Closed,
         .WSAEWOULDBLOCK => return error.WouldBlock,
         .WSAEFAULT => unreachable,
         .WSAEINPROGRESS, .WSAEINTR => unreachable,

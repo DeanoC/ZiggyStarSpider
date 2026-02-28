@@ -11441,10 +11441,6 @@ const App = struct {
     fn disconnect(self: *App) void {
         self.stopFilesystemWorker();
         if (self.ws_client) |*client| {
-            // Drain any pending messages before disconnecting
-            while (client.tryReceive()) |msg| {
-                self.allocator.free(msg);
-            }
             client.deinit();
             self.ws_client = null;
         }
