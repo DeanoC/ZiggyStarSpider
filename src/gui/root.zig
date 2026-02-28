@@ -170,6 +170,7 @@ const FilesystemActiveRequest = struct {
     kind: fs_worker_mod.RequestKind,
     open_after_resolve: bool = false,
     is_background: bool = false,
+    started_at_ms: i64 = 0,
 };
 
 const JobStatusInfo = struct {
@@ -500,8 +501,10 @@ const PerfSample = struct {
     timestamp_ms: i64,
     fps: f32,
     frame_ms: f32,
-    ws_ms: f32,
-    fs_ms: f32,
+    ws_poll_ms: f32,
+    fs_poll_ms: f32,
+    ws_wait_ms: f32,
+    fs_request_ms: f32,
     debug_ms: f32,
     terminal_ms: f32,
     draw_ms: f32,
@@ -519,12 +522,12 @@ fn perfSampleDrawMsAt(ctx: *const anyopaque, idx: usize) f32 {
 
 fn perfSampleWsMsAt(ctx: *const anyopaque, idx: usize) f32 {
     const samples = (@as(*const []const PerfSample, @ptrCast(@alignCast(ctx)))).*;
-    return samples[idx].ws_ms;
+    return samples[idx].ws_wait_ms;
 }
 
 fn perfSampleFsMsAt(ctx: *const anyopaque, idx: usize) f32 {
     const samples = (@as(*const []const PerfSample, @ptrCast(@alignCast(ctx)))).*;
-    return samples[idx].fs_ms;
+    return samples[idx].fs_request_ms;
 }
 
 const SelectedNodeServiceEventInfo = struct {
@@ -587,6 +590,7 @@ const App = struct {
     pending_send_correlation_id: ?[]u8 = null,
     pending_send_resume_notified: bool = false,
     pending_send_last_resume_attempt_ms: i64 = 0,
+    pending_send_started_at_ms: i64 = 0,
     awaiting_reply: bool = false,
     debug_stream_enabled: bool = true,
     debug_stream_snapshot_pending: bool = false,
@@ -651,6 +655,7 @@ const App = struct {
     filesystem_busy: bool = false,
     filesystem_next_request_id: u64 = 1,
     filesystem_active_request: ?FilesystemActiveRequest = null,
+    filesystem_last_request_duration_ms: f32 = 0.0,
     filesystem_dir_cache: std.StringHashMapUnmanaged(FilesystemDirCacheEntry) = .{},
     fsrpc_last_remote_error: ?[]u8 = null,
     contract_services: std.ArrayListUnmanaged(ContractServiceEntry) = .{},
@@ -708,6 +713,8 @@ const App = struct {
     perf_last_frame_ms: f32 = 0,
     perf_last_ws_ms: f32 = 0,
     perf_last_fs_ms: f32 = 0,
+    perf_last_ws_wait_ms: f32 = 0,
+    perf_last_fs_request_ms: f32 = 0,
     perf_last_debug_ms: f32 = 0,
     perf_last_terminal_ms: f32 = 0,
     perf_last_draw_ms: f32 = 0,
@@ -2836,6 +2843,14 @@ const App = struct {
         self.perf_last_frame_ms = nsToMs(self.perf_sample_total_frame_ns) / frames;
         self.perf_last_ws_ms = nsToMs(self.perf_sample_total_ws_ns) / frames;
         self.perf_last_fs_ms = nsToMs(self.perf_sample_total_fs_ns) / frames;
+        self.perf_last_ws_wait_ms = if (self.awaiting_reply and self.pending_send_started_at_ms > 0)
+            @as(f32, @floatFromInt(@max(0, now_ms - self.pending_send_started_at_ms)))
+        else
+            0.0;
+        self.perf_last_fs_request_ms = if (self.filesystem_active_request) |active|
+            @as(f32, @floatFromInt(@max(0, now_ms - active.started_at_ms)))
+        else
+            self.filesystem_last_request_duration_ms;
         self.perf_last_debug_ms = nsToMs(self.perf_sample_total_debug_ns) / frames;
         self.perf_last_terminal_ms = nsToMs(self.perf_sample_total_terminal_ns) / frames;
         self.perf_last_draw_ms = nsToMs(self.perf_sample_total_draw_ns) / frames;
@@ -2843,8 +2858,10 @@ const App = struct {
             .timestamp_ms = now_ms,
             .fps = self.perf_last_fps,
             .frame_ms = self.perf_last_frame_ms,
-            .ws_ms = self.perf_last_ws_ms,
-            .fs_ms = self.perf_last_fs_ms,
+            .ws_poll_ms = self.perf_last_ws_ms,
+            .fs_poll_ms = self.perf_last_fs_ms,
+            .ws_wait_ms = self.perf_last_ws_wait_ms,
+            .fs_request_ms = self.perf_last_fs_request_ms,
             .debug_ms = self.perf_last_debug_ms,
             .terminal_ms = self.perf_last_terminal_ms,
             .draw_ms = self.perf_last_draw_ms,
@@ -3062,9 +3079,14 @@ const App = struct {
     fn handleFilesystemWorkerResult(self: *App, result: *const fs_worker_mod.Result) void {
         const active = self.filesystem_active_request orelse return;
         if (active.id != result.id) return;
+        const request_finished_ms = std.time.milliTimestamp();
+        const request_duration_ms: f32 = @as(f32, @floatFromInt(@max(0, request_finished_ms - active.started_at_ms)));
 
         self.filesystem_active_request = null;
         if (!active.is_background) self.filesystem_busy = false;
+        if (!active.is_background) {
+            self.filesystem_last_request_duration_ms = request_duration_ms;
+        }
 
         const is_debug_stream_result = std.mem.eql(u8, result.path, DEBUG_STREAM_PATH);
         if (is_debug_stream_result) {
@@ -3631,6 +3653,7 @@ const App = struct {
             .kind = kind,
             .open_after_resolve = open_after_resolve,
             .is_background = is_background,
+            .started_at_ms = std.time.milliTimestamp(),
         };
         if (!is_background) self.filesystem_busy = true;
     }
@@ -7794,17 +7817,20 @@ const App = struct {
         y += line_height;
 
         var perf_buf: [224]u8 = undefined;
+        const perf_other_ms = @max(
+            0.0,
+            self.perf_last_frame_ms - (self.perf_last_draw_ms + self.perf_last_ws_ms + self.perf_last_fs_ms + self.perf_last_debug_ms + self.perf_last_terminal_ms),
+        );
         const perf_line = std.fmt.bufPrint(
             &perf_buf,
-            "Perf: {d:.1} fps | frame {d:.2} ms | draw {d:.2} | ws {d:.2} | fs {d:.2} | dbg {d:.2} | tty {d:.2}",
+            "Perf: {d:.1} fps | frame {d:.2} ms | draw {d:.2} | other {d:.2} | ws-wait {d:.1} | fs-req {d:.1}",
             .{
                 self.perf_last_fps,
                 self.perf_last_frame_ms,
                 self.perf_last_draw_ms,
-                self.perf_last_ws_ms,
-                self.perf_last_fs_ms,
-                self.perf_last_debug_ms,
-                self.perf_last_terminal_ms,
+                perf_other_ms,
+                self.perf_last_ws_wait_ms,
+                self.perf_last_fs_request_ms,
             },
         ) catch "Perf: collecting...";
         self.drawTextTrimmed(
@@ -7816,17 +7842,19 @@ const App = struct {
         );
         y += line_height;
 
-        var perf_meta_buf: [128]u8 = undefined;
+        var perf_meta_buf: [196]u8 = undefined;
         const perf_span_ms: i64 = if (self.perf_history.items.len >= 2)
             self.perf_history.items[self.perf_history.items.len - 1].timestamp_ms - self.perf_history.items[0].timestamp_ms
         else
             0;
         const perf_meta = std.fmt.bufPrint(
             &perf_meta_buf,
-            "Perf history: {d} samples ({d:.1}s)",
+            "Perf history: {d} samples ({d:.1}s) | ws-poll {d:.3} | fs-poll {d:.3}",
             .{
                 self.perf_history.items.len,
                 @as(f32, @floatFromInt(@max(perf_span_ms, 0))) / 1000.0,
+                self.perf_last_ws_ms,
+                self.perf_last_fs_ms,
             },
         ) catch "Perf history: unavailable";
         self.drawTextTrimmed(
@@ -8040,8 +8068,15 @@ const App = struct {
         };
         var spark_ctx = spark_samples;
         const spark_gap = @max(6.0 * self.ui_scale, layout.inner_inset * 0.8);
-        const spark_card_w = @max(90.0 * self.ui_scale, (content_width - spark_gap * 3.0) / 4.0);
         const spark_h = @max(52.0 * self.ui_scale, row_height * 1.9);
+        const spark_min_card_w = @max(150.0 * self.ui_scale, 90.0);
+        const spark_chart_count: usize = 4;
+        const spark_cols_float = @floor((content_width + spark_gap) / (spark_min_card_w + spark_gap));
+        const spark_cols = std.math.clamp(@as(usize, @intFromFloat(@max(1.0, spark_cols_float))), 1, spark_chart_count);
+        const spark_rows = @divTrunc(spark_chart_count + spark_cols - 1, spark_cols);
+        const spark_card_w = @max(72.0 * self.ui_scale, (content_width - spark_gap * @as(f32, @floatFromInt(spark_cols - 1))) / @as(f32, @floatFromInt(spark_cols)));
+        const spark_label_h = line_height;
+        const spark_row_h = spark_label_h + spark_h + layout.row_gap * 0.35;
         self.drawTextTrimmed(
             rect.min[0] + pad,
             y,
@@ -8050,16 +8085,32 @@ const App = struct {
             self.theme.colors.text_secondary,
         );
         y += line_height;
+        var spark_frame_rect = Rect.fromXYWH(0, 0, 0, 0);
+        var spark_draw_rect = Rect.fromXYWH(0, 0, 0, 0);
+        var spark_ws_rect = Rect.fromXYWH(0, 0, 0, 0);
+        var spark_fs_rect = Rect.fromXYWH(0, 0, 0, 0);
 
-        const spark_frame_rect = Rect.fromXYWH(rect.min[0] + pad, y, spark_card_w, spark_h);
-        const spark_draw_rect = Rect.fromXYWH(spark_frame_rect.max[0] + spark_gap, y, spark_card_w, spark_h);
-        const spark_ws_rect = Rect.fromXYWH(spark_draw_rect.max[0] + spark_gap, y, spark_card_w, spark_h);
-        const spark_fs_rect = Rect.fromXYWH(spark_ws_rect.max[0] + spark_gap, y, spark_card_w, spark_h);
-
-        self.drawTextTrimmed(spark_frame_rect.min[0], spark_frame_rect.min[1] - line_height, spark_card_w, "Frame ms", self.theme.colors.text_secondary);
-        self.drawTextTrimmed(spark_draw_rect.min[0], spark_draw_rect.min[1] - line_height, spark_card_w, "Draw ms", self.theme.colors.text_secondary);
-        self.drawTextTrimmed(spark_ws_rect.min[0], spark_ws_rect.min[1] - line_height, spark_card_w, "WS ms", self.theme.colors.text_secondary);
-        self.drawTextTrimmed(spark_fs_rect.min[0], spark_fs_rect.min[1] - line_height, spark_card_w, "FS ms", self.theme.colors.text_secondary);
+        inline for ([_][]const u8{ "Frame ms", "Draw ms", "WS wait ms", "FS req ms" }, 0..) |label, idx| {
+            const row = @divTrunc(idx, spark_cols);
+            const col = idx % spark_cols;
+            const row_y = y + @as(f32, @floatFromInt(row)) * spark_row_h;
+            const x = rect.min[0] + pad + @as(f32, @floatFromInt(col)) * (spark_card_w + spark_gap);
+            const chart_rect = Rect.fromXYWH(x, row_y + spark_label_h, spark_card_w, spark_h);
+            switch (idx) {
+                0 => spark_frame_rect = chart_rect,
+                1 => spark_draw_rect = chart_rect,
+                2 => spark_ws_rect = chart_rect,
+                3 => spark_fs_rect = chart_rect,
+                else => {},
+            }
+            self.drawTextCenteredTrimmed(
+                x + spark_card_w * 0.5,
+                row_y,
+                spark_card_w - @max(8.0 * self.ui_scale, 4.0),
+                label,
+                self.theme.colors.text_secondary,
+            );
+        }
 
         widgets.sparkline.draw(
             &self.ui_commands,
@@ -8105,7 +8156,7 @@ const App = struct {
                 .border_color = self.theme.colors.border,
             },
         );
-        y += spark_h + layout.row_gap * 0.55;
+        y += @as(f32, @floatFromInt(spark_rows)) * spark_row_h + layout.row_gap * 0.2;
 
         const node_watch_status = if (self.node_service_watch_enabled)
             "Node service events: watching"
@@ -9545,15 +9596,21 @@ const App = struct {
                 .timestamp_ms = std.time.milliTimestamp(),
                 .fps = self.perf_last_fps,
                 .frame_ms = self.perf_last_frame_ms,
-                .ws_ms = self.perf_last_ws_ms,
-                .fs_ms = self.perf_last_fs_ms,
+                .ws_poll_ms = self.perf_last_ws_ms,
+                .fs_poll_ms = self.perf_last_fs_ms,
+                .ws_wait_ms = self.perf_last_ws_wait_ms,
+                .fs_request_ms = self.perf_last_fs_request_ms,
                 .debug_ms = self.perf_last_debug_ms,
                 .terminal_ms = self.perf_last_terminal_ms,
                 .draw_ms = self.perf_last_draw_ms,
             };
+        const latest_other_ms = @max(
+            0.0,
+            latest.frame_ms - (latest.draw_ms + latest.ws_poll_ms + latest.fs_poll_ms + latest.debug_ms + latest.terminal_ms),
+        );
 
         try out.writer(self.allocator).print(
-            "{s}\ncaptured_at_ms={d}\nsamples={d}\nlatest_fps={d:.2}\nlatest_frame_ms={d:.3}\nlatest_draw_ms={d:.3}\nlatest_ws_ms={d:.3}\nlatest_fs_ms={d:.3}\nlatest_debug_ms={d:.3}\nlatest_terminal_ms={d:.3}\n",
+            "{s}\ncaptured_at_ms={d}\nsamples={d}\nlatest_fps={d:.2}\nlatest_frame_ms={d:.3}\nlatest_draw_ms={d:.3}\nlatest_other_ms={d:.3}\nlatest_ws_poll_ms={d:.3}\nlatest_fs_poll_ms={d:.3}\nlatest_ws_wait_ms={d:.3}\nlatest_fs_request_ms={d:.3}\nlatest_debug_ms={d:.3}\nlatest_terminal_ms={d:.3}\n",
             .{
                 report_name,
                 std.time.milliTimestamp(),
@@ -9561,8 +9618,11 @@ const App = struct {
                 latest.fps,
                 latest.frame_ms,
                 latest.draw_ms,
-                latest.ws_ms,
-                latest.fs_ms,
+                latest_other_ms,
+                latest.ws_poll_ms,
+                latest.fs_poll_ms,
+                latest.ws_wait_ms,
+                latest.fs_request_ms,
                 latest.debug_ms,
                 latest.terminal_ms,
             },
@@ -9580,17 +9640,24 @@ const App = struct {
             );
         }
 
-        try out.appendSlice(self.allocator, "\n# sample_table\ntimestamp_ms,fps,frame_ms,draw_ms,ws_ms,fs_ms,debug_ms,terminal_ms\n");
+        try out.appendSlice(self.allocator, "\n# sample_table\ntimestamp_ms,fps,frame_ms,draw_ms,other_ms,ws_poll_ms,fs_poll_ms,ws_wait_ms,fs_request_ms,debug_ms,terminal_ms\n");
         for (samples) |sample| {
+            const other_ms = @max(
+                0.0,
+                sample.frame_ms - (sample.draw_ms + sample.ws_poll_ms + sample.fs_poll_ms + sample.debug_ms + sample.terminal_ms),
+            );
             try out.writer(self.allocator).print(
-                "{d},{d:.3},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4}\n",
+                "{d},{d:.3},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4}\n",
                 .{
                     sample.timestamp_ms,
                     sample.fps,
                     sample.frame_ms,
                     sample.draw_ms,
-                    sample.ws_ms,
-                    sample.fs_ms,
+                    other_ms,
+                    sample.ws_poll_ms,
+                    sample.fs_poll_ms,
+                    sample.ws_wait_ms,
+                    sample.fs_request_ms,
                     sample.debug_ms,
                     sample.terminal_ms,
                 },
@@ -11759,6 +11826,7 @@ const App = struct {
         self.pending_send_session_key = try allocator.dupe(u8, session_key);
         self.pending_send_resume_notified = false;
         self.pending_send_last_resume_attempt_ms = 0;
+        self.pending_send_started_at_ms = std.time.milliTimestamp();
     }
 
     fn clearPendingSend(self: *App) void {
@@ -11791,6 +11859,7 @@ const App = struct {
         }
         self.pending_send_resume_notified = false;
         self.pending_send_last_resume_attempt_ms = 0;
+        self.pending_send_started_at_ms = 0;
         self.awaiting_reply = false;
     }
 
@@ -13518,6 +13587,16 @@ const App = struct {
 
     fn measureText(self: *App, text: []const u8) f32 {
         return self.metrics_context.measureText(text, 0.0)[0];
+    }
+
+    fn drawTextCenteredTrimmed(self: *App, center_x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
+        if (max_w <= 0.0) return;
+        const measured = self.measureText(text);
+        if (measured <= max_w) {
+            self.drawText(center_x - measured * 0.5, y, text, color);
+            return;
+        }
+        self.drawTextTrimmed(center_x - max_w * 0.5, y, max_w, text, color);
     }
 
     fn drawTextTrimmed(self: *App, x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
