@@ -1535,13 +1535,24 @@ const App = struct {
                     try self.handleTextInput(txt.text);
                 },
                 .mouse_wheel => |mw| {
-                    if (self.debug_panel_id) |panel_id| {
-                        if (self.isPanelFocused(manager, panel_id)) {
-                            self.debug_scroll_y -= mw.delta[1] * 40.0 * self.ui_scale;
+                    const mouse_pos = .{ self.mouse_x, self.mouse_y };
+                    var handled_debug_scroll = self.debug_output_rect.contains(mouse_pos);
+                    if (!handled_debug_scroll) {
+                        if (self.debug_panel_id) |panel_id| {
+                            handled_debug_scroll = self.isPanelFocused(manager, panel_id);
                         }
                     }
-                    if (self.focusedFormScrollY(manager)) |scroll_y| {
-                        scroll_y.* -= mw.delta[1] * 40.0 * self.ui_scale;
+                    if (handled_debug_scroll) {
+                        self.debug_scroll_y -= mw.delta[1] * 40.0 * self.ui_scale;
+                        if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
+                        if (self.debug_panel_id) |panel_id| {
+                            manager.focusPanel(panel_id);
+                        }
+                    }
+                    if (!handled_debug_scroll) {
+                        if (self.focusedFormScrollY(manager)) |scroll_y| {
+                            scroll_y.* -= mw.delta[1] * 40.0 * self.ui_scale;
+                        }
                     }
                 },
                 else => {},
@@ -8987,6 +8998,11 @@ const App = struct {
             @max(120.0, rect.max[1] - y - pad),
         );
         self.debug_output_rect = output_rect;
+        if (self.mouse_clicked and output_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            if (self.debug_panel_id) |panel_id| {
+                manager.focusPanel(panel_id);
+            }
+        }
         self.drawSurfacePanel(output_rect);
 
         const usable_height = @max(0.0, output_rect.height() - inner * 2.0);
@@ -9191,6 +9207,15 @@ const App = struct {
                 self.debug_scrollbar_dragging = true;
                 self.debug_scrollbar_drag_start_y = self.mouse_y;
                 self.debug_scrollbar_drag_start_scroll_y = self.debug_scroll_y;
+            } else if (self.mouse_clicked and sb_track_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+                const page_scroll = @max(line_height * 3.0, output_rect.height() * 0.9);
+                if (self.mouse_y < thumb_rect.min[1]) {
+                    self.debug_scroll_y -= page_scroll;
+                } else if (self.mouse_y > thumb_rect.max[1]) {
+                    self.debug_scroll_y += page_scroll;
+                }
+                if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
+                if (self.debug_scroll_y > max_scroll) self.debug_scroll_y = max_scroll;
             }
 
             if (self.debug_scrollbar_dragging) {
