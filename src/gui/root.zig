@@ -69,6 +69,7 @@ const DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 const DEBUG_SYNTAX_COLOR_MAX_LINE_BYTES: usize = 768;
 const PERF_SAMPLE_INTERVAL_MS: i64 = 1_000;
 const PERF_HISTORY_CAPACITY: usize = 600;
+const PERF_SPARKLINE_MAX_COLUMNS: usize = 24;
 const TERMINAL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TERMINAL_READ_POLL_INTERVAL_MS: i64 = 120;
 const TERMINAL_READ_TIMEOUT_MS: u32 = 1;
@@ -5745,24 +5746,22 @@ const App = struct {
         );
         if (self.projects.items.len == 0) self.project_selector_open = false;
 
-        var selected_project_label_buf: ?[]u8 = null;
-        defer if (selected_project_label_buf) |value| self.allocator.free(value);
+        var selected_project_label_buf: [512]u8 = undefined;
         const selected_project_label: []const u8 = blk: {
             if (self.settings_panel.project_id.items.len == 0) break :blk "Select project";
             const selected_id = self.settings_panel.project_id.items;
             for (self.projects.items) |project| {
                 if (std.mem.eql(u8, project.id, selected_id)) {
-                    selected_project_label_buf = std.fmt.allocPrint(
-                        self.allocator,
+                    const formatted = std.fmt.bufPrint(
+                        &selected_project_label_buf,
                         "{s} ({s}) [{s}]",
                         .{
                             project.name,
                             project.id,
                             if (project.token_locked) "locked" else "open",
                         },
-                    ) catch null;
-                    if (selected_project_label_buf) |label| break :blk label;
-                    break :blk selected_id;
+                    ) catch selected_id;
+                    break :blk formatted;
                 }
             }
             break :blk selected_id;
@@ -6205,13 +6204,13 @@ const App = struct {
             if (locked) " [locked]" else " [open]"
         else
             "";
-        const selected_project_line = std.fmt.allocPrint(
-            self.allocator,
+        var selected_project_line_buf: [384]u8 = undefined;
+        const selected_project_line = std.fmt.bufPrint(
+            &selected_project_line_buf,
             "Selected project: {s}{s}",
             .{ selected_project_text, selected_project_lock_suffix },
         ) catch null;
         if (selected_project_line) |line| {
-            defer self.allocator.free(line);
             self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
             y += layout.line_height;
         }
@@ -6222,20 +6221,21 @@ const App = struct {
                 status.actual_mounts.items.len
             else
                 status.mounts.items.len;
-            const workspace_line = std.fmt.allocPrint(
-                self.allocator,
+            var workspace_line_buf: [384]u8 = undefined;
+            const workspace_line = std.fmt.bufPrint(
+                &workspace_line_buf,
                 "Workspace root: {s} | mounts: {d}",
                 .{ root_text, mounted_count },
             ) catch null;
             if (workspace_line) |line| {
-                defer self.allocator.free(line);
                 self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
                 y += layout.line_height;
             }
 
             const health_state = workspaceHealthState(status);
-            const availability_line = std.fmt.allocPrint(
-                self.allocator,
+            var availability_line_buf: [512]u8 = undefined;
+            const availability_line = std.fmt.bufPrint(
+                &availability_line_buf,
                 "Workspace health: {s} | online={d}/{d} degraded={d} missing={d} drift={d}",
                 .{
                     workspaceHealthStateLabel(health_state),
@@ -6247,7 +6247,6 @@ const App = struct {
                 },
             ) catch null;
             if (availability_line) |line| {
-                defer self.allocator.free(line);
                 self.drawLabel(
                     rect.min[0] + pad,
                     y,
@@ -6263,13 +6262,13 @@ const App = struct {
             }
         }
 
-        const projects_line = std.fmt.allocPrint(
-            self.allocator,
+        var projects_line_buf: [256]u8 = undefined;
+        const projects_line = std.fmt.bufPrint(
+            &projects_line_buf,
             "Projects: {d} | Nodes: {d}",
             .{ self.projects.items.len, self.nodes.items.len },
         ) catch null;
         if (projects_line) |line| {
-            defer self.allocator.free(line);
             self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
             y += layout.line_height;
         }
@@ -6306,8 +6305,9 @@ const App = struct {
                     break;
                 }
                 const project = self.projects.items[idx];
-                const line = std.fmt.allocPrint(
-                    self.allocator,
+                var line_buf: [512]u8 = undefined;
+                const line = std.fmt.bufPrint(
+                    &line_buf,
                     "{s} [{s}] access={s} mounts={d}",
                     .{
                         project.id,
@@ -6317,7 +6317,6 @@ const App = struct {
                     },
                 ) catch null;
                 if (line) |value| {
-                    defer self.allocator.free(value);
                     const button_w = @max(90.0 * self.ui_scale, rect_width * 0.17);
                     const text_max_w = @max(120.0, rect_width - (pad * 2.0) - button_w - pad);
                     const text_y = y + @max(0.0, (row_h - layout.line_height) * 0.5);
@@ -6364,13 +6363,13 @@ const App = struct {
             while (idx < max_nodes) : (idx += 1) {
                 const node = self.nodes.items[idx];
                 const node_online = node.lease_expires_at_ms > now_ms;
-                const line = std.fmt.allocPrint(
-                    self.allocator,
+                var line_buf: [384]u8 = undefined;
+                const line = std.fmt.bufPrint(
+                    &line_buf,
                     "  - {s} ({s}) [{s}]",
                     .{ node.node_id, node.node_name, if (node_online) "online" else "degraded" },
                 ) catch null;
                 if (line) |value| {
-                    defer self.allocator.free(value);
                     self.drawLabel(
                         rect.min[0] + pad,
                         y,
@@ -8353,7 +8352,7 @@ const App = struct {
                 .fill_color = zcolors.withAlpha(zcolors.rgba(92, 173, 255, 255), 0.28),
                 .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
                 .border_color = self.theme.colors.border,
-                .max_columns = 96,
+                .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
             },
         );
         widgets.sparkline.draw(
@@ -8365,7 +8364,7 @@ const App = struct {
                 .fill_color = zcolors.withAlpha(zcolors.rgba(255, 170, 72, 255), 0.28),
                 .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
                 .border_color = self.theme.colors.border,
-                .max_columns = 96,
+                .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
             },
         );
         widgets.sparkline.draw(
@@ -8377,7 +8376,7 @@ const App = struct {
                 .fill_color = zcolors.withAlpha(zcolors.rgba(175, 122, 255, 255), 0.28),
                 .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
                 .border_color = self.theme.colors.border,
-                .max_columns = 96,
+                .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
             },
         );
         widgets.sparkline.draw(
@@ -8389,7 +8388,7 @@ const App = struct {
                 .fill_color = zcolors.withAlpha(zcolors.rgba(98, 205, 128, 255), 0.28),
                 .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
                 .border_color = self.theme.colors.border,
-                .max_columns = 96,
+                .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
             },
         );
         y += @as(f32, @floatFromInt(spark_rows)) * spark_row_h + layout.row_gap * 0.2;
