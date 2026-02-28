@@ -1262,6 +1262,8 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
 
     var restored = try control_plane.sessionRestore(
         allocator,
@@ -1276,6 +1278,12 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
         return;
     }
     const session = restored.session.?;
+    const project_token = if (options.project_token) |token|
+        token
+    else if (session.project_id) |project_id|
+        cfg.getProjectToken(project_id)
+    else
+        null;
     try stdout.print(
         "Restoring session {s} (agent={s}, project={s})\n",
         .{ session.session_key, session.agent_id, session.project_id orelse "(none)" },
@@ -1288,7 +1296,7 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
         session.session_key,
         session.agent_id,
         session.project_id,
-        options.project_token,
+        project_token,
     );
     defer status.deinit(allocator);
     try printSessionAttachStatus(stdout, &status);
