@@ -8064,7 +8064,7 @@ const App = struct {
         widgets.sparkline.draw(
             &self.ui_commands,
             spark_frame_rect,
-            .{ .ctx = &spark_ctx, .count = spark_samples.len, .at = &perfSampleFrameMsAt },
+            .{ .ctx = @as(*const anyopaque, @ptrCast(&spark_ctx)), .count = spark_samples.len, .at = &perfSampleFrameMsAt },
             .{
                 .stroke_color = zcolors.rgba(92, 173, 255, 255),
                 .fill_color = zcolors.withAlpha(zcolors.rgba(92, 173, 255, 255), 0.28),
@@ -8075,7 +8075,7 @@ const App = struct {
         widgets.sparkline.draw(
             &self.ui_commands,
             spark_draw_rect,
-            .{ .ctx = &spark_ctx, .count = spark_samples.len, .at = &perfSampleDrawMsAt },
+            .{ .ctx = @as(*const anyopaque, @ptrCast(&spark_ctx)), .count = spark_samples.len, .at = &perfSampleDrawMsAt },
             .{
                 .stroke_color = zcolors.rgba(255, 170, 72, 255),
                 .fill_color = zcolors.withAlpha(zcolors.rgba(255, 170, 72, 255), 0.28),
@@ -8086,7 +8086,7 @@ const App = struct {
         widgets.sparkline.draw(
             &self.ui_commands,
             spark_ws_rect,
-            .{ .ctx = &spark_ctx, .count = spark_samples.len, .at = &perfSampleWsMsAt },
+            .{ .ctx = @as(*const anyopaque, @ptrCast(&spark_ctx)), .count = spark_samples.len, .at = &perfSampleWsMsAt },
             .{
                 .stroke_color = zcolors.rgba(175, 122, 255, 255),
                 .fill_color = zcolors.withAlpha(zcolors.rgba(175, 122, 255, 255), 0.28),
@@ -8097,7 +8097,7 @@ const App = struct {
         widgets.sparkline.draw(
             &self.ui_commands,
             spark_fs_rect,
-            .{ .ctx = &spark_ctx, .count = spark_samples.len, .at = &perfSampleFsMsAt },
+            .{ .ctx = @as(*const anyopaque, @ptrCast(&spark_ctx)), .count = spark_samples.len, .at = &perfSampleFsMsAt },
             .{
                 .stroke_color = zcolors.rgba(98, 205, 128, 255),
                 .fill_color = zcolors.withAlpha(zcolors.rgba(98, 205, 128, 255), 0.28),
@@ -8684,8 +8684,7 @@ const App = struct {
                 const row_start = @as(usize, @intCast(entry.payload_visible_line_row_starts.items[visible_idx]));
                 if (row_start >= max_row_exclusive) break;
 
-                const rows_used = payloadLineRowsFromCache(entry, payload_line_idx);
-                const line_h = line_height * @as(f32, @floatFromInt(rows_used));
+                _ = payloadLineRowsFromCache(entry, payload_line_idx);
                 const line_y = body_top_y + @as(f32, @floatFromInt(row_start)) * line_height;
                 if (line_y > output_rect.max[1]) break;
 
@@ -9634,13 +9633,13 @@ const App = struct {
         var end_idx: usize = start_idx;
         while (end_idx < self.perf_history.items.len and self.perf_history.items[end_idx].timestamp_ms <= end_ms) : (end_idx += 1) {}
 
-        return self.buildPerfReportTextForSlice(
+        return @as(?[]u8, try self.buildPerfReportTextForSlice(
             "zss_gui_perf_benchmark_report",
             label,
             start_ms,
             end_ms,
             self.perf_history.items[start_idx..end_idx],
-        );
+        ));
     }
 
     fn exportPerfReport(self: *App, report_text: []const u8) ![]u8 {
