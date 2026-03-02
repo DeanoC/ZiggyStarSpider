@@ -625,9 +625,9 @@ fn mapRecvError(err: windows.ws2_32.WinsockError) !void {
         .WSAENOTSOCK => return error.Closed,
         .WSAEWOULDBLOCK => return error.WouldBlock,
         .WSAEFAULT => unreachable,
-        .WSAEINPROGRESS, .WSAEINTR => unreachable,
+        .WSAEINPROGRESS, .WSAEINTR => return error.WouldBlock,
         .WSANOTINITIALISED => unreachable,
-        .WSA_IO_PENDING => unreachable,
+        .WSA_IO_PENDING => return error.WouldBlock,
         .WSA_OPERATION_ABORTED => return error.Closed,
         else => |winsock_err| return windows.unexpectedWSAError(winsock_err),
     }
