@@ -11062,7 +11062,7 @@ const App = struct {
         try self.settings_panel.default_session.appendSlice(self.allocator, session.session_key);
         try self.setDefaultAgentInSettings(session.agent_id);
 
-        var effective_project_id = session.project_id;
+        var effective_project_id: ?[]const u8 = session.project_id;
         var effective_project_token = self.projectTokenForSessionProject(effective_project_id);
         var restore_warning: ?[]u8 = null;
         defer if (restore_warning) |value| self.allocator.free(value);
