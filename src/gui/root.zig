@@ -12236,14 +12236,30 @@ const App = struct {
 
         const encoded = try encodeDataB64(self.allocator, text);
         defer self.allocator.free(encoded);
+        const write_request_id = try self.nextMessageId("job");
+        defer self.allocator.free(write_request_id);
+        const escaped_write_request_id = try jsonEscape(self.allocator, write_request_id);
+        defer self.allocator.free(escaped_write_request_id);
         const write_tag = self.nextFsrpcTag();
         const write_req = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
-            .{ write_tag, input_fid, encoded },
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"id\":\"{s}\",\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+            .{ write_tag, escaped_write_request_id, input_fid, encoded },
         );
         defer self.allocator.free(write_req);
-        var write = try self.sendAndAwaitFsrpc(client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS);
+        var write = self.sendAndAwaitFsrpc(client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS) catch |err| {
+            if (err == error.Timeout) {
+                const recovered_job = try self.tryRecoverJobIdByCorrelation(client, write_request_id);
+                if (recovered_job) |job_id| {
+                    std.log.warn(
+                        "[GUI] recovered job after t_write timeout via correlation_id {s}: {s}",
+                        .{ write_request_id, job_id },
+                    );
+                    return job_id;
+                }
+            }
+            return err;
+        };
         defer write.deinit(self.allocator);
         try self.ensureFsrpcOk(&write);
 
@@ -12251,6 +12267,36 @@ const App = struct {
         const job_value = write_payload.get("job") orelse return error.InvalidResponse;
         if (job_value != .string) return error.InvalidResponse;
         return self.allocator.dupe(u8, job_value.string);
+    }
+
+    fn tryRecoverJobIdByCorrelation(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        correlation_id: []const u8,
+    ) !?[]u8 {
+        const jobs_listing = self.readFsPathTextGui(client, "/agents/self/jobs") catch return null;
+        defer self.allocator.free(jobs_listing);
+
+        var lines = std.mem.splitScalar(u8, jobs_listing, '\n');
+        while (lines.next()) |raw_job_id| {
+            const job_id = std.mem.trim(u8, raw_job_id, " \t\r\n");
+            if (job_id.len == 0) continue;
+
+            const status_path = try std.fmt.allocPrint(self.allocator, "/agents/self/jobs/{s}/status.json", .{job_id});
+            defer self.allocator.free(status_path);
+            const status_json = self.readFsPathTextGui(client, status_path) catch continue;
+            defer self.allocator.free(status_json);
+
+            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, status_json, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value != .object) continue;
+            const corr_val = parsed.value.object.get("correlation_id") orelse continue;
+            if (corr_val != .string) continue;
+            if (std.mem.eql(u8, corr_val.string, correlation_id)) {
+                return self.allocator.dupe(u8, job_id);
+            }
+        }
+        return null;
     }
 
     fn splitFsPathSegments(self: *App, path: []const u8) !std.ArrayListUnmanaged([]u8) {
