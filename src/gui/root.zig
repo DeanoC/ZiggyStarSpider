@@ -11074,7 +11074,7 @@ const App = struct {
 
         var effective_project_id: ?[]const u8 = session.project_id;
         if (effective_project_id == null) {
-            effective_project_id = self.defaultAttachProjectId();
+            effective_project_id = self.preferredAttachProjectId();
         }
         var effective_project_token = self.projectTokenForSessionProject(effective_project_id);
         var restore_warning: ?[]u8 = null;
@@ -11873,6 +11873,9 @@ const App = struct {
             try self.appendMessage("system", "No active session available", null);
             return;
         }
+        var attach_project_id = self.preferredAttachProjectId();
+        var attach_project_token = self.projectTokenForSessionProject(attach_project_id);
+        var attached_during_send = false;
         if (self.session_attach_state == .unknown or self.session_attach_state == .err) {
             self.attachSessionBinding(client, session_key) catch |err| {
                 if (err == error.ProjectIdRequired) {
@@ -11931,6 +11934,8 @@ const App = struct {
                         try self.appendMessage("system", err_text, null);
                         return fallback_err;
                     };
+                    attach_project_id = fallback_project_id;
+                    attach_project_token = fallback_project_token;
 
                     const warning = if (selected_project_invalid) blk: {
                         break :blk "Selected project is not available for this session; using default project for this message.";
@@ -11946,6 +11951,7 @@ const App = struct {
                     return err;
                 }
             };
+            attached_during_send = true;
             self.refreshSessionAttachStatusOnce(client, session_key);
         } else if (self.session_attach_state == .warming) {
             // Avoid re-attaching while warmup is in-flight; that re-arms backend warmup and can
@@ -11960,6 +11966,38 @@ const App = struct {
             const detail = self.workspace_last_error orelse "Sandbox runtime is unavailable for this session.";
             try self.appendMessage("system", detail, null);
             return error.RemoteError;
+        }
+
+        if (attached_during_send and self.filesystem_worker == null and attach_project_id != null) {
+            var late_worker_agent = self.selectedAgentId();
+            var fetched_late_worker_agent: ?[]u8 = null;
+            defer if (fetched_late_worker_agent) |value| self.allocator.free(value);
+            if (late_worker_agent == null) {
+                fetched_late_worker_agent = self.fetchDefaultAgentFromServer(client, session_key) catch null;
+                if (fetched_late_worker_agent) |agent_id| {
+                    late_worker_agent = agent_id;
+                    self.setDefaultAgentInSettings(agent_id) catch {};
+                }
+            }
+            if (self.startFilesystemWorker(
+                client.url_buf,
+                client.token_buf,
+                session_key,
+                late_worker_agent,
+                attach_project_id,
+                attach_project_token,
+            )) |_| {
+                self.clearFilesystemError();
+            } else |worker_err| {
+                std.log.warn("Failed to start filesystem worker after late attach: {s}", .{@errorName(worker_err)});
+                const warning = std.fmt.allocPrint(
+                    self.allocator,
+                    "Filesystem worker unavailable: {s}",
+                    .{@errorName(worker_err)},
+                ) catch null;
+                defer if (warning) |value| self.allocator.free(value);
+                if (warning) |value| self.setFilesystemError(value);
+            }
         }
 
         const user_msg_id = try self.nextMessageId("msg");
