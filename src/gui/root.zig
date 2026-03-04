@@ -12258,8 +12258,15 @@ const App = struct {
 
         const encoded = try encodeDataB64(self.allocator, text);
         defer self.allocator.free(encoded);
-        const write_request_id = try self.nextMessageId("job");
-        defer self.allocator.free(write_request_id);
+        var generated_write_request_id: ?[]const u8 = null;
+        defer if (generated_write_request_id) |value| self.allocator.free(value);
+        const write_request_id = if (self.pending_send_request_id) |pending|
+            pending
+        else blk: {
+            const generated = try self.nextMessageId("job");
+            generated_write_request_id = generated;
+            break :blk generated;
+        };
         const escaped_write_request_id = try jsonEscape(self.allocator, write_request_id);
         defer self.allocator.free(escaped_write_request_id);
         const write_tag = self.nextFsrpcTag();
@@ -12476,13 +12483,8 @@ const App = struct {
         return self.parseJobStatusInfo(raw);
     }
 
-    fn parseSessionReceiveContentsFromJobLog(self: *App, log_text: []const u8) !std.ArrayListUnmanaged([]u8) {
-        var out = std.ArrayListUnmanaged([]u8){};
-        errdefer {
-            for (out.items) |item| self.allocator.free(item);
-            out.deinit(self.allocator);
-        }
-
+    fn replaySessionReceiveFromJobLog(self: *App, fallback_session_key: []const u8, log_text: []const u8) !bool {
+        var replayed = false;
         var lines = std.mem.splitScalar(u8, log_text, '\n');
         while (lines.next()) |line_raw| {
             const line = std.mem.trim(u8, line_raw, " \t\r\n");
@@ -12496,22 +12498,56 @@ const App = struct {
             const type_val = root.get("type") orelse continue;
             if (type_val != .string or !std.mem.eql(u8, type_val.string, "session.receive")) continue;
 
-            const payload = if (root.get("payload")) |payload_value| switch (payload_value) {
+            const payload_opt: ?std.json.ObjectMap = if (root.get("payload")) |payload_value| switch (payload_value) {
                 .object => payload_value.object,
-                else => root,
+                else => null,
             } else root;
-            const content_val = payload.get("content") orelse continue;
-            if (content_val != .string) continue;
-            const content = std.mem.trim(u8, content_val.string, " \t\r\n");
-            if (content.len == 0) continue;
+            const payload = payload_opt orelse root;
+            const request_id = extractRequestId(root, payload_opt);
+            const session_key = extractSessionKey(root, payload_opt) orelse fallback_session_key;
+            const timestamp = if (payload.get("timestamp")) |value| switch (value) {
+                .integer => value.integer,
+                else => if (root.get("timestamp")) |root_value| switch (root_value) {
+                    .integer => root_value.integer,
+                    else => std.time.milliTimestamp(),
+                } else std.time.milliTimestamp(),
+            } else if (root.get("timestamp")) |value| switch (value) {
+                .integer => value.integer,
+                else => std.time.milliTimestamp(),
+            } else std.time.milliTimestamp();
+            const final = if (payload.get("final")) |value| switch (value) {
+                .bool => value.bool,
+                else => true,
+            } else true;
 
-            if (out.items.len > 0 and std.mem.eql(u8, out.items[out.items.len - 1], content)) {
-                continue;
+            const content_delta = if (payload.get("content_delta")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else if (root.get("content_delta")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else null;
+            if (content_delta) |delta| {
+                if (delta.len > 0) {
+                    try self.appendOrUpdateStreamingMessage(request_id, session_key, delta, false, timestamp);
+                    replayed = true;
+                }
             }
-            try out.append(self.allocator, try self.allocator.dupe(u8, content));
+
+            const content = if (payload.get("content")) |value| switch (value) {
+                .string => value.string,
+                else => "",
+            } else if (root.get("content")) |value| switch (value) {
+                .string => value.string,
+                else => "",
+            } else "";
+            if (content.len > 0) {
+                try self.appendOrUpdateStreamingMessage(request_id, session_key, content, final, timestamp);
+                replayed = true;
+            }
         }
 
-        return out;
+        return replayed;
     }
 
     fn tryResumePendingSendJob(self: *App) !bool {
@@ -12569,16 +12605,8 @@ const App = struct {
         else
             try self.currentSessionOrDefault();
         if (maybe_log) |log_text| {
-            var receives = try self.parseSessionReceiveContentsFromJobLog(log_text);
-            defer {
-                for (receives.items) |item| self.allocator.free(item);
-                receives.deinit(self.allocator);
-            }
-            if (receives.items.len > 0) {
-                for (receives.items) |content| {
-                    try self.appendMessageForSession(session_key, "assistant", content, null);
-                }
-            } else {
+            const replayed = try self.replaySessionReceiveFromJobLog(session_key, log_text);
+            if (!replayed) {
                 try self.appendMessageForSession(session_key, "assistant", result, null);
             }
         } else {
@@ -12730,6 +12758,26 @@ const App = struct {
             if (obj.get("id")) |value| {
                 if (value == .string) return value.string;
             }
+        }
+        return null;
+    }
+
+    fn extractSessionKey(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) ?[]const u8 {
+        if (payload) |obj| {
+            if (obj.get("session_key")) |value| {
+                if (value == .string) return value.string;
+            }
+        }
+        if (root.get("session_key")) |value| {
+            if (value == .string) return value.string;
+        }
+        if (payload) |obj| {
+            if (obj.get("sessionKey")) |value| {
+                if (value == .string) return value.string;
+            }
+        }
+        if (root.get("sessionKey")) |value| {
+            if (value == .string) return value.string;
         }
         return null;
     }
