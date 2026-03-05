@@ -19,6 +19,10 @@
             .url = "https://github.com/DeanoC/ziggy-ui/archive/f66fb6d8218d4bc42493aead05fa449c6c677cbf.tar.gz",
             .hash = "ziggy_ui-0.1.0-dS4PqODE8QFJ4vcMimQQGm_DStkTyquXFeyh-ussojL1",
         },
+        .ziggy_ui_local = .{
+            .path = "../ziggy-ui",
+            .lazy = true,
+        },
         .sdl3 = .{
             .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",
             .hash = "sdl-0.3.3+3.2.28-7uIn9MiRfwFhqxnwBi_vCQlKr82YpwkQBVwdz2uy46S1",
