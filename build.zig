@@ -31,6 +31,7 @@ fn addGuiArtifact(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     build_options_module: *std.Build.Module,
+    use_local_ui_deps: bool,
 ) ?GuiArtifact {
     const os_tag = target.result.os.tag;
     const desktop_target = os_tag == .linux or os_tag == .windows or os_tag == .macos;
@@ -40,10 +41,17 @@ fn addGuiArtifact(
         .target = target,
         .optimize = optimize,
     });
-    const ziggy_ui = b.dependency("ziggy_ui", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    const ziggy_ui = if (use_local_ui_deps)
+        b.lazyDependency("ziggy_ui_local", .{
+            .target = target,
+            .optimize = optimize,
+            .@"use-local-panels" = true,
+        }) orelse @panic("use-local-ui-deps requested but ziggy_ui_local dependency is unavailable")
+    else
+        b.dependency("ziggy_ui", .{
+            .target = target,
+            .optimize = optimize,
+        });
     const zgpu = ziggy_ui.builder.dependency("zgpu", .{
         .target = target,
         .optimize = optimize,
@@ -67,7 +75,7 @@ fn addGuiArtifact(
     ziggy_ui_module.addImport("zsc", zsc_bridge_module);
 
     const client_config_module = b.createModule(.{
-        .root_source_file = b.path("src/client/config.zig"),
+        .root_source_file = b.path("src/client/config_root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -166,6 +174,11 @@ pub fn build(b: *std.Build) void {
         "terminal-backend",
         "GUI terminal renderer backend: plain | ghostty-vt (dynamic/fallback)",
     ) orelse "plain";
+    const use_local_ui_deps = b.option(
+        bool,
+        "use-local-ui-deps",
+        "Use ../ziggy-ui path dependency (and its local panel option) instead of pinned remote",
+    ) orelse false;
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "app_version", "0.1.0");
     build_options.addOption([]const u8, "git_revision", git_revision);
@@ -187,10 +200,17 @@ pub fn build(b: *std.Build) void {
     });
     const ziggy_spider_protocol_module = ziggy_spider_protocol.module("ziggy-spider-protocol");
 
-    const ziggy_ui = b.dependency("ziggy_ui", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    const ziggy_ui = if (use_local_ui_deps)
+        b.lazyDependency("ziggy_ui_local", .{
+            .target = target,
+            .optimize = optimize,
+            .@"use-local-panels" = true,
+        }) orelse @panic("use-local-ui-deps requested but ziggy_ui_local dependency is unavailable")
+    else
+        b.dependency("ziggy_ui", .{
+            .target = target,
+            .optimize = optimize,
+        });
 
     const zgpu = ziggy_ui.builder.dependency("zgpu", .{
         .target = target,
@@ -253,7 +273,7 @@ pub fn build(b: *std.Build) void {
     const gui_step = b.step("gui", "Build GUI executable for host target");
     const run_gui_step = b.step("run-gui", "Run the GUI app");
 
-    if (addGuiArtifact(b, target, optimize, build_options_module)) |host_gui| {
+    if (addGuiArtifact(b, target, optimize, build_options_module, use_local_ui_deps)) |host_gui| {
         gui_step.dependOn(&host_gui.install.step);
 
         const run_gui_cmd = b.addRunArtifact(host_gui.exe);

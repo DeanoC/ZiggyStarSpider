@@ -2,10 +2,12 @@ const std = @import("std");
 const zui = @import("ziggy-ui");
 const ws_client_mod = @import("websocket_client.zig");
 const config_mod = @import("client-config");
+const credential_store_mod = config_mod.credential_store;
 const control_plane = @import("control_plane");
 const build_options = @import("build_options");
 const workspace_types = control_plane.workspace_types;
 const panels_bridge = @import("panels_bridge.zig");
+const stage_machine = @import("stage_machine.zig");
 
 const zapp = zui.ui.app;
 const c = zapp.sdl_app.c;
@@ -44,6 +46,18 @@ const ConnectionState = enum {
     error_state,
 };
 
+const UiStage = stage_machine.Stage;
+
+const IdeMenuDomain = enum {
+    file,
+    edit,
+    view,
+    project,
+    tools,
+    window,
+    help,
+};
+
 const MAX_REASONABLE_PANEL_COUNT: usize = 4096;
 const MAX_REASONABLE_DOCK_NODE_COUNT: usize = 16384;
 const MAX_REASONABLE_NEXT_PANEL_ID: workspace.PanelId = 4097;
@@ -58,6 +72,10 @@ const CONTROL_CONNECT_TIMEOUT_MS: i64 = 2_500;
 const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
 const MAX_PROJECT_TOKEN_LEN: usize = 256;
+const DEFAULT_MAIN_WINDOW_WIDTH: c_int = 1440;
+const DEFAULT_MAIN_WINDOW_HEIGHT: c_int = 900;
+const MIN_MAIN_WINDOW_WIDTH: c_int = 1100;
+const MIN_MAIN_WINDOW_HEIGHT: c_int = 720;
 const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
 const WS_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
 const FS_WORKER_MAX_RESULTS_PER_FRAME: u32 = 64;
@@ -276,10 +294,19 @@ fn normalizeProjectToken(project_token: ?[]const u8) ?[]const u8 {
     return trimmed;
 }
 
+fn containsCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
+}
+
 const SettingsFocusField = enum {
     none,
     server_url,
     project_id,
+    launcher_project_filter,
+    launcher_profile_name,
+    launcher_profile_metadata,
+    launcher_connect_token,
     project_token,
     project_create_name,
     project_create_vision,
@@ -749,6 +776,17 @@ const App = struct {
 
     connection_state: ConnectionState = .disconnected,
     status_text: []u8,
+    ui_stage: UiStage = .launcher,
+    active_profile_id: ?[]u8 = null,
+    active_project_id: ?[]u8 = null,
+    launcher_notice: ?[]u8 = null,
+    launcher_selected_profile_index: usize = 0,
+    launcher_project_filter: std.ArrayList(u8) = .empty,
+    launcher_profile_name: std.ArrayList(u8) = .empty,
+    launcher_profile_metadata: std.ArrayList(u8) = .empty,
+    launcher_connect_token: std.ArrayList(u8) = .empty,
+    ide_menu_open: ?IdeMenuDomain = null,
+    credential_store: credential_store_mod.CredentialStore,
 
     theme: *const zui.Theme,
     ui_scale: f32 = 1.0,
@@ -841,13 +879,31 @@ const App = struct {
 
     pub fn init(allocator: std.mem.Allocator) !App {
         panels_bridge.assertAvailable();
+        // Load config before creating window so saved geometry can be restored.
+        var config = config_mod.Config.load(allocator) catch |err| blk: {
+            std.log.warn("Failed to load config: {s}, using defaults", .{@errorName(err)});
+            break :blk try config_mod.Config.init(allocator);
+        };
+        errdefer config.deinit();
+
+        const restored_width = config.window_width orelse DEFAULT_MAIN_WINDOW_WIDTH;
+        const restored_height = config.window_height orelse DEFAULT_MAIN_WINDOW_HEIGHT;
+        const initial_width: c_int = @intCast(@max(MIN_MAIN_WINDOW_WIDTH, restored_width));
+        const initial_height: c_int = @intCast(@max(MIN_MAIN_WINDOW_HEIGHT, restored_height));
+
         try zapp.sdl_app.init(.{ .video = true, .events = true, .gamepad = false });
         zapp.clipboard.init();
 
-        const window = zapp.sdl_app.createWindow("ZiggyStarSpider GUI", 1024, 720, c.SDL_WINDOW_RESIZABLE) catch {
+        const window = zapp.sdl_app.createWindow("ZiggyStarSpider GUI", initial_width, initial_height, c.SDL_WINDOW_RESIZABLE) catch {
             return error.SdlWindowCreateFailed;
         };
         errdefer c.SDL_DestroyWindow(window);
+        _ = c.SDL_SetWindowMinimumSize(window, MIN_MAIN_WINDOW_WIDTH, MIN_MAIN_WINDOW_HEIGHT);
+        if (config.window_x) |window_x| {
+            if (config.window_y) |window_y| {
+                _ = c.SDL_SetWindowPosition(window, window_x, window_y);
+            }
+        }
 
         var gpu = try zapp.multi_window_renderer.Shared.init(allocator, window);
         errdefer gpu.deinit();
@@ -878,12 +934,20 @@ const App = struct {
             }
         }
 
-        // Load config
-        var config = config_mod.Config.load(allocator) catch |err| blk: {
-            std.log.warn("Failed to load config: {s}, using defaults", .{@errorName(err)});
-            break :blk try config_mod.Config.init(allocator);
+        var credential_store = credential_store_mod.CredentialStore.init(allocator) catch |err| blk: {
+            std.log.warn("Failed to initialize credential store: {s}; using local fallback", .{@errorName(err)});
+            break :blk try credential_store_mod.CredentialStore.initForTesting(allocator, .file_fallback, ".");
         };
-        errdefer config.deinit();
+        errdefer credential_store.deinit();
+        const selected_profile_id = config.selectedProfileId();
+        if (credential_store.load(selected_profile_id, "role_admin") catch null) |token| {
+            defer allocator.free(token);
+            config.setRoleToken(.admin, token) catch {};
+        }
+        if (credential_store.load(selected_profile_id, "role_user") catch null) |token| {
+            defer allocator.free(token);
+            config.setRoleToken(.user, token) catch {};
+        }
 
         // Initialize settings panel with config values
         var settings_panel = SettingsPanel.init(allocator);
@@ -949,8 +1013,15 @@ const App = struct {
             .terminal_backend_kind = settings_panel.terminal_backend_kind,
             .terminal_backend = initTerminalBackend(settings_panel.terminal_backend_kind),
             .manager = undefined,
+            .credential_store = credential_store,
         };
         app.configurePerfAutomationFromEnv();
+        app.launcher_project_filter.appendSlice(allocator, "") catch {};
+        app.launcher_profile_name.appendSlice(allocator, "") catch {};
+        app.launcher_profile_metadata.appendSlice(allocator, "") catch {};
+        app.launcher_connect_token.appendSlice(allocator, "") catch {};
+        app.syncLauncherSelectionFromConfig();
+        app.applyLauncherSelectedProfile() catch {};
         app.node_service_watch_filter.appendSlice(allocator, "") catch {};
         app.node_service_watch_replay_limit.appendSlice(allocator, "25") catch {};
         app.debug_search_filter.appendSlice(allocator, "") catch {};
@@ -973,7 +1044,7 @@ const App = struct {
         app.manager = panel_manager.PanelManager.init(allocator, ws, &app.next_panel_id);
         app.bindNextPanelId(&app.manager);
         errdefer app.manager.deinit();
-        _ = app.ensureProjectPanel(&app.manager) catch {};
+        app.removeLegacyProjectPanels(&app.manager);
         app.focusSettingsPanel(&app.manager);
 
         app.captureWorkspaceSnapshot(&app.manager);
@@ -997,6 +1068,7 @@ const App = struct {
         );
         try app.ui_windows.append(allocator, main_window);
         app.main_window_id = main_window.id;
+        _ = c.SDL_SetWindowTitle(window, "ZiggyStarSpider - Launcher");
 
         errdefer app.settings_panel.deinit(allocator);
         errdefer allocator.free(app.status_text);
@@ -1017,6 +1089,7 @@ const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.persistMainWindowGeometry();
         self.disconnect();
         self.clearSessions();
         self.chat_sessions.deinit(self.allocator);
@@ -1069,6 +1142,14 @@ const App = struct {
 
         self.settings_panel.deinit(self.allocator);
         self.chat_input.deinit(self.allocator);
+        self.launcher_project_filter.deinit(self.allocator);
+        self.launcher_profile_name.deinit(self.allocator);
+        self.launcher_profile_metadata.deinit(self.allocator);
+        self.launcher_connect_token.deinit(self.allocator);
+        if (self.launcher_notice) |value| self.allocator.free(value);
+        if (self.active_profile_id) |value| self.allocator.free(value);
+        if (self.active_project_id) |value| self.allocator.free(value);
+        self.credential_store.deinit();
         self.client_context.deinit();
         self.agent_registry.deinit(self.allocator);
 
@@ -1594,6 +1675,8 @@ const App = struct {
             self.debug_scrollbar_dragging = false;
             self.setDragMouseCapture(false);
         }
+
+        if (self.ui_stage == .launcher) return;
 
         var dock_area = self.dockViewportForWindow(ui_window) orelse blk: {
             var fb_w: c_int = 0;
@@ -3257,6 +3340,9 @@ const App = struct {
                 self.ws_client = null;
                 self.session_attach_state = .unknown;
                 self.setConnectionState(.error_state, "Connection lost. Please reconnect.");
+                if (self.ui_stage == .workspace) {
+                    self.returnToLauncher(.connection_lost);
+                }
                 if (has_pending_send) {
                     if (!self.pending_send_resume_notified) {
                         if (self.pending_send_job_id) |job_id| {
@@ -3481,6 +3567,10 @@ const App = struct {
         return switch (self.settings_panel.focused_field) {
             .server_url => &self.settings_panel.server_url,
             .project_id => &self.settings_panel.project_id,
+            .launcher_project_filter => &self.launcher_project_filter,
+            .launcher_profile_name => &self.launcher_profile_name,
+            .launcher_profile_metadata => &self.launcher_profile_metadata,
+            .launcher_connect_token => &self.launcher_connect_token,
             .project_token => &self.settings_panel.project_token,
             .project_create_name => &self.settings_panel.project_create_name,
             .project_create_vision => &self.settings_panel.project_create_vision,
@@ -3719,6 +3809,18 @@ const App = struct {
         self.config.setWatchThemePack(self.settings_panel.watch_theme_pack);
         try self.config.setTerminalBackend(terminal_render_backend.Backend.kindName(self.settings_panel.terminal_backend_kind));
         self.config.gui_verbose_ws_logs = self.settings_panel.ws_verbose_logs;
+        try self.config.syncSelectedProfileFromLegacyFields();
+        const profile_id = self.config.selectedProfileId();
+        if (self.config.getRoleToken(.admin).len > 0) {
+            self.credential_store.save(profile_id, "role_admin", self.config.getRoleToken(.admin)) catch {};
+        } else {
+            self.credential_store.delete(profile_id, "role_admin") catch {};
+        }
+        if (self.config.getRoleToken(.user).len > 0) {
+            self.credential_store.save(profile_id, "role_user", self.config.getRoleToken(.user)) catch {};
+        } else {
+            self.credential_store.delete(profile_id, "role_user") catch {};
+        }
         try self.config.save();
 
         self.applySelectedTerminalBackend();
@@ -4425,6 +4527,18 @@ const App = struct {
         }
         try self.config.setRoleToken(role, token);
         if (set_active) try self.config.setActiveRole(role);
+        const profile_id = self.config.selectedProfileId();
+        const key = switch (role) {
+            .admin => "role_admin",
+            .user => "role_user",
+        };
+        if (token.len > 0) {
+            self.credential_store.save(profile_id, key, token) catch |err| {
+                std.log.warn("Failed to persist credential in store: {s}", .{@errorName(err)});
+            };
+        } else {
+            self.credential_store.delete(profile_id, key) catch {};
+        }
         try self.config.save();
     }
 
@@ -4436,10 +4550,28 @@ const App = struct {
         try self.setRoleToken(.user, token, false);
     }
 
+    fn syncLauncherConnectTokenFromConfig(self: *App) !void {
+        self.launcher_connect_token.clearRetainingCapacity();
+        const token = self.config.getRoleToken(self.config.active_role);
+        if (token.len > 0) {
+            try self.launcher_connect_token.appendSlice(self.allocator, token);
+        }
+    }
+
+    fn persistLauncherConnectToken(self: *App) !void {
+        const token = std.mem.trim(u8, self.launcher_connect_token.items, " \t\r\n");
+        try self.setRoleToken(self.config.active_role, token, false);
+    }
+
+    fn activeRoleLabel(self: *const App) []const u8 {
+        return if (self.config.active_role == .admin) "Admin" else "User";
+    }
+
     fn setActiveConnectRole(self: *App, role: config_mod.Config.TokenRole) !void {
         if (self.config.active_role == role) return;
         try self.config.setActiveRole(role);
         try self.config.save();
+        try self.syncLauncherConnectTokenFromConfig();
 
         const role_name = if (role == .admin) "admin" else "user";
         const status = if (self.connection_state == .connected)
@@ -4827,8 +4959,8 @@ const App = struct {
 
         ui_window.swapchain.beginFrame(&self.gpu, fb_width, fb_height);
 
-        // Draw the dock-based UI
-        self.drawDockUi(ui_window, fb_width, fb_height);
+        // Draw active UI stage (launcher or workspace).
+        self.drawStageUi(ui_window, fb_width, fb_height);
         self.accumulateFrameCommandStats();
 
         // Render the UI commands through WebGPU
@@ -4866,7 +4998,359 @@ const App = struct {
         }
     }
 
-    fn drawDockUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
+    fn drawStageUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
+        if (self.ui_stage == .workspace and !self.canRenderWorkspaceStage()) {
+            self.returnToLauncher(.disconnected);
+        }
+
+        switch (self.ui_stage) {
+            .launcher => self.drawLauncherUi(ui_window, fb_width, fb_height),
+            .workspace => self.drawWorkspaceUi(ui_window, fb_width, fb_height),
+        }
+    }
+
+    fn drawLauncherUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
+        self.ui_commands.clear();
+        ui_draw_context.setGlobalCommandList(&self.ui_commands);
+        defer ui_draw_context.clearGlobalCommandList();
+
+        const menu_h = self.windowMenuBarHeight();
+        const status_h: f32 = 24.0 * self.ui_scale;
+        const content_rect = Rect.fromXYWH(
+            0,
+            menu_h,
+            @floatFromInt(fb_width),
+            @max(1.0, @as(f32, @floatFromInt(fb_height)) - menu_h - status_h),
+        );
+        ui_window.ui_state.last_dock_content_rect = UiRect.fromMinSize(content_rect.min, .{
+            content_rect.width(),
+            content_rect.height(),
+        });
+
+        self.ui_commands.pushRect(
+            .{ .min = .{ 0, 0 }, .max = .{ @floatFromInt(fb_width), @floatFromInt(fb_height) } },
+            .{ .fill = self.theme.colors.background },
+        );
+
+        const layout = self.panelLayoutMetrics();
+        const pad = layout.inset;
+        const gap = layout.section_gap;
+        const left_width = @max(260.0 * self.ui_scale, content_rect.width() * 0.33);
+        const right_width = @max(320.0 * self.ui_scale, content_rect.width() - left_width - gap - pad * 2.0);
+        const left_rect = Rect.fromXYWH(
+            content_rect.min[0] + pad,
+            content_rect.min[1] + pad,
+            left_width,
+            @max(1.0, content_rect.height() - pad * 2.0),
+        );
+        const right_rect = Rect.fromXYWH(
+            left_rect.max[0] + gap,
+            content_rect.min[1] + pad,
+            right_width,
+            @max(1.0, content_rect.height() - pad * 2.0),
+        );
+
+        self.drawSurfacePanel(left_rect);
+        self.drawRect(left_rect, self.theme.colors.border);
+        self.drawSurfacePanel(right_rect);
+        self.drawRect(right_rect, self.theme.colors.border);
+
+        var left_y = left_rect.min[1] + pad;
+        const title = "Spider Web Connections";
+        self.drawLabel(left_rect.min[0] + pad, left_y, title, self.theme.colors.text_primary);
+        left_y += layout.line_height + layout.row_gap;
+
+        const profile_row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const profile_row_w = left_rect.width() - pad * 2.0;
+        const profiles_rect_h = @max(140.0 * self.ui_scale, left_rect.height() * 0.30);
+        const profiles_rect = Rect.fromXYWH(
+            left_rect.min[0] + pad,
+            left_y,
+            profile_row_w,
+            profiles_rect_h,
+        );
+        self.drawSurfacePanel(profiles_rect);
+        self.drawRect(profiles_rect, self.theme.colors.border);
+
+        const selected_index = @min(
+            self.launcher_selected_profile_index,
+            if (self.config.connection_profiles.len > 0) self.config.connection_profiles.len - 1 else 0,
+        );
+        var profile_row_y = profiles_rect.min[1] + layout.inner_inset;
+        if (self.config.connection_profiles.len == 0) {
+            self.drawTextTrimmed(
+                profiles_rect.min[0] + layout.inner_inset,
+                profile_row_y,
+                profiles_rect.width() - layout.inner_inset * 2.0,
+                "No connection profiles. Create one below.",
+                self.theme.colors.text_secondary,
+            );
+        } else {
+            for (self.config.connection_profiles, 0..) |profile, idx| {
+                if (profile_row_y + profile_row_h > profiles_rect.max[1] - layout.inner_inset) break;
+                const label = if (std.mem.eql(u8, profile.id, self.config.selectedProfileId()))
+                    profile.name
+                else
+                    profile.server_url;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(
+                        profiles_rect.min[0] + layout.inner_inset,
+                        profile_row_y,
+                        profiles_rect.width() - layout.inner_inset * 2.0,
+                        profile_row_h,
+                    ),
+                    label,
+                    .{ .variant = if (idx == selected_index) .primary else .secondary },
+                )) {
+                    self.launcher_selected_profile_index = idx;
+                    self.applyLauncherSelectedProfile() catch |err| {
+                        std.log.warn("Failed to apply selected profile: {s}", .{@errorName(err)});
+                    };
+                }
+                profile_row_y += profile_row_h + layout.row_gap * 0.6;
+            }
+        }
+        left_y = profiles_rect.max[1] + layout.section_gap * 0.6;
+
+        self.drawLabel(left_rect.min[0] + pad, left_y, "Profile Name", self.theme.colors.text_secondary);
+        left_y += layout.line_height + layout.row_gap * 0.25;
+        const profile_name_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
+            self.launcher_profile_name.items,
+            self.settings_panel.focused_field == .launcher_profile_name,
+            .{ .placeholder = "Display name" },
+        );
+        if (profile_name_focused) self.settings_panel.focused_field = .launcher_profile_name;
+        left_y += layout.input_height + layout.row_gap * 0.55;
+
+        self.drawLabel(left_rect.min[0] + pad, left_y, "Server URL", self.theme.colors.text_secondary);
+        left_y += layout.line_height + layout.row_gap * 0.25;
+        const url_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
+            self.settings_panel.server_url.items,
+            self.settings_panel.focused_field == .server_url,
+            .{ .placeholder = "ws://host:port" },
+        );
+        if (url_focused) self.settings_panel.focused_field = .server_url;
+        left_y += layout.input_height + layout.row_gap * 0.55;
+
+        self.drawLabel(left_rect.min[0] + pad, left_y, "Metadata", self.theme.colors.text_secondary);
+        left_y += layout.line_height + layout.row_gap * 0.25;
+        const metadata_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
+            self.launcher_profile_metadata.items,
+            self.settings_panel.focused_field == .launcher_profile_metadata,
+            .{ .placeholder = "Optional notes" },
+        );
+        if (metadata_focused) self.settings_panel.focused_field = .launcher_profile_metadata;
+        left_y += layout.input_height + layout.row_gap * 0.55;
+
+        self.drawLabel(left_rect.min[0] + pad, left_y, "Role", self.theme.colors.text_secondary);
+        left_y += layout.line_height + layout.row_gap * 0.25;
+        const role_button_w = (profile_row_w - pad) * 0.5;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, role_button_w, layout.button_height),
+            "Admin",
+            .{ .variant = if (self.config.active_role == .admin) .primary else .secondary },
+        )) {
+            self.setActiveConnectRole(.admin) catch {};
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad + role_button_w + pad, left_y, role_button_w, layout.button_height),
+            "User",
+            .{ .variant = if (self.config.active_role == .user) .primary else .secondary },
+        )) {
+            self.setActiveConnectRole(.user) catch {};
+        }
+        left_y += layout.button_height + layout.row_gap * 0.8;
+
+        self.drawLabel(
+            left_rect.min[0] + pad,
+            left_y,
+            if (self.config.active_role == .admin) "Admin Token" else "User Token",
+            self.theme.colors.text_secondary,
+        );
+        left_y += layout.line_height + layout.row_gap * 0.25;
+        const connect_token_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
+            self.launcher_connect_token.items,
+            self.settings_panel.focused_field == .launcher_connect_token,
+            .{
+                .placeholder = if (self.config.active_role == .admin)
+                    "Admin auth token"
+                else
+                    "User auth token",
+            },
+        );
+        if (connect_token_focused) self.settings_panel.focused_field = .launcher_connect_token;
+        left_y += layout.input_height + layout.row_gap * 0.55;
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, role_button_w, profile_row_h),
+            "New Profile",
+            .{ .variant = .secondary },
+        )) {
+            self.createConnectionProfileFromLauncher() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Profile create failed: {s}", .{@errorName(err)}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.setLauncherNotice(value);
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad + role_button_w + pad, left_y, role_button_w, profile_row_h),
+            "Save Profile",
+            .{ .variant = .secondary, .disabled = self.config.connection_profiles.len == 0 },
+        )) {
+            self.saveSelectedProfileFromLauncher() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Profile save failed: {s}", .{@errorName(err)}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.setLauncherNotice(value);
+            };
+        }
+        left_y += profile_row_h + layout.row_gap;
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, role_button_w, profile_row_h),
+            if (self.connection_state == .connected) "Disconnect" else "Connect",
+            .{ .variant = .primary, .disabled = self.connection_state == .connecting },
+        )) {
+            if (self.connection_state == .connected) {
+                self.disconnect();
+                self.setConnectionState(.disconnected, "Disconnected");
+            } else {
+                self.persistLauncherConnectToken() catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Unable to persist token: {s}", .{@errorName(err)}) catch null;
+                    defer if (msg) |value| self.allocator.free(value);
+                    if (msg) |value| self.setLauncherNotice(value);
+                    return;
+                };
+                self.tryConnect(&self.manager) catch {};
+                if (self.connection_state == .connected) {
+                    self.refreshWorkspaceData() catch {};
+                }
+            }
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad + role_button_w + pad, left_y, role_button_w, profile_row_h),
+            "Refresh",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.refreshWorkspaceData() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Refresh failed: {s}", .{@errorName(err)}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.setLauncherNotice(value);
+            };
+        }
+
+        var right_y = right_rect.min[1] + pad;
+        self.drawLabel(right_rect.min[0] + pad, right_y, "Projects", self.theme.colors.text_primary);
+        right_y += layout.line_height + layout.row_gap * 0.6;
+        if (self.launcher_notice) |notice| {
+            self.drawTextTrimmed(
+                right_rect.min[0] + pad,
+                right_y,
+                right_rect.width() - pad * 2.0,
+                notice,
+                self.theme.colors.text_secondary,
+            );
+            right_y += layout.line_height + layout.row_gap * 0.7;
+        }
+
+        const filter_rect = Rect.fromXYWH(
+            right_rect.min[0] + pad,
+            right_y,
+            right_rect.width() - pad * 2.0,
+            layout.input_height,
+        );
+        const filter_focused = self.drawTextInputWidget(
+            filter_rect,
+            self.launcher_project_filter.items,
+            self.settings_panel.focused_field == .launcher_project_filter,
+            .{ .placeholder = "Search projects" },
+        );
+        if (filter_focused) self.settings_panel.focused_field = .launcher_project_filter;
+        right_y += layout.input_height + layout.row_gap * 0.55;
+
+        const create_name_rect = Rect.fromXYWH(
+            right_rect.min[0] + pad,
+            right_y,
+            right_rect.width() - pad * 2.0,
+            layout.input_height,
+        );
+        const create_name_focused = self.drawTextInputWidget(
+            create_name_rect,
+            self.settings_panel.project_create_name.items,
+            self.settings_panel.focused_field == .project_create_name,
+            .{ .placeholder = "New project name" },
+        );
+        if (create_name_focused) self.settings_panel.focused_field = .project_create_name;
+        right_y += layout.input_height + layout.row_gap;
+
+        const project_row_h = @max(layout.button_height, 32.0 * self.ui_scale);
+        const list_h = @max(1.0, right_rect.max[1] - right_y - pad - project_row_h - layout.row_gap);
+        const list_rect = Rect.fromXYWH(right_rect.min[0] + pad, right_y, right_rect.width() - pad * 2.0, list_h);
+        self.drawSurfacePanel(list_rect);
+        self.drawRect(list_rect, self.theme.colors.border);
+
+        var project_row_y = list_rect.min[1] + layout.inner_inset;
+        for (self.projects.items) |project| {
+            if (project_row_y + project_row_h > list_rect.max[1] - layout.inner_inset) break;
+            const matches_filter = self.launcher_project_filter.items.len == 0 or
+                containsCaseInsensitive(project.name, self.launcher_project_filter.items) or
+                containsCaseInsensitive(project.id, self.launcher_project_filter.items);
+            if (!matches_filter) continue;
+            const is_selected = self.settings_panel.project_id.items.len > 0 and std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(list_rect.min[0] + layout.inner_inset, project_row_y, list_rect.width() - layout.inner_inset * 2.0, project_row_h),
+                project.name,
+                .{ .variant = if (is_selected) .primary else .secondary },
+            )) {
+                self.selectProjectInSettings(project.id) catch {};
+            }
+            project_row_y += project_row_h + layout.row_gap * 0.5;
+        }
+
+        const open_rect = Rect.fromXYWH(
+            right_rect.min[0] + pad,
+            right_rect.max[1] - pad - project_row_h,
+            @max(160.0 * self.ui_scale, right_rect.width() * 0.4),
+            project_row_h,
+        );
+        if (self.drawButtonWidget(
+            open_rect,
+            "Open Project",
+            .{ .variant = .primary, .disabled = self.connection_state != .connected or self.selectedProjectId() == null },
+        )) {
+            self.openSelectedProjectFromLauncher() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Failed to open project: {s}", .{@errorName(err)}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.setLauncherNotice(value);
+            };
+        }
+
+        const create_rect = Rect.fromXYWH(
+            open_rect.max[0] + pad,
+            right_rect.max[1] - pad - project_row_h,
+            @max(160.0 * self.ui_scale, right_rect.width() * 0.4),
+            project_row_h,
+        );
+        if (self.drawButtonWidget(
+            create_rect,
+            "Create Project",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.settings_panel.project_create_name.items.len == 0 },
+        )) {
+            self.createProjectFromPanel() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Project create failed: {s}", .{@errorName(err)}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.setLauncherNotice(value);
+            };
+        }
+
+        _ = self.drawWindowMenuBar(ui_window, fb_width);
+        self.drawStatusOverlay(fb_width, fb_height);
+    }
+
+    fn drawWorkspaceUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
         self.ui_commands.clear();
         ui_draw_context.setGlobalCommandList(&self.ui_commands);
         defer ui_draw_context.clearGlobalCommandList();
@@ -4948,6 +5432,30 @@ const App = struct {
         return @max(layout.button_height + layout.inner_inset * 1.2, 30.0 * self.ui_scale);
     }
 
+    fn ideMenuDomainLabel(domain: IdeMenuDomain) []const u8 {
+        return switch (domain) {
+            .file => "File",
+            .edit => "Edit",
+            .view => "View",
+            .project => "Project",
+            .tools => "Tools",
+            .window => "Window",
+            .help => "Help",
+        };
+    }
+
+    fn ideMenuRowCount(domain: IdeMenuDomain, stage: UiStage) usize {
+        return switch (domain) {
+            .file => if (stage == .launcher) 1 else 2,
+            .edit => 2,
+            .view => 2,
+            .project => 2,
+            .tools => 2,
+            .window => 1,
+            .help => 1,
+        };
+    }
+
     fn drawWindowMenuBar(self: *App, ui_window: *UiWindow, fb_width: u32) f32 {
         const layout = self.panelLayoutMetrics();
         const bar_h = self.windowMenuBarHeight();
@@ -4957,43 +5465,42 @@ const App = struct {
             .{ .fill = self.theme.colors.background, .stroke = self.theme.colors.border },
         );
 
-        const button_y = bar_rect.min[1] + @max(0.0, (bar_h - layout.button_height) * 0.5);
-        const button_label_open = "Windows [^]";
-        const button_label_closed = "Windows [v]";
-        const button_w = @max(
-            132.0 * self.ui_scale,
-            self.measureText(button_label_open) + layout.inner_inset * 2.4,
-        );
-        const menu_button_rect = Rect.fromXYWH(layout.inset, button_y, button_w, layout.button_height);
-        const menu_open_for_window = self.windows_menu_open_window_id != null and
-            self.windows_menu_open_window_id.? == ui_window.id;
+        const domains: []const IdeMenuDomain = if (self.ui_stage == .launcher)
+            &[_]IdeMenuDomain{ .file, .help }
+        else
+            &[_]IdeMenuDomain{ .file, .edit, .view, .project, .tools, .window, .help };
 
-        if (self.drawButtonWidget(
-            menu_button_rect,
-            if (menu_open_for_window) button_label_open else button_label_closed,
-            .{ .variant = .secondary },
-        )) {
-            if (menu_open_for_window) {
-                self.windows_menu_open_window_id = null;
-            } else {
-                self.windows_menu_open_window_id = ui_window.id;
+        const button_y = bar_rect.min[1] + @max(0.0, (bar_h - layout.button_height) * 0.5);
+        var x = layout.inset;
+        var selected_button_rect: ?Rect = null;
+        var dropdown_rect: ?Rect = null;
+
+        for (domains) |domain| {
+            const label = ideMenuDomainLabel(domain);
+            const button_w = @max(86.0 * self.ui_scale, self.measureText(label) + layout.inner_inset * 2.0);
+            const button_rect = Rect.fromXYWH(x, button_y, button_w, layout.button_height);
+            const is_open = self.ide_menu_open != null and self.ide_menu_open.? == domain;
+            if (self.drawButtonWidget(
+                button_rect,
+                label,
+                .{ .variant = if (is_open) .primary else .secondary },
+            )) {
+                self.ide_menu_open = if (is_open) null else domain;
             }
+            if (is_open) selected_button_rect = button_rect;
+            x += button_w + layout.row_gap * 0.4;
         }
 
-        var dropdown_rect: ?Rect = null;
-        if (self.windows_menu_open_window_id != null and self.windows_menu_open_window_id.? == ui_window.id) {
+        if (self.ide_menu_open) |open_domain| {
+            const menu_w = @max(228.0 * self.ui_scale, 200.0 * self.ui_scale);
             const row_h = layout.button_height;
             const row_gap = @max(1.0, layout.inner_inset * 0.2);
-            const menu_w = @max(
-                272.0 * self.ui_scale,
-                self.measureText("Filesystem Browser (Open/Focus)") + layout.inner_inset * 2.8,
-            );
-            const rows: usize = 7;
+            const row_count: usize = ideMenuRowCount(open_domain, self.ui_stage);
             const menu_h = layout.inner_inset * 2.0 +
-                row_h * @as(f32, @floatFromInt(rows)) +
-                row_gap * @as(f32, @floatFromInt(rows - 1));
-            const menu_x = layout.inset;
-            const menu_y = bar_rect.max[1] + @max(1.0, layout.inner_inset * 0.3);
+                @as(f32, @floatFromInt(row_count)) * row_h +
+                @as(f32, @floatFromInt(@max(@as(usize, 1), row_count) - 1)) * row_gap;
+            const menu_x = if (selected_button_rect) |rect| rect.min[0] else layout.inset;
+            const menu_y = bar_rect.max[1] + @max(1.0, layout.inner_inset * 0.2);
             const menu_rect = Rect.fromXYWH(menu_x, menu_y, menu_w, menu_h);
             dropdown_rect = menu_rect;
 
@@ -5004,94 +5511,145 @@ const App = struct {
             const row_x = menu_rect.min[0] + layout.inner_inset;
             const row_w = menu_rect.width() - layout.inner_inset * 2.0;
 
-            const workspace_open = ui_window.manager.hasPanel(.Control) or ui_window.manager.hasPanel(.Settings);
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                if (workspace_open) "Workspace (Focus)" else "Workspace (Open)",
-                .{ .variant = .secondary },
-            )) {
-                self.ensureWorkspacePanel(ui_window.manager);
-                self.windows_menu_open_window_id = null;
-            }
-            row_y += row_h + row_gap;
-
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                if (ui_window.manager.hasPanel(.Chat)) "Chat (Focus)" else "Chat (Open)",
-                .{ .variant = .secondary },
-            )) {
-                ui_window.manager.ensurePanel(.Chat);
-                self.windows_menu_open_window_id = null;
-            }
-            row_y += row_h + row_gap;
-
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                if (self.hasPanelWithTitle(ui_window.manager, "Projects") or self.project_panel_id != null) "Projects (Focus)" else "Projects (Open)",
-                .{ .variant = .secondary },
-            )) {
-                _ = self.ensureProjectPanel(ui_window.manager) catch |err| {
-                    std.log.err("Windows menu failed to open Projects: {s}", .{@errorName(err)});
-                };
-                self.windows_menu_open_window_id = null;
-            }
-            row_y += row_h + row_gap;
-
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                if (self.hasPanelWithTitle(ui_window.manager, "Filesystem Browser") or self.filesystem_panel_id != null) "Filesystem Browser (Focus)" else "Filesystem Browser (Open)",
-                .{ .variant = .secondary },
-            )) {
-                _ = self.ensureFilesystemPanel(ui_window.manager) catch |err| {
-                    std.log.err("Windows menu failed to open Filesystem Browser: {s}", .{@errorName(err)});
-                };
-                self.windows_menu_open_window_id = null;
-            }
-            row_y += row_h + row_gap;
-
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                if (self.hasPanelWithTitle(ui_window.manager, "Terminal") or self.terminal_panel_id != null) "Terminal (Focus)" else "Terminal (Open)",
-                .{ .variant = .secondary },
-            )) {
-                _ = self.ensureTerminalPanel(ui_window.manager) catch |err| {
-                    std.log.err("Windows menu failed to open Terminal: {s}", .{@errorName(err)});
-                };
-                self.windows_menu_open_window_id = null;
-            }
-            row_y += row_h + row_gap;
-
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                if (self.hasPanelWithTitle(ui_window.manager, "Debug Stream") or self.debug_panel_id != null) "Debug Stream (Focus)" else "Debug Stream (Open)",
-                .{ .variant = .secondary },
-            )) {
-                _ = self.ensureDebugPanel(ui_window.manager) catch |err| {
-                    std.log.err("Windows menu failed to open Debug Stream: {s}", .{@errorName(err)});
-                };
-                self.windows_menu_open_window_id = null;
-            }
-            row_y += row_h + row_gap;
-
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                "Spawn New Window",
-                .{ .variant = .secondary },
-            )) {
-                self.spawnUiWindow() catch |err| {
-                    std.log.err("Windows menu failed to create window: {s}", .{@errorName(err)});
-                };
-                self.windows_menu_open_window_id = null;
+            switch (open_domain) {
+                .file => {
+                    if (self.ui_stage == .launcher) {
+                        if (self.drawButtonWidget(
+                            Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                            if (self.connection_state == .connected) "Disconnect" else "Connect",
+                            .{ .variant = .secondary },
+                        )) {
+                            if (self.connection_state == .connected) {
+                                self.disconnect();
+                                self.setConnectionState(.disconnected, "Disconnected");
+                            } else {
+                                self.tryConnect(&self.manager) catch {};
+                            }
+                            self.ide_menu_open = null;
+                        }
+                        row_y += row_h + row_gap;
+                    } else {
+                        if (self.drawButtonWidget(
+                            Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                            "Switch Project",
+                            .{ .variant = .secondary },
+                        )) {
+                            self.returnToLauncher(.switched_project);
+                            self.ide_menu_open = null;
+                        }
+                        row_y += row_h + row_gap;
+                        if (self.drawButtonWidget(
+                            Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                            "Disconnect",
+                            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+                        )) {
+                            self.disconnect();
+                            self.setConnectionState(.disconnected, "Disconnected");
+                            self.returnToLauncher(.disconnected);
+                            self.ide_menu_open = null;
+                        }
+                    }
+                },
+                .edit => {
+                    _ = self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Undo (coming soon)",
+                        .{ .variant = .secondary, .disabled = true },
+                    );
+                    row_y += row_h + row_gap;
+                    _ = self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Redo (coming soon)",
+                        .{ .variant = .secondary, .disabled = true },
+                    );
+                },
+                .view => {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.manager.hasPanel(.Chat)) "Chat (Focus)" else "Chat (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        self.manager.ensurePanel(.Chat);
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.filesystem_panel_id != null) "Explorer (Focus)" else "Explorer (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureFilesystemPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                },
+                .project => {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Refresh Workspace",
+                        .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+                    )) {
+                        self.refreshWorkspaceData() catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Activate Selected",
+                        .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.selectedProjectId() == null },
+                    )) {
+                        self.activateSelectedProject() catch {};
+                        self.ide_menu_open = null;
+                    }
+                },
+                .tools => {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Settings",
+                        .{ .variant = .secondary },
+                    )) {
+                        self.ensureWorkspacePanel(&self.manager);
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Terminal",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureTerminalPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                },
+                .window => {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "New Window",
+                        .{ .variant = .secondary },
+                    )) {
+                        self.spawnUiWindow() catch {};
+                        self.ide_menu_open = null;
+                    }
+                },
+                .help => {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "About ZiggyStarSpider",
+                        .{ .variant = .secondary },
+                    )) {
+                        self.appendMessage("system", "ZiggyStarSpider IDE - launcher/workspace flow enabled.", null) catch {};
+                        self.ide_menu_open = null;
+                    }
+                },
             }
         }
 
-        if (self.mouse_clicked and self.windows_menu_open_window_id != null and self.windows_menu_open_window_id.? == ui_window.id) {
-            const in_button = menu_button_rect.contains(.{ self.mouse_x, self.mouse_y });
+        if (self.mouse_clicked and self.ide_menu_open != null) {
+            const in_button = if (selected_button_rect) |rect| rect.contains(.{ self.mouse_x, self.mouse_y }) else false;
             const in_dropdown = if (dropdown_rect) |rect| rect.contains(.{ self.mouse_x, self.mouse_y }) else false;
-            if (!in_button and !in_dropdown) {
-                self.windows_menu_open_window_id = null;
-            }
+            if (!in_button and !in_dropdown) self.ide_menu_open = null;
         }
+
+        _ = ui_window;
 
         return bar_h;
     }
@@ -5623,6 +6181,11 @@ const App = struct {
     }
 
     fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        if (self.ui_stage == .workspace) {
+            self.drawWorkspaceSettingsPanel(rect);
+            return;
+        }
+
         const layout = self.panelLayoutMetrics();
         const pad = layout.inset;
         var y = rect.min[1] + pad - self.settings_panel.settings_scroll_y;
@@ -5974,6 +6537,167 @@ const App = struct {
         );
 
         const content_bottom_scrolled = history_row_y + button_height + layout.row_gap * 1.5 + layout.line_height;
+        const content_bottom = content_bottom_scrolled + self.settings_panel.settings_scroll_y;
+        const total_height = content_bottom - (rect.min[1] + pad);
+        const viewport_h = @max(0.0, rect.max[1] - rect.min[1] - pad * 2.0);
+        const max_scroll = if (total_height > viewport_h) total_height - viewport_h else 0.0;
+        if (self.settings_panel.settings_scroll_y < 0.0) self.settings_panel.settings_scroll_y = 0.0;
+        if (self.settings_panel.settings_scroll_y > max_scroll) self.settings_panel.settings_scroll_y = max_scroll;
+        const scroll_view_rect = Rect.fromXYWH(rect.min[0], rect.min[1] + pad, rect_width, viewport_h);
+        self.drawVerticalScrollbar(.settings, scroll_view_rect, total_height, &self.settings_panel.settings_scroll_y);
+    }
+
+    fn drawWorkspaceSettingsPanel(self: *App, rect: UiRect) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = layout.inset;
+        var y = rect.min[1] + pad - self.settings_panel.settings_scroll_y;
+        const rect_width = rect.max[0] - rect.min[0];
+        const input_height = layout.input_height;
+        const button_height = layout.button_height;
+        const input_width = @max(220.0, rect_width - pad * 2.0);
+
+        self.drawFormSectionTitle(rect.min[0] + pad, &y, input_width, layout, "Workspace Settings");
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            input_width,
+            "Connection/session/agent configuration moved to Launcher.",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.section_gap * 0.5;
+
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Theme");
+        const ui_theme_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            input_width,
+            input_height,
+        );
+        const ui_theme_focused = self.drawTextInputWidget(
+            ui_theme_rect,
+            self.settings_panel.ui_theme.items,
+            self.settings_panel.focused_field == .ui_theme,
+            .{ .placeholder = "default" },
+        );
+        if (ui_theme_focused) self.settings_panel.focused_field = .ui_theme;
+
+        y += input_height + layout.row_gap;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Profile");
+        const ui_profile_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            input_width,
+            input_height,
+        );
+        const ui_profile_focused = self.drawTextInputWidget(
+            ui_profile_rect,
+            self.settings_panel.ui_profile.items,
+            self.settings_panel.focused_field == .ui_profile,
+            .{ .placeholder = "default" },
+        );
+        if (ui_profile_focused) self.settings_panel.focused_field = .ui_profile;
+
+        y += input_height + layout.row_gap;
+        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Theme Pack");
+        const ui_theme_pack_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            input_width,
+            input_height,
+        );
+        const ui_theme_pack_focused = self.drawTextInputWidget(
+            ui_theme_pack_rect,
+            self.settings_panel.ui_theme_pack.items,
+            self.settings_panel.focused_field == .ui_theme_pack,
+            .{ .placeholder = "" },
+        );
+        if (ui_theme_pack_focused) self.settings_panel.focused_field = .ui_theme_pack;
+
+        y += input_height + layout.section_gap * 0.55;
+        const watch_button_label = if (self.settings_panel.watch_theme_pack)
+            "Watch Theme Pack: On"
+        else
+            "Watch Theme Pack: Off";
+        const watch_button_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(220.0, rect_width * 0.62),
+            button_height,
+        );
+        if (self.drawButtonWidget(
+            watch_button_rect,
+            watch_button_label,
+            .{ .variant = .secondary },
+        )) {
+            self.settings_panel.watch_theme_pack = !self.settings_panel.watch_theme_pack;
+        }
+
+        y += button_height + layout.row_gap;
+        self.drawLabel(
+            rect.min[0] + pad,
+            y,
+            "Terminal renderer",
+            self.theme.colors.text_primary,
+        );
+        y += 20.0 * self.ui_scale;
+        const backend_button_width: f32 = @max(120.0, (rect_width - pad * 3.0) * 0.5);
+        const backend_plain_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            backend_button_width,
+            button_height,
+        );
+        const backend_ghostty_rect = Rect.fromXYWH(
+            backend_plain_rect.max[0] + pad,
+            y,
+            backend_button_width,
+            button_height,
+        );
+        if (self.drawButtonWidget(
+            backend_plain_rect,
+            "Plain",
+            .{ .variant = if (self.settings_panel.terminal_backend_kind == .plain_text) .primary else .secondary },
+        )) {
+            self.settings_panel.terminal_backend_kind = .plain_text;
+            self.applySelectedTerminalBackend();
+        }
+        if (self.drawButtonWidget(
+            backend_ghostty_rect,
+            "Ghostty-VT",
+            .{ .variant = if (self.settings_panel.terminal_backend_kind == .ghostty_vt) .primary else .secondary },
+        )) {
+            self.settings_panel.terminal_backend_kind = .ghostty_vt;
+            self.applySelectedTerminalBackend();
+        }
+
+        y += button_height + layout.section_gap;
+        const save_rect = Rect.fromXYWH(
+            rect.min[0] + pad,
+            y,
+            @max(148.0 * self.ui_scale, rect_width * 0.25),
+            button_height,
+        );
+        if (self.drawButtonWidget(
+            save_rect,
+            "Save Workspace Settings",
+            .{ .variant = .secondary },
+        )) {
+            self.saveConfig() catch |err| {
+                self.setConnectionState(.error_state, "Failed to save config");
+                std.log.err("Save config failed: {s}", .{@errorName(err)});
+            };
+        }
+
+        if (self.mouse_released and
+            isSettingsPanelFocusField(self.settings_panel.focused_field) and
+            !ui_theme_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !ui_profile_rect.contains(.{ self.mouse_x, self.mouse_y }) and
+            !ui_theme_pack_rect.contains(.{ self.mouse_x, self.mouse_y }))
+        {
+            self.settings_panel.focused_field = .none;
+        }
+
+        const content_bottom_scrolled = y + button_height + layout.row_gap + layout.line_height;
         const content_bottom = content_bottom_scrolled + self.settings_panel.settings_scroll_y;
         const total_height = content_bottom - (rect.min[1] + pad);
         const viewport_h = @max(0.0, rect.max[1] - rect.min[1] - pad * 2.0);
@@ -11387,22 +12111,19 @@ const App = struct {
         self.clearDebugStreamSnapshot();
 
         const effective_url = self.settings_panel.server_url.items;
-
-        // Keep the Project panel operator token authoritative for admin auth:
-        // if the user typed one, sync it into config before selecting connect token.
-        if (self.settings_panel.project_operator_token.items.len > 0) {
-            const entered_admin_token = std.mem.trim(u8, self.settings_panel.project_operator_token.items, " \t");
-            if (entered_admin_token.len > 0 and !std.mem.eql(u8, self.config.getRoleToken(.admin), entered_admin_token)) {
-                self.config.setRoleToken(.admin, entered_admin_token) catch {};
-                self.config.save() catch {};
-            }
+        try self.persistLauncherConnectToken();
+        const connect_token = self.config.getRoleToken(self.config.active_role);
+        if (connect_token.len == 0) {
+            const msg = try std.fmt.allocPrint(
+                self.allocator,
+                "{s} token is required to connect.",
+                .{self.activeRoleLabel()},
+            );
+            defer self.allocator.free(msg);
+            self.setConnectionState(.error_state, msg);
+            if (self.ui_stage == .launcher) self.setLauncherNotice(msg);
+            return error.AuthTokenRequired;
         }
-
-        const selected_role_token = self.config.getRoleToken(self.config.active_role);
-        const connect_token = if (selected_role_token.len > 0)
-            selected_role_token
-        else
-            self.config.activeRoleToken();
         var ws_client = ws_client_mod.WebSocketClient.init(self.allocator, effective_url, connect_token) catch |err| {
             const msg = try std.fmt.allocPrint(self.allocator, "Client init failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
@@ -11616,6 +12337,9 @@ const App = struct {
         }
 
         self.setConnectionState(.connected, "Connected");
+        if (self.ui_stage == .launcher) {
+            self.setLauncherNotice("Connected. Select a project to open workspace.");
+        }
         self.requestDebugStreamSnapshot(true);
         self.settings_panel.focused_field = .none;
         if (self.ws_client) |*client| {
@@ -11635,11 +12359,8 @@ const App = struct {
             std.log.warn("Failed to load session history on connect: {s}", .{@errorName(err)});
         };
 
-        // Save URL to config on successful connect.
-        // Do not persist fallback tokens into the selected role.
-        if (selected_role_token.len > 0) {
-            self.config.setRoleToken(self.config.active_role, connect_token) catch {};
-        }
+        // Save selected role token + profile fields after successful connect.
+        self.config.setRoleToken(self.config.active_role, connect_token) catch {};
         if (self.settings_panel.default_session.items.len == 0) {
             try self.settings_panel.default_session.appendSlice(self.allocator, "main");
         }
@@ -11708,12 +12429,19 @@ const App = struct {
         self.focusSettingsPanel(manager);
     }
 
+    fn focusChatPanel(_: *App, manager: *panel_manager.PanelManager) void {
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .Chat) {
+                manager.focusPanel(panel.id);
+                return;
+            }
+        }
+    }
+
     fn focusedFormScrollTarget(self: *App, manager: *panel_manager.PanelManager) FormScrollTarget {
         const focused_id = manager.workspace.focused_panel_id orelse return .none;
         const panel = self.findPanelById(manager, focused_id) orelse return .none;
         if (panel.kind == .Settings or panel.kind == .Control) return .settings;
-        if (self.project_panel_id != null and self.project_panel_id.? == focused_id) return .projects;
-        if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Projects")) return .projects;
         return .none;
     }
 
@@ -11730,6 +12458,268 @@ const App = struct {
             if (std.mem.eql(u8, panel.title, title)) return true;
         }
         return false;
+    }
+
+    fn syncLauncherSelectionFromConfig(self: *App) void {
+        self.launcher_selected_profile_index = 0;
+        const selected_id = self.config.selected_profile_id orelse return;
+        for (self.config.connection_profiles, 0..) |profile, idx| {
+            if (!std.mem.eql(u8, profile.id, selected_id)) continue;
+            self.launcher_selected_profile_index = idx;
+            return;
+        }
+    }
+
+    fn nextConnectionProfileId(self: *App, profile_name: []const u8) ![]u8 {
+        var slug = std.ArrayList(u8).empty;
+        defer slug.deinit(self.allocator);
+
+        var wrote_separator = false;
+        for (profile_name) |ch| {
+            if (std.ascii.isAlphanumeric(ch)) {
+                try slug.append(self.allocator, std.ascii.toLower(ch));
+                wrote_separator = false;
+                continue;
+            }
+            if (!wrote_separator and slug.items.len > 0) {
+                try slug.append(self.allocator, '-');
+                wrote_separator = true;
+            }
+        }
+        while (slug.items.len > 0 and slug.items[slug.items.len - 1] == '-') {
+            slug.items.len -= 1;
+        }
+        if (slug.items.len == 0) {
+            try slug.appendSlice(self.allocator, "profile");
+        }
+
+        var suffix: usize = 1;
+        while (true) : (suffix += 1) {
+            const candidate = if (suffix == 1)
+                try self.allocator.dupe(u8, slug.items)
+            else
+                try std.fmt.allocPrint(self.allocator, "{s}-{d}", .{ slug.items, suffix });
+            if (!self.config.hasConnectionProfileId(candidate)) return candidate;
+            self.allocator.free(candidate);
+        }
+    }
+
+    fn saveSelectedProfileFromLauncher(self: *App) !void {
+        if (self.config.connection_profiles.len == 0) return error.ProfileNotFound;
+        const profile_name = std.mem.trim(u8, self.launcher_profile_name.items, " \t\r\n");
+        const server_url = std.mem.trim(u8, self.settings_panel.server_url.items, " \t\r\n");
+        const metadata_trimmed = std.mem.trim(u8, self.launcher_profile_metadata.items, " \t\r\n");
+        if (server_url.len == 0) return error.ServerUrlRequired;
+
+        try self.config.updateSelectedConnectionProfile(
+            profile_name,
+            server_url,
+            self.config.active_role,
+            if (metadata_trimmed.len > 0) metadata_trimmed else null,
+        );
+        try self.persistLauncherConnectToken();
+        try self.config.save();
+        self.setLauncherNotice("Profile saved.");
+    }
+
+    fn createConnectionProfileFromLauncher(self: *App) !void {
+        const profile_name = std.mem.trim(u8, self.launcher_profile_name.items, " \t\r\n");
+        const server_url = std.mem.trim(u8, self.settings_panel.server_url.items, " \t\r\n");
+        const metadata_trimmed = std.mem.trim(u8, self.launcher_profile_metadata.items, " \t\r\n");
+        if (server_url.len == 0) return error.ServerUrlRequired;
+
+        const display_name = if (profile_name.len > 0) profile_name else "Spider Web";
+        const profile_id = try self.nextConnectionProfileId(display_name);
+        defer self.allocator.free(profile_id);
+
+        try self.config.addConnectionProfile(
+            profile_id,
+            display_name,
+            server_url,
+            self.config.active_role,
+            if (metadata_trimmed.len > 0) metadata_trimmed else null,
+        );
+        try self.config.setSelectedProfileById(profile_id);
+        self.syncLauncherSelectionFromConfig();
+        try self.applyLauncherSelectedProfile();
+        try self.config.save();
+        self.setLauncherNotice("Profile created.");
+    }
+
+    fn applyLauncherSelectedProfile(self: *App) !void {
+        if (self.config.connection_profiles.len == 0) return;
+        const index = @min(self.launcher_selected_profile_index, self.config.connection_profiles.len - 1);
+        const profile = self.config.connection_profiles[index];
+        try self.config.setSelectedProfileById(profile.id);
+        self.settings_panel.server_url.clearRetainingCapacity();
+        try self.settings_panel.server_url.appendSlice(self.allocator, self.config.server_url);
+        self.launcher_profile_name.clearRetainingCapacity();
+        try self.launcher_profile_name.appendSlice(self.allocator, profile.name);
+        self.launcher_profile_metadata.clearRetainingCapacity();
+        if (profile.metadata) |value| {
+            try self.launcher_profile_metadata.appendSlice(self.allocator, value);
+        }
+        try self.config.setRoleToken(.admin, "");
+        try self.config.setRoleToken(.user, "");
+        self.settings_panel.project_operator_token.clearRetainingCapacity();
+        if (self.credential_store.load(profile.id, "role_admin") catch null) |token| {
+            defer self.allocator.free(token);
+            try self.config.setRoleToken(.admin, token);
+            try self.settings_panel.project_operator_token.appendSlice(self.allocator, token);
+        }
+        if (self.credential_store.load(profile.id, "role_user") catch null) |token| {
+            defer self.allocator.free(token);
+            try self.config.setRoleToken(.user, token);
+        }
+        try self.syncLauncherConnectTokenFromConfig();
+    }
+
+    fn setLauncherNotice(self: *App, message: []const u8) void {
+        if (self.launcher_notice) |existing| self.allocator.free(existing);
+        self.launcher_notice = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearLauncherNotice(self: *App) void {
+        if (self.launcher_notice) |existing| self.allocator.free(existing);
+        self.launcher_notice = null;
+    }
+
+    fn canRenderWorkspaceStage(self: *const App) bool {
+        if (self.connection_state != .connected) return false;
+        if (self.ws_client == null) return false;
+        if (self.active_project_id == null) return false;
+        return true;
+    }
+
+    fn layoutPathForProject(
+        self: *App,
+        profile_id: []const u8,
+        project_id: []const u8,
+    ) ![]u8 {
+        const config_dir = try config_mod.Config.getConfigDir(self.allocator);
+        defer self.allocator.free(config_dir);
+        const hash = std.hash.Wyhash.hash(0, profile_id) ^ (std.hash.Wyhash.hash(0, project_id) << 1);
+        const file_name = try std.fmt.allocPrint(self.allocator, "{x:0>16}.workspace.json", .{hash});
+        defer self.allocator.free(file_name);
+        const layouts_dir = try std.fs.path.join(self.allocator, &.{ config_dir, "layouts" });
+        defer self.allocator.free(layouts_dir);
+        try std.fs.cwd().makePath(layouts_dir);
+        return std.fs.path.join(self.allocator, &.{ layouts_dir, file_name });
+    }
+
+    fn saveActiveWorkspaceLayout(self: *App) void {
+        const profile_id = self.active_profile_id orelse return;
+        const project_id = self.active_project_id orelse return;
+        const layout_path = self.layoutPathForProject(profile_id, project_id) catch return;
+        defer self.allocator.free(layout_path);
+        zui.ui.workspace_store.save(self.allocator, layout_path, &self.manager.workspace) catch return;
+        self.config.setWorkspaceLayoutPath(profile_id, project_id, layout_path) catch {};
+        self.config.save() catch {};
+    }
+
+    fn restoreWorkspaceLayout(self: *App, profile_id: []const u8, project_id: []const u8) !void {
+        const configured_path = self.config.workspaceLayoutPath(profile_id, project_id);
+        const layout_path = if (configured_path) |path|
+            try self.allocator.dupe(u8, path)
+        else blk: {
+            break :blk try self.layoutPathForProject(profile_id, project_id);
+        };
+        defer self.allocator.free(layout_path);
+
+        var next_workspace = zui.ui.workspace_store.loadOrDefault(self.allocator, layout_path) catch |err| blk: {
+            std.log.warn("Failed to load project layout, using canonical default: {s}", .{@errorName(err)});
+            break :blk try workspace.Workspace.initDefault(self.allocator);
+        };
+        errdefer next_workspace.deinit(self.allocator);
+        if (next_workspace.panels.items.len == 0) {
+            next_workspace.deinit(self.allocator);
+            next_workspace = try workspace.Workspace.initDefault(self.allocator);
+        }
+
+        self.closeAllSecondaryWindows();
+        self.manager.deinit();
+        self.manager = panel_manager.PanelManager.init(self.allocator, next_workspace, &self.next_panel_id);
+        self.bindNextPanelId(&self.manager);
+        self.bindMainWindowManager();
+        self.removeLegacyProjectPanels(&self.manager);
+        self.removeWorkspaceSettingsPanels(&self.manager);
+        self.focusChatPanel(&self.manager);
+    }
+
+    fn openSelectedProjectFromLauncher(self: *App) !void {
+        if (self.connection_state != .connected) return error.NotConnected;
+        if (self.ws_client == null) return error.NotConnected;
+        const project_id = self.selectedProjectId() orelse return error.ProjectIdRequired;
+        if (project_id.len == 0) return error.ProjectIdRequired;
+        try self.activateSelectedProject();
+        const profile_id = self.config.selectedProfileId();
+        self.saveActiveWorkspaceLayout();
+        if (self.active_profile_id) |existing| self.allocator.free(existing);
+        if (self.active_project_id) |existing| self.allocator.free(existing);
+        self.active_profile_id = try self.allocator.dupe(u8, profile_id);
+        self.active_project_id = try self.allocator.dupe(u8, project_id);
+        self.ui_stage = .workspace;
+        self.ide_menu_open = null;
+        self.windows_menu_open_window_id = null;
+        self.setLauncherNotice("Project opened.");
+        self.restoreWorkspaceLayout(profile_id, project_id) catch {};
+        self.config.recordRecentProject(profile_id, project_id, null) catch {};
+        self.config.save() catch {};
+        _ = c.SDL_SetWindowTitle(self.window, "ZiggyStarSpider - Workspace");
+    }
+
+    fn returnToLauncher(self: *App, reason: stage_machine.ReturnReason) void {
+        self.saveActiveWorkspaceLayout();
+        self.ui_stage = .launcher;
+        self.ide_menu_open = null;
+        self.windows_menu_open_window_id = null;
+        if (self.active_profile_id) |value| {
+            self.allocator.free(value);
+            self.active_profile_id = null;
+        }
+        if (self.active_project_id) |value| {
+            self.allocator.free(value);
+            self.active_project_id = null;
+        }
+        self.closeAllSecondaryWindows();
+        _ = c.SDL_SetWindowTitle(self.window, "ZiggyStarSpider - Launcher");
+        switch (reason) {
+            .switched_project => self.setLauncherNotice("Switched back to launcher. Select another project."),
+            .connection_lost => self.setLauncherNotice("Connection lost. Reconnect to continue."),
+            .disconnected => self.setLauncherNotice("Disconnected from Spider Web."),
+            .none => self.clearLauncherNotice(),
+        }
+    }
+
+    fn closeAllSecondaryWindows(self: *App) void {
+        var idx: usize = 0;
+        while (idx < self.ui_windows.items.len) {
+            const window = self.ui_windows.items[idx];
+            if (window.id == self.main_window_id) {
+                idx += 1;
+                continue;
+            }
+            _ = self.ui_windows.swapRemove(idx);
+            self.destroyUiWindow(window);
+        }
+    }
+
+    fn persistMainWindowGeometry(self: *App) void {
+        var window_x: c_int = 0;
+        var window_y: c_int = 0;
+        var window_w: c_int = 0;
+        var window_h: c_int = 0;
+        _ = c.SDL_GetWindowPosition(self.window, &window_x, &window_y);
+        _ = c.SDL_GetWindowSize(self.window, &window_w, &window_h);
+        if (window_w <= 0 or window_h <= 0) return;
+
+        self.config.window_x = window_x;
+        self.config.window_y = window_y;
+        self.config.window_width = window_w;
+        self.config.window_height = window_h;
+        self.config.save() catch |err| {
+            std.log.warn("Failed to persist window geometry: {s}", .{@errorName(err)});
+        };
     }
 
     fn disconnect(self: *App) void {
@@ -12017,7 +13007,18 @@ const App = struct {
 
         const job_id = self.submitChatJobViaFsrpc(client, text) catch |err| {
             std.log.err("[GUI] sendChatMessageText: fsrpc submit failed: {s}", .{@errorName(err)});
-            const err_text = try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{@errorName(err)});
+            const remote_detail = if (err == error.RemoteError)
+                (control_plane.lastRemoteError() orelse (self.fsrpc_last_remote_error orelse @errorName(err)))
+            else
+                @errorName(err);
+            const err_text = if (err == error.RemoteError and isTokenAuthRemoteError(remote_detail))
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "Send failed: {s}. Verify the {s} token in Launcher.",
+                    .{ remote_detail, self.activeRoleLabel() },
+                )
+            else
+                try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{remote_detail});
             defer self.allocator.free(err_text);
             try self.appendMessage("system", err_text, null);
             if (self.pending_send_message_id) |message_id| {
@@ -12221,16 +13222,7 @@ const App = struct {
 
         const escaped_job = try jsonEscape(self.allocator, job_name_owned);
         defer self.allocator.free(escaped_job);
-        const walk_result_tag = self.nextFsrpcTag();
-        const walk_result_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"agents\",\"self\",\"jobs\",\"{s}\",\"result.txt\"]}}",
-            .{ walk_result_tag, result_fid, escaped_job },
-        );
-        defer self.allocator.free(walk_result_req);
-        var walk_result = try self.sendAndAwaitFsrpc(client, walk_result_req, walk_result_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer walk_result.deinit(self.allocator);
-        try self.ensureFsrpcOk(&walk_result);
+        try self.walkJobResultPath(client, result_fid, escaped_job);
 
         const open_result_tag = self.nextFsrpcTag();
         const open_result_req = try std.fmt.allocPrint(
@@ -12266,22 +13258,45 @@ const App = struct {
         return decoded;
     }
 
+    fn walkJobResultPath(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        fid: u32,
+        escaped_job: []const u8,
+    ) !void {
+        const path_templates = [_][]const u8{
+            "[\"jobs\",\"{s}\",\"result.txt\"]",
+            "[\"global\",\"jobs\",\"{s}\",\"result.txt\"]",
+            "[\"agents\",\"self\",\"jobs\",\"{s}\",\"result.txt\"]",
+        };
+        var last_err: anyerror = error.FileNotFound;
+        for (path_templates) |template| {
+            const path_json = try std.fmt.allocPrint(self.allocator, template, .{escaped_job});
+            defer self.allocator.free(path_json);
+            const walk_tag = self.nextFsrpcTag();
+            const walk_req = try std.fmt.allocPrint(
+                self.allocator,
+                "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+                .{ walk_tag, fid, path_json },
+            );
+            defer self.allocator.free(walk_req);
+            var walk = try self.sendAndAwaitFsrpc(client, walk_req, walk_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+            defer walk.deinit(self.allocator);
+            self.ensureFsrpcOk(&walk) catch |err| {
+                last_err = err;
+                continue;
+            };
+            return;
+        }
+        return last_err;
+    }
+
     fn submitChatJobViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
         try self.fsrpcBootstrapGui(client);
 
         const input_fid = self.nextFsrpcFid();
         defer self.fsrpcClunkBestEffort(client, input_fid);
-
-        const walk_input_tag = self.nextFsrpcTag();
-        const walk_input_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":[\"agents\",\"self\",\"chat\",\"control\",\"input\"]}}",
-            .{ walk_input_tag, input_fid },
-        );
-        defer self.allocator.free(walk_input_req);
-        var walk_input = try self.sendAndAwaitFsrpc(client, walk_input_req, walk_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer walk_input.deinit(self.allocator);
-        try self.ensureFsrpcOk(&walk_input);
+        try self.walkChatInputPath(client, input_fid);
 
         const open_input_tag = self.nextFsrpcTag();
         const open_input_req = try std.fmt.allocPrint(
@@ -12322,6 +13337,32 @@ const App = struct {
         const job_value = write_payload.get("job") orelse return error.InvalidResponse;
         if (job_value != .string) return error.InvalidResponse;
         return self.allocator.dupe(u8, job_value.string);
+    }
+
+    fn walkChatInputPath(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) !void {
+        const paths = [_][]const u8{
+            "[\"global\",\"chat\",\"control\",\"input\"]",
+            "[\"capabilities\",\"chat\",\"control\",\"input\"]",
+            "[\"agents\",\"self\",\"chat\",\"control\",\"input\"]",
+        };
+        var last_err: anyerror = error.FileNotFound;
+        for (paths) |path_json| {
+            const walk_tag = self.nextFsrpcTag();
+            const walk_req = try std.fmt.allocPrint(
+                self.allocator,
+                "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+                .{ walk_tag, fid, path_json },
+            );
+            defer self.allocator.free(walk_req);
+            var walk = try self.sendAndAwaitFsrpc(client, walk_req, walk_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+            defer walk.deinit(self.allocator);
+            self.ensureFsrpcOk(&walk) catch |err| {
+                last_err = err;
+                continue;
+            };
+            return;
+        }
+        return last_err;
     }
 
     fn splitFsPathSegments(self: *App, path: []const u8) !std.ArrayListUnmanaged([]u8) {
@@ -12514,11 +13555,32 @@ const App = struct {
     }
 
     fn readJobStatusGui(self: *App, client: *ws_client_mod.WebSocketClient, job_id: []const u8) !JobStatusInfo {
-        const status_path = try std.fmt.allocPrint(self.allocator, "/agents/self/jobs/{s}/status.json", .{job_id});
-        defer self.allocator.free(status_path);
-        const raw = try self.readFsPathTextGui(client, status_path);
+        const raw = try self.readJobArtifactTextGui(client, job_id, "status.json");
         defer self.allocator.free(raw);
         return self.parseJobStatusInfo(raw);
+    }
+
+    fn readJobArtifactTextGui(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        job_id: []const u8,
+        leaf: []const u8,
+    ) ![]u8 {
+        const jobs_path = try std.fmt.allocPrint(self.allocator, "/jobs/{s}/{s}", .{ job_id, leaf });
+        defer self.allocator.free(jobs_path);
+        if (self.readFsPathTextGui(client, jobs_path) catch null) |raw| {
+            return raw;
+        }
+
+        const global_jobs_path = try std.fmt.allocPrint(self.allocator, "/global/jobs/{s}/{s}", .{ job_id, leaf });
+        defer self.allocator.free(global_jobs_path);
+        if (self.readFsPathTextGui(client, global_jobs_path) catch null) |raw| {
+            return raw;
+        }
+
+        const legacy_jobs_path = try std.fmt.allocPrint(self.allocator, "/agents/self/jobs/{s}/{s}", .{ job_id, leaf });
+        defer self.allocator.free(legacy_jobs_path);
+        return self.readFsPathTextGui(client, legacy_jobs_path);
     }
 
     fn replaySessionReceiveFromJobLog(self: *App, fallback_session_key: []const u8, log_text: []const u8) !bool {
@@ -12606,16 +13668,12 @@ const App = struct {
             return false;
         }
 
-        const result_path = try std.fmt.allocPrint(self.allocator, "/agents/self/jobs/{s}/result.txt", .{job_id});
-        defer self.allocator.free(result_path);
-        const result = self.readFsPathTextGui(client, result_path) catch |err| blk: {
+        const result = self.readJobArtifactTextGui(client, job_id, "result.txt") catch |err| blk: {
             const msg = try std.fmt.allocPrint(self.allocator, "resume read failed: {s}", .{@errorName(err)});
             break :blk msg;
         };
         defer self.allocator.free(result);
-        const log_path = try std.fmt.allocPrint(self.allocator, "/agents/self/jobs/{s}/log.txt", .{job_id});
-        defer self.allocator.free(log_path);
-        const maybe_log = self.readFsPathTextGui(client, log_path) catch null;
+        const maybe_log = self.readJobArtifactTextGui(client, job_id, "log.txt") catch null;
         defer if (maybe_log) |value| self.allocator.free(value);
 
         if (std.mem.eql(u8, status.state, "failed")) {
@@ -14055,6 +15113,47 @@ const App = struct {
         }
         manager.focusPanel(panel_id);
         return panel_id;
+    }
+
+    fn removeLegacyProjectPanels(self: *App, manager: *panel_manager.PanelManager) void {
+        var removed_any = false;
+        var idx: usize = 0;
+        while (idx < manager.workspace.panels.items.len) {
+            const panel = manager.workspace.panels.items[idx];
+            if (panel.kind != .ToolOutput or !std.mem.eql(u8, panel.title, "Projects")) {
+                idx += 1;
+                continue;
+            }
+
+            var removed_panel = manager.workspace.panels.swapRemove(idx);
+            removed_panel.deinit(self.allocator);
+            removed_any = true;
+        }
+        self.project_panel_id = null;
+        if (removed_any) {
+            _ = manager.workspace.syncDockLayout() catch false;
+            manager.workspace.markDirty();
+        }
+    }
+
+    fn removeWorkspaceSettingsPanels(self: *App, manager: *panel_manager.PanelManager) void {
+        var removed_any = false;
+        var idx: usize = 0;
+        while (idx < manager.workspace.panels.items.len) {
+            const panel = manager.workspace.panels.items[idx];
+            if (panel.kind != .Settings and panel.kind != .Control) {
+                idx += 1;
+                continue;
+            }
+
+            var removed_panel = manager.workspace.panels.swapRemove(idx);
+            removed_panel.deinit(self.allocator);
+            removed_any = true;
+        }
+        if (removed_any) {
+            _ = manager.workspace.syncDockLayout() catch false;
+            manager.workspace.markDirty();
+        }
     }
 
     fn ensureFilesystemPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
