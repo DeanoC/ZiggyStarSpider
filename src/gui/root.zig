@@ -94,6 +94,8 @@ const TERMINAL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 const TERMINAL_READ_POLL_INTERVAL_MS: i64 = 120;
 const TERMINAL_READ_TIMEOUT_MS: u32 = 1;
 const TERMINAL_READ_MAX_BYTES: usize = 8 * 1024;
+const TEXT_INPUT_DOUBLE_CLICK_MS: i64 = 350;
+const TEXT_EDIT_HISTORY_LIMIT: usize = 128;
 const TERMINAL_BACKEND_KIND = if (@hasDecl(build_options, "terminal_backend"))
     build_options.terminal_backend
 else
@@ -119,6 +121,17 @@ const FormScrollTarget = enum {
     none,
     settings,
     projects,
+};
+
+const TextEditSnapshot = struct {
+    text: []u8,
+    cursor: usize,
+    selection_anchor: ?usize,
+
+    fn deinit(self: *TextEditSnapshot, allocator: std.mem.Allocator) void {
+        allocator.free(self.text);
+        self.* = undefined;
+    }
 };
 
 const SessionAttachUiState = enum {
@@ -325,6 +338,11 @@ const SettingsFocusField = enum {
     perf_benchmark_label,
     filesystem_contract_payload,
     terminal_command_input,
+};
+
+const PointerInputLayer = enum {
+    base,
+    text_input_context_menu,
 };
 
 fn isSettingsPanelFocusField(field: SettingsFocusField) bool {
@@ -816,6 +834,22 @@ const App = struct {
     mouse_down: bool = false,
     mouse_clicked: bool = false,
     mouse_released: bool = false,
+    mouse_right_clicked: bool = false,
+    text_input_cursor: usize = 0,
+    text_input_selection_anchor: ?usize = null,
+    text_input_dragging: bool = false,
+    text_input_drag_anchor: usize = 0,
+    text_input_cursor_initialized: bool = false,
+    text_input_context_menu_open: bool = false,
+    text_input_context_menu_anchor: [2]f32 = .{ 0.0, 0.0 },
+    text_input_context_menu_rect: ?Rect = null,
+    text_input_context_menu_rendering: bool = false,
+    text_input_last_left_click_ms: i64 = 0,
+    text_input_last_left_click_pos: [2]f32 = .{ 0.0, 0.0 },
+    text_edit_history_field: SettingsFocusField = .none,
+    text_edit_undo_stack: std.ArrayListUnmanaged(TextEditSnapshot) = .{},
+    text_edit_redo_stack: std.ArrayListUnmanaged(TextEditSnapshot) = .{},
+    active_pointer_layer: PointerInputLayer = .base,
     render_input_queue: ?*ui_input_state.InputQueue = null,
     frame_dt_seconds: f32 = 1.0 / 60.0,
 
@@ -1148,6 +1182,9 @@ const App = struct {
         if (self.perf_automation_report_path) |value| self.allocator.free(value);
         self.clearNodeServiceReloadDiagnostics();
         self.clearNodeServiceDiffPreview();
+        self.clearTextEditHistory();
+        self.text_edit_undo_stack.deinit(self.allocator);
+        self.text_edit_redo_stack.deinit(self.allocator);
         self.perf_history.deinit(self.allocator);
 
         zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
@@ -1230,6 +1267,7 @@ const App = struct {
                 window.queue.clear(self.allocator);
                 self.mouse_clicked = false;
                 self.mouse_released = false;
+                self.mouse_right_clicked = false;
 
                 // Get DPI scale for window-specific rendering
                 const dpi_scale_raw: f32 = c.SDL_GetWindowDisplayScale(window.window);
@@ -1645,9 +1683,11 @@ const App = struct {
             switch (evt) {
                 .mouse_down => |md| {
                     if (md.button == .left) self.mouse_clicked = true;
+                    if (md.button == .right) self.mouse_right_clicked = true;
                 },
                 .mouse_up => |mu| {
                     if (mu.button == .left) self.mouse_released = true;
+                    if (mu.button == .left) self.text_input_dragging = false;
                 },
                 .key_down => |ke| {
                     try self.handleKeyDownEvent(ke, request_spawn_window, manager);
@@ -1687,8 +1727,16 @@ const App = struct {
             self.debug_scrollbar_dragging = false;
             self.setDragMouseCapture(false);
         }
+        if (self.settings_panel.focused_field == .none) {
+            self.text_input_selection_anchor = null;
+            self.text_input_context_menu_open = false;
+            self.text_input_context_menu_rect = null;
+            self.text_input_dragging = false;
+            self.text_input_cursor_initialized = false;
+        }
 
         if (self.ui_stage == .launcher) return;
+        if (self.text_input_context_menu_open) return;
 
         var dock_area = self.dockViewportForWindow(ui_window) orelse blk: {
             var fb_w: c_int = 0;
@@ -3605,32 +3653,350 @@ const App = struct {
         };
     }
 
-    fn popLastUtf8Codepoint(buf: *std.ArrayList(u8)) void {
-        if (buf.items.len == 0) return;
-        var idx = buf.items.len;
-        while (idx > 0) {
-            idx -= 1;
-            if ((buf.items[idx] & 0xC0) != 0x80) {
-                buf.shrinkRetainingCapacity(idx);
+    fn clearTextEditSnapshotStack(self: *App, stack: *std.ArrayListUnmanaged(TextEditSnapshot)) void {
+        while (stack.items.len > 0) {
+            var snapshot = stack.items[stack.items.len - 1];
+            stack.items.len -= 1;
+            snapshot.deinit(self.allocator);
+        }
+    }
+
+    fn clearTextEditHistory(self: *App) void {
+        self.clearTextEditSnapshotStack(&self.text_edit_undo_stack);
+        self.clearTextEditSnapshotStack(&self.text_edit_redo_stack);
+        self.text_edit_history_field = .none;
+    }
+
+    fn ensureTextEditHistoryField(self: *App, field: SettingsFocusField) void {
+        if (field == .none) return;
+        if (self.text_edit_history_field == field) return;
+        self.clearTextEditSnapshotStack(&self.text_edit_undo_stack);
+        self.clearTextEditSnapshotStack(&self.text_edit_redo_stack);
+        self.text_edit_history_field = field;
+    }
+
+    fn pushTextEditSnapshot(
+        self: *App,
+        stack: *std.ArrayListUnmanaged(TextEditSnapshot),
+        text: []const u8,
+        cursor: usize,
+        selection_anchor: ?usize,
+    ) !void {
+        const clamped_cursor = @min(cursor, text.len);
+        const clamped_anchor = if (selection_anchor) |value| @min(value, text.len) else null;
+        if (stack.items.len > 0) {
+            const top = stack.items[stack.items.len - 1];
+            if (top.cursor == clamped_cursor and top.selection_anchor == clamped_anchor and std.mem.eql(u8, top.text, text)) {
                 return;
             }
         }
-        buf.clearRetainingCapacity();
+        if (stack.items.len >= TEXT_EDIT_HISTORY_LIMIT) {
+            var oldest = stack.items[0];
+            oldest.deinit(self.allocator);
+            if (stack.items.len > 1) {
+                std.mem.copyForwards(
+                    TextEditSnapshot,
+                    stack.items[0 .. stack.items.len - 1],
+                    stack.items[1..stack.items.len],
+                );
+            }
+            stack.items.len -= 1;
+        }
+
+        const snapshot = TextEditSnapshot{
+            .text = try self.allocator.dupe(u8, text),
+            .cursor = clamped_cursor,
+            .selection_anchor = clamped_anchor,
+        };
+        errdefer self.allocator.free(snapshot.text);
+        try stack.append(self.allocator, snapshot);
     }
 
-    fn appendSingleLineText(
-        self: *App,
-        buf: *std.ArrayList(u8),
-        text: []const u8,
-    ) !void {
+    fn recordFocusedTextUndoState(self: *App, buf: *std.ArrayList(u8)) !void {
+        const focused_field = self.settings_panel.focused_field;
+        if (focused_field == .none) return;
+        self.ensureTextEditHistoryField(focused_field);
+        self.clampFocusedTextInputState(buf.items);
+        try self.pushTextEditSnapshot(
+            &self.text_edit_undo_stack,
+            buf.items,
+            self.text_input_cursor,
+            self.text_input_selection_anchor,
+        );
+        self.clearTextEditSnapshotStack(&self.text_edit_redo_stack);
+    }
+
+    fn applyTextEditSnapshot(self: *App, buf: *std.ArrayList(u8), snapshot: *const TextEditSnapshot) !void {
+        buf.clearRetainingCapacity();
+        try buf.appendSlice(self.allocator, snapshot.text);
+        self.text_input_cursor = @min(snapshot.cursor, buf.items.len);
+        self.text_input_selection_anchor = if (snapshot.selection_anchor) |value| @min(value, buf.items.len) else null;
+        self.text_input_cursor_initialized = true;
+    }
+
+    fn undoFocusedTextEdit(self: *App, buf: *std.ArrayList(u8)) !bool {
+        const focused_field = self.settings_panel.focused_field;
+        if (focused_field == .none) return false;
+        self.ensureTextEditHistoryField(focused_field);
+        if (self.text_edit_undo_stack.items.len == 0) return false;
+
+        self.clampFocusedTextInputState(buf.items);
+        try self.pushTextEditSnapshot(
+            &self.text_edit_redo_stack,
+            buf.items,
+            self.text_input_cursor,
+            self.text_input_selection_anchor,
+        );
+
+        var snapshot = self.text_edit_undo_stack.items[self.text_edit_undo_stack.items.len - 1];
+        self.text_edit_undo_stack.items.len -= 1;
+        defer snapshot.deinit(self.allocator);
+        try self.applyTextEditSnapshot(buf, &snapshot);
+        return true;
+    }
+
+    fn redoFocusedTextEdit(self: *App, buf: *std.ArrayList(u8)) !bool {
+        const focused_field = self.settings_panel.focused_field;
+        if (focused_field == .none) return false;
+        self.ensureTextEditHistoryField(focused_field);
+        if (self.text_edit_redo_stack.items.len == 0) return false;
+
+        self.clampFocusedTextInputState(buf.items);
+        try self.pushTextEditSnapshot(
+            &self.text_edit_undo_stack,
+            buf.items,
+            self.text_input_cursor,
+            self.text_input_selection_anchor,
+        );
+
+        var snapshot = self.text_edit_redo_stack.items[self.text_edit_redo_stack.items.len - 1];
+        self.text_edit_redo_stack.items.len -= 1;
+        defer snapshot.deinit(self.allocator);
+        try self.applyTextEditSnapshot(buf, &snapshot);
+        return true;
+    }
+
+    fn hasSingleLineInsertableBytes(text: []const u8) bool {
         for (text) |ch| {
             if (ch == '\n' or ch == '\r') continue;
             if (ch < 0x20) continue;
-            try buf.append(self.allocator, ch);
+            return true;
+        }
+        return false;
+    }
+
+    fn prevUtf8Boundary(text: []const u8, index: usize) usize {
+        if (index == 0) return 0;
+        var i = @min(index, text.len) - 1;
+        while (i > 0 and (text[i] & 0xC0) == 0x80) : (i -= 1) {}
+        return i;
+    }
+
+    fn clampFocusedTextInputState(self: *App, text: []const u8) void {
+        if (self.text_input_cursor > text.len) self.text_input_cursor = text.len;
+        if (self.text_input_selection_anchor) |anchor| {
+            self.text_input_selection_anchor = @min(anchor, text.len);
         }
     }
 
+    fn focusedTextSelectionRange(self: *App, text: []const u8) ?[2]usize {
+        self.clampFocusedTextInputState(text);
+        const anchor = self.text_input_selection_anchor orelse return null;
+        if (anchor == self.text_input_cursor) return null;
+        if (anchor < self.text_input_cursor) return .{ anchor, self.text_input_cursor };
+        return .{ self.text_input_cursor, anchor };
+    }
+
+    fn clearFocusedTextSelection(self: *App) void {
+        self.text_input_selection_anchor = null;
+    }
+
+    fn removeRangeFromBuffer(buf: *std.ArrayList(u8), start: usize, end: usize) void {
+        if (end <= start) return;
+        const len = buf.items.len;
+        if (start >= len) return;
+        const clamped_end = @min(end, len);
+        if (clamped_end <= start) return;
+        const tail_len = len - clamped_end;
+        if (tail_len > 0) {
+            std.mem.copyForwards(u8, buf.items[start..], buf.items[clamped_end..]);
+        }
+        buf.shrinkRetainingCapacity(len - (clamped_end - start));
+    }
+
+    fn deleteFocusedTextSelection(self: *App, buf: *std.ArrayList(u8)) bool {
+        const range = self.focusedTextSelectionRange(buf.items) orelse return false;
+        removeRangeFromBuffer(buf, range[0], range[1]);
+        self.text_input_cursor = range[0];
+        self.clearFocusedTextSelection();
+        return true;
+    }
+
+    fn insertSingleLineTextAtCursor(
+        self: *App,
+        buf: *std.ArrayList(u8),
+        text: []const u8,
+    ) !bool {
+        if (text.len == 0) return false;
+        var changed = self.deleteFocusedTextSelection(buf);
+        var inserted: usize = 0;
+        for (text) |ch| {
+            if (ch == '\n' or ch == '\r') continue;
+            if (ch < 0x20) continue;
+            try buf.insert(self.allocator, self.text_input_cursor + inserted, ch);
+            inserted += 1;
+        }
+        if (inserted > 0) {
+            self.text_input_cursor += inserted;
+            changed = true;
+        }
+        self.clearFocusedTextSelection();
+        return changed;
+    }
+
+    fn copyFocusedTextSelectionToClipboard(self: *App, text: []const u8) bool {
+        const range = self.focusedTextSelectionRange(text) orelse return false;
+        if (range[1] <= range[0]) return false;
+        self.copyTextToClipboard(text[range[0]..range[1]]) catch return false;
+        return true;
+    }
+
+    fn moveFocusedTextCursor(self: *App, text: []const u8, key: anytype, shift: bool) void {
+        self.clampFocusedTextInputState(text);
+        const old_cursor = self.text_input_cursor;
+        switch (key) {
+            .left_arrow => {
+                if (self.text_input_cursor > 0) {
+                    self.text_input_cursor = prevUtf8Boundary(text, self.text_input_cursor);
+                }
+            },
+            .right_arrow => {
+                if (self.text_input_cursor < text.len) {
+                    self.text_input_cursor = nextUtf8Boundary(text, self.text_input_cursor);
+                }
+            },
+            .home => self.text_input_cursor = 0,
+            .end => self.text_input_cursor = text.len,
+            else => {},
+        }
+        if (shift) {
+            if (self.text_input_selection_anchor == null) {
+                self.text_input_selection_anchor = old_cursor;
+            }
+            if (self.text_input_selection_anchor.? == self.text_input_cursor) {
+                self.clearFocusedTextSelection();
+            }
+        } else {
+            self.clearFocusedTextSelection();
+        }
+    }
+
+    fn handleFocusedTextInputKey(self: *App, buf: *std.ArrayList(u8), key_evt: anytype) !bool {
+        if (!self.text_input_cursor_initialized) {
+            self.text_input_cursor = buf.items.len;
+            self.text_input_cursor_initialized = true;
+        }
+        const focused_field = self.settings_panel.focused_field;
+        if (focused_field == .none) return false;
+        self.ensureTextEditHistoryField(focused_field);
+
+        if (key_evt.repeat and (key_evt.key == .c or key_evt.key == .x or key_evt.key == .v or key_evt.key == .a)) {
+            return true;
+        }
+        const ctrl = key_evt.mods.ctrl;
+        const shift = key_evt.mods.shift;
+        switch (key_evt.key) {
+            .a => {
+                if (ctrl) {
+                    self.text_input_cursor = buf.items.len;
+                    self.text_input_selection_anchor = 0;
+                    return true;
+                }
+            },
+            .c => {
+                if (ctrl) {
+                    _ = self.copyFocusedTextSelectionToClipboard(buf.items);
+                    return true;
+                }
+            },
+            .x => {
+                if (ctrl) {
+                    if (self.copyFocusedTextSelectionToClipboard(buf.items)) {
+                        try self.recordFocusedTextUndoState(buf);
+                        _ = self.deleteFocusedTextSelection(buf);
+                    }
+                    return true;
+                }
+            },
+            .v => {
+                if (ctrl) {
+                    const clip = zapp.clipboard.getTextZ();
+                    if (clip.len > 0 and (self.focusedTextSelectionRange(buf.items) != null or hasSingleLineInsertableBytes(clip))) {
+                        try self.recordFocusedTextUndoState(buf);
+                        _ = try self.insertSingleLineTextAtCursor(buf, clip);
+                    }
+                    return true;
+                }
+            },
+            .z => {
+                if (ctrl) {
+                    if (shift) {
+                        _ = try self.redoFocusedTextEdit(buf);
+                    } else {
+                        _ = try self.undoFocusedTextEdit(buf);
+                    }
+                    return true;
+                }
+            },
+            .y => {
+                if (ctrl) {
+                    _ = try self.redoFocusedTextEdit(buf);
+                    return true;
+                }
+            },
+            .left_arrow, .right_arrow, .home, .end => {
+                self.moveFocusedTextCursor(buf.items, key_evt.key, shift);
+                return true;
+            },
+            .back_space => {
+                self.clampFocusedTextInputState(buf.items);
+                if (self.focusedTextSelectionRange(buf.items) != null) {
+                    try self.recordFocusedTextUndoState(buf);
+                    _ = self.deleteFocusedTextSelection(buf);
+                    return true;
+                }
+                if (self.text_input_cursor > 0) {
+                    try self.recordFocusedTextUndoState(buf);
+                    const prev = prevUtf8Boundary(buf.items, self.text_input_cursor);
+                    removeRangeFromBuffer(buf, prev, self.text_input_cursor);
+                    self.text_input_cursor = prev;
+                }
+                return true;
+            },
+            .delete => {
+                self.clampFocusedTextInputState(buf.items);
+                if (self.focusedTextSelectionRange(buf.items) != null) {
+                    try self.recordFocusedTextUndoState(buf);
+                    _ = self.deleteFocusedTextSelection(buf);
+                    return true;
+                }
+                if (self.text_input_cursor < buf.items.len) {
+                    try self.recordFocusedTextUndoState(buf);
+                    const next = nextUtf8Boundary(buf.items, self.text_input_cursor);
+                    removeRangeFromBuffer(buf, self.text_input_cursor, next);
+                }
+                return true;
+            },
+            else => {},
+        }
+        return false;
+    }
+
     fn handleKeyDownEvent(self: *App, key_evt: anytype, request_spawn_window: *bool, manager: *panel_manager.PanelManager) !void {
+        if (self.focusedSettingsBuffer()) |buf| {
+            if (try self.handleFocusedTextInputKey(buf, key_evt)) return;
+        }
+
         switch (key_evt.key) {
             .escape => {
                 self.running = false;
@@ -3651,20 +4017,6 @@ const App = struct {
                             self.setTerminalError(text);
                         }
                     };
-                }
-            },
-            .v => {
-                if (key_evt.mods.ctrl and !key_evt.repeat) {
-                    const clip = zapp.clipboard.getTextZ();
-                    if (clip.len > 0) {
-                        if (self.focusedSettingsBuffer()) |buf| {
-                            try self.appendSingleLineText(buf, clip);
-                        }
-                    }
-                }
-                // Also allow copying selected debug line with Ctrl+C when debug panel is focused
-                if (key_evt.mods.ctrl and !key_evt.repeat and self.debug_panel_id != null and self.isPanelFocused(manager, self.debug_panel_id.?)) {
-                    // Ctrl+V handled above; we also treat Ctrl+C here
                 }
             },
             .c => {
@@ -3701,16 +4053,6 @@ const App = struct {
                             }
                         }
                     }
-                }
-            },
-            .back_space => {
-                if (self.focusedSettingsBuffer()) |buf| {
-                    popLastUtf8Codepoint(buf);
-                }
-            },
-            .delete => {
-                if (self.focusedSettingsBuffer()) |buf| {
-                    popLastUtf8Codepoint(buf);
                 }
             },
             .page_up => {
@@ -3786,7 +4128,17 @@ const App = struct {
     fn handleTextInput(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
         if (self.focusedSettingsBuffer()) |buf| {
-            try self.appendSingleLineText(buf, text);
+            const focused_field = self.settings_panel.focused_field;
+            if (focused_field == .none) return;
+            self.ensureTextEditHistoryField(focused_field);
+            if (!self.text_input_cursor_initialized) {
+                self.text_input_cursor = buf.items.len;
+                self.text_input_cursor_initialized = true;
+            }
+            if (self.focusedTextSelectionRange(buf.items) != null or hasSingleLineInsertableBytes(text)) {
+                try self.recordFocusedTextUndoState(buf);
+                _ = try self.insertSingleLineTextAtCursor(buf, text);
+            }
         }
     }
 
@@ -4954,6 +5306,45 @@ const App = struct {
         if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
     }
 
+    fn resolvedTextInputContextMenuRect(self: *App, fb_width: u32, fb_height: u32) Rect {
+        const line_height = self.textLineHeight();
+        const item_h = @max(22.0 * self.ui_scale, line_height + self.theme.spacing.xs * 1.1);
+        const menu_w = @max(128.0 * self.ui_scale, 146.0);
+        const menu_h = item_h * 4.0 + self.theme.spacing.xs * 2.0;
+
+        const fb_w = @as(f32, @floatFromInt(fb_width));
+        const fb_h = @as(f32, @floatFromInt(fb_height));
+        const anchor = self.text_input_context_menu_anchor;
+
+        const space_right = fb_w - anchor[0];
+        const space_left = anchor[0];
+        const space_down = fb_h - anchor[1];
+        const space_up = anchor[1];
+
+        var menu_x = if (space_right >= menu_w or space_right >= space_left)
+            anchor[0]
+        else
+            anchor[0] - menu_w;
+        var menu_y = if (space_down >= menu_h or space_down >= space_up)
+            anchor[1]
+        else
+            anchor[1] - menu_h;
+
+        menu_x = std.math.clamp(menu_x, 0.0, @max(0.0, fb_w - menu_w));
+        menu_y = std.math.clamp(menu_y, 0.0, @max(0.0, fb_h - menu_h));
+        return Rect.fromXYWH(menu_x, menu_y, menu_w, menu_h);
+    }
+
+    fn resolvePointerInputLayer(self: *App, fb_width: u32, fb_height: u32) void {
+        if (self.text_input_context_menu_open and self.focusedSettingsBuffer() != null) {
+            self.text_input_context_menu_rect = self.resolvedTextInputContextMenuRect(fb_width, fb_height);
+            self.active_pointer_layer = .text_input_context_menu;
+            return;
+        }
+        self.text_input_context_menu_rect = null;
+        self.active_pointer_layer = .base;
+    }
+
     fn drawFrame(self: *App, ui_window: *UiWindow) void {
         self.theme = zui.theme.current();
         self.metrics_context.setTheme(zui.ui.theme.activeTheme());
@@ -4969,10 +5360,49 @@ const App = struct {
         const fb_width: u32 = @intCast(if (fb_w > 0) fb_w else 1);
         const fb_height: u32 = @intCast(if (fb_h > 0) fb_h else 1);
 
+        self.resolvePointerInputLayer(fb_width, fb_height);
+        const overlay_captures_pointer = self.active_pointer_layer != .base;
+        const saved_mouse_down = self.mouse_down;
+        const saved_mouse_clicked = self.mouse_clicked;
+        const saved_mouse_released = self.mouse_released;
+        const saved_mouse_right_clicked = self.mouse_right_clicked;
+        const saved_mouse_x = self.mouse_x;
+        const saved_mouse_y = self.mouse_y;
+        const saved_queue_state = ui_window.queue.state;
+        const saved_queue_event_len = ui_window.queue.events.items.len;
+        if (overlay_captures_pointer) {
+            // Stage widgets still render, but pointer/hover/events are routed only to top input layer.
+            self.mouse_down = false;
+            self.mouse_clicked = false;
+            self.mouse_released = false;
+            self.mouse_right_clicked = false;
+            self.mouse_x = -1_000_000.0;
+            self.mouse_y = -1_000_000.0;
+            ui_window.queue.state.mouse_pos = .{ -1_000_000.0, -1_000_000.0 };
+            ui_window.queue.state.mouse_down_left = false;
+            ui_window.queue.state.mouse_down_right = false;
+            ui_window.queue.state.mouse_down_middle = false;
+            ui_window.queue.state.pointer_kind = .nav;
+            ui_window.queue.state.pointer_drag_delta = .{ 0.0, 0.0 };
+            ui_window.queue.state.pointer_dragging = false;
+            ui_window.queue.events.items.len = 0;
+        }
+
         ui_window.swapchain.beginFrame(&self.gpu, fb_width, fb_height);
 
         // Draw active UI stage (launcher or workspace).
         self.drawStageUi(ui_window, fb_width, fb_height);
+        if (overlay_captures_pointer) {
+            self.mouse_down = saved_mouse_down;
+            self.mouse_clicked = saved_mouse_clicked;
+            self.mouse_released = saved_mouse_released;
+            self.mouse_right_clicked = saved_mouse_right_clicked;
+            self.mouse_x = saved_mouse_x;
+            self.mouse_y = saved_mouse_y;
+            ui_window.queue.state = saved_queue_state;
+            ui_window.queue.events.items.len = saved_queue_event_len;
+        }
+        self.drawTextInputContextMenuOverlay(fb_width, fb_height);
         self.accumulateFrameCommandStats();
 
         // Render the UI commands through WebGPU
@@ -11548,6 +11978,7 @@ const App = struct {
     }
 
     fn drawButtonWidget(self: *App, rect: Rect, label: []const u8, opts: widgets.button.Options) bool {
+        const block_interaction = self.text_input_context_menu_open and !self.text_input_context_menu_rendering;
         const state = widgets.button.updateState(
             .{ .x = rect.min[0], .y = rect.min[1], .width = rect.width(), .height = rect.height() },
             .{ self.mouse_x, self.mouse_y },
@@ -11587,7 +12018,7 @@ const App = struct {
         }
         self.drawCenteredText(rect, label, text_color);
 
-        return !opts.disabled and self.mouse_released and rect.contains(.{ self.mouse_x, self.mouse_y });
+        return !block_interaction and !opts.disabled and self.mouse_released and rect.contains(.{ self.mouse_x, self.mouse_y });
     }
 
     fn drawTextInputWidget(
@@ -11603,6 +12034,11 @@ const App = struct {
             self.mouse_released,
             currently_focused,
         );
+        var focused = state.focused;
+        const mouse_pos = .{ self.mouse_x, self.mouse_y };
+        const suppress_interaction = self.text_input_context_menu_open and !self.text_input_context_menu_rendering;
+        const left_clicked_inside = !suppress_interaction and self.mouse_clicked and rect.contains(mouse_pos) and !opts.disabled;
+        const right_clicked_inside = !suppress_interaction and self.mouse_right_clicked and rect.contains(mouse_pos) and !opts.disabled;
 
         const fill = widgets.text_input.getFillPaint(self.theme, state, opts);
         const border = widgets.text_input.getBorderColor(self.theme, state, opts);
@@ -11615,6 +12051,81 @@ const App = struct {
         const max_w = rect.width() - text_pad_x * 2.0;
         const line_height = self.textLineHeight();
         const text_y = rect.min[1] + @max(0.0, (rect.height() - line_height) * 0.5);
+        const visible_start = self.inputTailStartForWidth(text, max_w);
+
+        if (focused) {
+            if (!self.text_input_cursor_initialized) {
+                self.text_input_cursor = text.len;
+                self.clearFocusedTextSelection();
+                self.text_input_cursor_initialized = true;
+            }
+            self.clampFocusedTextInputState(text);
+        }
+
+        if (left_clicked_inside) {
+            focused = true;
+            const clicked_cursor = self.textInputCursorFromMouse(text, visible_start, text_x, max_w, self.mouse_x);
+            const now_ms = std.time.milliTimestamp();
+            const elapsed_ms = now_ms - self.text_input_last_left_click_ms;
+            const max_dist = 6.0 * self.ui_scale;
+            const dx = self.mouse_x - self.text_input_last_left_click_pos[0];
+            const dy = self.mouse_y - self.text_input_last_left_click_pos[1];
+            const double_click = self.text_input_last_left_click_ms > 0 and
+                elapsed_ms >= 0 and
+                elapsed_ms <= TEXT_INPUT_DOUBLE_CLICK_MS and
+                dx * dx + dy * dy <= max_dist * max_dist;
+            self.text_input_last_left_click_ms = now_ms;
+            self.text_input_last_left_click_pos = .{ self.mouse_x, self.mouse_y };
+
+            if (double_click and text.len > 0) {
+                self.text_input_selection_anchor = 0;
+                self.text_input_cursor = text.len;
+                self.text_input_drag_anchor = self.text_input_cursor;
+                self.text_input_dragging = false;
+            } else {
+                self.text_input_cursor = clicked_cursor;
+                self.text_input_drag_anchor = self.text_input_cursor;
+                self.text_input_dragging = true;
+                self.clearFocusedTextSelection();
+            }
+            self.text_input_cursor_initialized = true;
+        }
+
+        if (right_clicked_inside) {
+            focused = true;
+            const clicked_cursor = self.textInputCursorFromMouse(text, visible_start, text_x, max_w, self.mouse_x);
+            const preserve_selection = blk: {
+                const sel = self.focusedTextSelectionRange(text) orelse break :blk false;
+                break :blk clicked_cursor >= sel[0] and clicked_cursor <= sel[1];
+            };
+            if (!preserve_selection) {
+                self.text_input_cursor = clicked_cursor;
+                self.clearFocusedTextSelection();
+            }
+            self.text_input_drag_anchor = self.text_input_cursor;
+            self.text_input_dragging = false;
+            self.text_input_cursor_initialized = true;
+            self.text_input_context_menu_open = true;
+            self.text_input_context_menu_anchor = .{
+                self.mouse_x + 10.0 * self.ui_scale,
+                self.mouse_y + 8.0 * self.ui_scale,
+            };
+            self.text_input_context_menu_rect = null;
+        }
+
+        if (focused and self.text_input_dragging and self.mouse_down and !opts.disabled) {
+            const drag_cursor = self.textInputCursorFromMouse(text, visible_start, text_x, max_w, self.mouse_x);
+            if (drag_cursor != self.text_input_drag_anchor) {
+                if (self.text_input_selection_anchor == null) {
+                    self.text_input_selection_anchor = self.text_input_drag_anchor;
+                }
+                self.text_input_cursor = drag_cursor;
+            }
+        }
+
+        if (!self.mouse_down or self.mouse_released) {
+            self.text_input_dragging = false;
+        }
 
         if (text.len == 0) {
             const placeholder = if (opts.placeholder.len > 0) opts.placeholder else "";
@@ -11622,19 +12133,35 @@ const App = struct {
                 self.drawTextTrimmed(text_x, text_y, max_w, placeholder, widgets.text_input.getPlaceholderColor(self.theme));
             }
         } else {
+            if (focused) {
+                if (self.focusedTextSelectionRange(text)) |sel| {
+                    const start = @max(sel[0], visible_start);
+                    const finish = @min(sel[1], text.len);
+                    if (finish > start) {
+                        const sel_left = self.measureTextFast(text[visible_start..start]);
+                        const sel_right = self.measureTextFast(text[visible_start..finish]);
+                        const sel_rect = Rect.fromXYWH(
+                            text_x + sel_left,
+                            text_y,
+                            @max(0.0, sel_right - sel_left),
+                            line_height,
+                        );
+                        self.drawFilledRect(sel_rect, widgets.text_input.getSelectionColor(self.theme));
+                    }
+                }
+            }
             var text_color = self.theme.colors.text_primary;
             if (opts.disabled) text_color = zcolors.withAlpha(text_color, 0.45);
-            const visible_start = self.inputTailStartForWidth(text, max_w);
             self.drawText(text_x, text_y, text[visible_start..], text_color);
         }
 
-        if (state.focused and !opts.disabled and !opts.read_only) {
+        if (focused and !opts.disabled and !opts.read_only) {
             // Draw caret using same measurement as text
             const caret_width: f32 = 2.0 * self.ui_scale;
             const caret_height = line_height;
 
-            const visible_start = self.inputTailStartForWidth(text, max_w);
-            const caret_offset = self.measureTextFast(text[visible_start..]);
+            const caret_index = @max(visible_start, @min(self.text_input_cursor, text.len));
+            const caret_offset = self.measureTextFast(text[visible_start..caret_index]);
             const caret_x = text_x + @min(caret_offset, max_w - caret_width);
 
             const caret_rect = UiRect.fromMinSize(
@@ -11647,7 +12174,116 @@ const App = struct {
             );
         }
 
-        return state.focused;
+        return focused;
+    }
+
+    fn drawTextInputContextMenuOverlay(self: *App, fb_width: u32, fb_height: u32) void {
+        if (!self.text_input_context_menu_open) return;
+        self.text_input_context_menu_rendering = true;
+        defer self.text_input_context_menu_rendering = false;
+        const buf = self.focusedSettingsBuffer() orelse {
+            self.text_input_context_menu_open = false;
+            self.text_input_context_menu_rect = null;
+            return;
+        };
+
+        const line_height = self.textLineHeight();
+        const item_h = @max(22.0 * self.ui_scale, line_height + self.theme.spacing.xs * 1.1);
+        const menu_rect = self.text_input_context_menu_rect orelse self.resolvedTextInputContextMenuRect(fb_width, fb_height);
+        self.text_input_context_menu_rect = menu_rect;
+        const mouse_pos = .{ self.mouse_x, self.mouse_y };
+        if (self.mouse_released and !menu_rect.contains(mouse_pos)) {
+            self.text_input_context_menu_open = false;
+            self.text_input_context_menu_rect = null;
+            return;
+        }
+
+        self.drawSurfacePanel(menu_rect);
+        self.drawRect(menu_rect, self.theme.colors.border);
+
+        var y = menu_rect.min[1] + self.theme.spacing.xs;
+        const row_x = menu_rect.min[0] + self.theme.spacing.xs;
+        const row_w = menu_rect.width() - self.theme.spacing.xs * 2.0;
+        const has_selection = self.focusedTextSelectionRange(buf.items) != null;
+        const clip = zapp.clipboard.getTextZ();
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(row_x, y, row_w, item_h),
+            "Copy",
+            .{ .variant = .ghost, .disabled = !has_selection },
+        )) {
+            _ = self.copyFocusedTextSelectionToClipboard(buf.items);
+            self.text_input_context_menu_open = false;
+            self.text_input_context_menu_rect = null;
+            return;
+        }
+        y += item_h;
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(row_x, y, row_w, item_h),
+            "Cut",
+            .{ .variant = .ghost, .disabled = !has_selection },
+        )) {
+            if (self.copyFocusedTextSelectionToClipboard(buf.items)) {
+                self.recordFocusedTextUndoState(buf) catch {};
+                _ = self.deleteFocusedTextSelection(buf);
+            }
+            self.text_input_context_menu_open = false;
+            self.text_input_context_menu_rect = null;
+            return;
+        }
+        y += item_h;
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(row_x, y, row_w, item_h),
+            "Paste",
+            .{ .variant = .ghost, .disabled = clip.len == 0 },
+        )) {
+            if (clip.len > 0 and (self.focusedTextSelectionRange(buf.items) != null or hasSingleLineInsertableBytes(clip))) {
+                self.recordFocusedTextUndoState(buf) catch {};
+                _ = self.insertSingleLineTextAtCursor(buf, clip) catch false;
+            }
+            self.text_input_context_menu_open = false;
+            self.text_input_context_menu_rect = null;
+            return;
+        }
+        y += item_h;
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(row_x, y, row_w, item_h),
+            "Select All",
+            .{ .variant = .ghost, .disabled = buf.items.len == 0 },
+        )) {
+            if (buf.items.len > 0) {
+                self.text_input_selection_anchor = 0;
+                self.text_input_cursor = buf.items.len;
+            }
+            self.text_input_context_menu_open = false;
+            self.text_input_context_menu_rect = null;
+        }
+    }
+
+    fn textInputCursorFromMouse(
+        self: *App,
+        text: []const u8,
+        visible_start: usize,
+        text_x: f32,
+        max_w: f32,
+        mouse_x: f32,
+    ) usize {
+        if (text.len == 0) return 0;
+        const local_x = std.math.clamp(mouse_x - text_x, 0.0, max_w);
+        var idx = visible_start;
+        var width: f32 = 0.0;
+        while (idx < text.len) {
+            const next = nextUtf8Boundary(text, idx);
+            if (next <= idx) break;
+            const glyph_w = self.measureGlyphWidth(text[idx..next]);
+            if (width + glyph_w * 0.5 >= local_x) break;
+            width += glyph_w;
+            idx = next;
+        }
+        return idx;
     }
 
     fn selectedProjectToken(self: *App, project_id: []const u8) ?[]const u8 {
