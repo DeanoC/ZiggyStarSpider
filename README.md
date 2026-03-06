@@ -1,20 +1,15 @@
 # SpiderApp
 
-Native CLI + GUI client for ZiggySpiderweb unified-v2 control and FS-RPC.
+Client for the Spiderweb AI agent system.
 
 ## Overview
 
-SpiderApp exposes one project-oriented view of a distributed Spiderweb workspace:
+SpiderApp exposes a project-oriented view of a distributed Spiderweb:
 
 - connect to Spiderweb over WebSocket
 - select or create projects
-- activate project workspace mounts
-- inspect nodes and workspace topology
-- browse and read/write the unified filesystem via `acheron.*`
-- chat with the agent through FS-RPC chat capabilities
-
-`control.*` is used for out-of-band control API operations.  
-`acheron.*` is used for filesystem and capability IO.
+- activate project mounts
+- inspect Spider nodes topology
 
 ## Build
 
