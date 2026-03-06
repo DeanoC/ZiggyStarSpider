@@ -3,13 +3,11 @@ const unified_v2 = @import("unified_v2_client.zig");
 pub const workspace_types = @import("workspace_types.zig");
 
 pub const default_timeout_ms: i64 = unified_v2.default_control_timeout_ms;
-const max_project_token_len: usize = 256;
 
 fn normalizeProjectToken(project_token: ?[]const u8) ?[]const u8 {
     const token = project_token orelse return null;
     const trimmed = std.mem.trim(u8, token, " \t\r\n");
     if (trimmed.len == 0) return null;
-    if (trimmed.len > max_project_token_len) return null;
     return trimmed;
 }
 
@@ -1287,16 +1285,13 @@ fn getOptionalI64(obj: std.json.ObjectMap, name: []const u8, default_value: i64)
     return value.integer;
 }
 
-test "normalizeProjectToken trims empty and drops oversized tokens" {
-    const allocator = std.testing.allocator;
+test "normalizeProjectToken trims empty and preserves non-empty tokens" {
     try std.testing.expect(normalizeProjectToken(null) == null);
     try std.testing.expect(normalizeProjectToken("   \t\r\n") == null);
     try std.testing.expectEqualStrings("proj-secret", normalizeProjectToken("  proj-secret  ").?);
-
-    const oversized = try allocator.alloc(u8, max_project_token_len + 1);
-    defer allocator.free(oversized);
-    @memset(oversized, 'x');
-    try std.testing.expect(normalizeProjectToken(oversized) == null);
+    const long_token =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    try std.testing.expectEqualStrings(long_token, normalizeProjectToken(long_token).?);
 }
 
 test "parseProjectSummary accepts project_id key" {
