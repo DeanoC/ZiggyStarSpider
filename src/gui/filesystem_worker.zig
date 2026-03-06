@@ -571,7 +571,10 @@ pub const FilesystemWorker = struct {
             self.setRemoteError("remote fsrpc error");
         }
 
-        if (runtime_warming) return error.RuntimeWarming;
+        if (runtime_warming) {
+            self.setRemoteError("sandbox runtime unavailable");
+            return error.RemoteError;
+        }
         return error.RemoteError;
     }
 

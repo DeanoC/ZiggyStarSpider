@@ -12080,9 +12080,12 @@ const App = struct {
             return;
         }
         if (std.mem.eql(u8, status.state, "warming")) {
-            self.session_attach_state = .warming;
-            self.setConnectionState(.connected, "Connected (sandbox warming...)");
-            self.setWorkspaceError("Sandbox runtime is warming. Retry filesystem/chat in a moment.");
+            // "warming" is a legacy backend state; do not gate chat/filesystem on it.
+            self.session_attach_state = .unknown;
+            if (self.connection_state == .connected) {
+                self.setConnectionState(.connected, "Connected");
+            }
+            self.clearWorkspaceError();
             return;
         }
         if (std.mem.eql(u8, status.state, "error")) {
@@ -12936,7 +12939,7 @@ const App = struct {
         var attach_project_id = self.preferredAttachProjectId();
         var attach_project_token = self.projectTokenForSessionProject(attach_project_id);
         var attached_during_send = false;
-        if (self.session_attach_state == .unknown or self.session_attach_state == .err) {
+        if (self.session_attach_state == .unknown or self.session_attach_state == .err or self.session_attach_state == .warming) {
             self.attachSessionBinding(client, session_key) catch |err| {
                 if (err == error.ProjectIdRequired) {
                     const msg = "Session attach requires an explicit project. Select a project in Settings.";
@@ -13019,14 +13022,6 @@ const App = struct {
             };
             attached_during_send = true;
             self.refreshSessionAttachStatusOnce(client, session_key);
-        } else if (self.session_attach_state == .warming) {
-            // Avoid re-attaching while warmup is in-flight; that re-arms backend warmup and can
-            // keep the session in warming forever when the user retries quickly.
-            self.refreshSessionAttachStatusOnce(client, session_key);
-        }
-        if (self.session_attach_state == .warming) {
-            try self.appendMessage("system", "Sandbox runtime is warming. Retry in a moment.", null);
-            return error.RuntimeWarming;
         }
         if (self.session_attach_state == .err) {
             const detail = self.workspace_last_error orelse "Sandbox runtime is unavailable for this session.";
@@ -13232,9 +13227,12 @@ const App = struct {
             self.setFsrpcRemoteError("remote fsrpc error");
         }
         if (runtime_warming) {
-            self.session_attach_state = .warming;
-            self.setConnectionState(.connected, "Connected (sandbox warming...)");
-            return error.RuntimeWarming;
+            self.session_attach_state = .unknown;
+            if (self.connection_state == .connected) {
+                self.setConnectionState(.connected, "Connected");
+            }
+            self.setFsrpcRemoteError("sandbox runtime unavailable");
+            return error.RemoteError;
         }
         return error.RemoteError;
     }
