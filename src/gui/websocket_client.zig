@@ -267,7 +267,11 @@ pub const WebSocketClient = struct {
 
         while (!self.should_stop.load(.acquire)) {
             if (self.client) |*client| {
-                const msg = client.read() catch |err| switch (err) {
+                const msg = blk: {
+                    self.send_mutex.lock();
+                    defer self.send_mutex.unlock();
+                    break :blk client.read();
+                } catch |err| switch (err) {
                     error.WouldBlock => {
                         std.Thread.sleep(1 * std.time.ns_per_ms);
                         continue;
@@ -492,7 +496,11 @@ pub const WebSocketClient = struct {
         if (!self.connection_alive.load(.acquire)) return null;
 
         if (self.client) |*client| {
-            const msg = client.read() catch |err| switch (err) {
+            const msg = blk: {
+                self.send_mutex.lock();
+                defer self.send_mutex.unlock();
+                break :blk client.read();
+            } catch |err| switch (err) {
                 error.WouldBlock => return null,
                 error.InvalidMessageType => {
                     std.log.warn("[WS] ignoring unsupported frame type", .{});
