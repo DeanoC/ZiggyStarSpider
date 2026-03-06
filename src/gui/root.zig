@@ -72,7 +72,6 @@ const FSRPC_READ_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 const CONTROL_CONNECT_TIMEOUT_MS: i64 = 2_500;
 const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
-const MAX_PROJECT_TOKEN_LEN: usize = 256;
 const DEFAULT_MAIN_WINDOW_WIDTH: c_int = 1440;
 const DEFAULT_MAIN_WINDOW_HEIGHT: c_int = 900;
 const MIN_MAIN_WINDOW_WIDTH: c_int = 1100;
@@ -328,7 +327,6 @@ fn normalizeProjectToken(project_token: ?[]const u8) ?[]const u8 {
     const token = project_token orelse return null;
     const trimmed = std.mem.trim(u8, token, " \t\r\n");
     if (trimmed.len == 0) return null;
-    if (trimmed.len > MAX_PROJECT_TOKEN_LEN) return null;
     return trimmed;
 }
 
@@ -12840,15 +12838,6 @@ const App = struct {
         const trimmed_project = std.mem.trim(u8, project, " \t\r\n");
         if (trimmed_project.len == 0) return error.ProjectIdRequired;
         const normalized_project_token = normalizeProjectToken(project_token);
-        if (project_token) |raw_token| {
-            const trimmed_token = std.mem.trim(u8, raw_token, " \t\r\n");
-            if (trimmed_token.len > MAX_PROJECT_TOKEN_LEN) {
-                std.log.warn(
-                    "Skipping session attach project token because it exceeds {d} bytes",
-                    .{MAX_PROJECT_TOKEN_LEN},
-                );
-            }
-        }
 
         const escaped_session = try jsonEscape(self.allocator, session_key);
         defer self.allocator.free(escaped_session);
