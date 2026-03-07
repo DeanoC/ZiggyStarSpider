@@ -277,11 +277,13 @@ pub const WebSocketClient = struct {
                         continue;
                     },
                     error.InvalidMessageType => {
-                        // Some servers can emit control/extension frames the current parser
-                        // does not map into normal message variants. Treat as non-fatal.
-                        std.log.warn("[WS] ignoring unsupported frame type", .{});
-                        std.Thread.sleep(1 * std.time.ns_per_ms);
-                        continue;
+                        // The websocket client may close the underlying stream on parse errors.
+                        // Treat unsupported frame types as fatal to avoid later sends on a
+                        // no-longer-valid socket handle.
+                        std.log.warn("[WS] unsupported frame type; closing websocket", .{});
+                        self.connection_alive.store(false, .release);
+                        self.failAllWaiters();
+                        break;
                     },
                     error.Closed, error.ConnectionResetByPeer => {
                         std.log.info("[WS] Connection closed", .{});
@@ -368,6 +370,12 @@ pub const WebSocketClient = struct {
         self.send_mutex.lock();
         defer self.send_mutex.unlock();
         if (self.client == null) return error.NotConnected;
+        if (self.client) |*client| {
+            if (@atomicLoad(bool, &client._closed, .acquire)) {
+                self.connection_alive.store(false, .release);
+                return error.ConnectionClosed;
+            }
+        }
         if (!self.connection_alive.load(.acquire) or self.should_stop.load(.acquire)) {
             return error.ConnectionClosed;
         }
@@ -415,17 +423,20 @@ pub const WebSocketClient = struct {
 
         var waiter = try self.allocator.create(PendingFrameWaiter);
         waiter.* = .{};
-        errdefer self.allocator.destroy(waiter);
+        var registered = false;
+        errdefer if (!registered) {
+            waiter.deinit(self.allocator);
+            self.allocator.destroy(waiter);
+        };
 
         self.waiters_mutex.lock();
         var lock_held = true;
         errdefer if (lock_held) self.waiters_mutex.unlock();
         if (self.acheron_waiters.contains(tag)) {
-            waiter.deinit(self.allocator);
-            self.allocator.destroy(waiter);
             return error.Busy;
         }
         try self.acheron_waiters.put(self.allocator, tag, waiter);
+        registered = true;
         self.waiters_mutex.unlock();
         lock_held = false;
         defer self.removeAcheronWaiter(tag, waiter);
@@ -440,17 +451,20 @@ pub const WebSocketClient = struct {
 
         var waiter = try self.allocator.create(PendingFrameWaiter);
         waiter.* = .{};
-        errdefer self.allocator.destroy(waiter);
+        var registered = false;
+        errdefer if (!registered) {
+            waiter.deinit(self.allocator);
+            self.allocator.destroy(waiter);
+        };
 
         self.waiters_mutex.lock();
         var lock_held = true;
         errdefer if (lock_held) self.waiters_mutex.unlock();
         if (self.control_waiters.contains(request_id)) {
-            waiter.deinit(self.allocator);
-            self.allocator.destroy(waiter);
             return error.Busy;
         }
         try self.control_waiters.put(self.allocator, key, waiter);
+        registered = true;
         self.waiters_mutex.unlock();
         lock_held = false;
         defer self.removeControlWaiter(request_id, waiter);
@@ -503,7 +517,9 @@ pub const WebSocketClient = struct {
             } catch |err| switch (err) {
                 error.WouldBlock => return null,
                 error.InvalidMessageType => {
-                    std.log.warn("[WS] ignoring unsupported frame type", .{});
+                    std.log.warn("[WS] unsupported frame type; closing websocket", .{});
+                    self.connection_alive.store(false, .release);
+                    self.failAllWaiters();
                     return null;
                 },
                 error.Closed, error.ConnectionResetByPeer => {
