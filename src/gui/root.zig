@@ -1,5 +1,6 @@
 const std = @import("std");
 const zui = @import("ziggy-ui");
+const zui_panels = @import("ziggy-ui-panels");
 const ws_client_mod = @import("websocket_client.zig");
 const config_mod = @import("client-config");
 const credential_store_mod = config_mod.credential_store;
@@ -106,7 +107,15 @@ const ChatMessage = zui.protocol.types.ChatMessage;
 const ChatMessageState = zui.protocol.types.LocalChatMessageState;
 const ChatSession = zui.protocol.types.Session;
 
-const ChatPanel = zui.ChatPanel(ChatMessage, ChatSession);
+// Reusable panel implementations consumed through ZiggyUIPanels.
+const ChatWorkspacePanel = zui_panels.chat_workspace_panel;
+const LauncherSettingsPanel = zui_panels.launcher_settings_panel;
+const FilesystemPanel = zui_panels.filesystem_panel;
+const ProjectPanel = zui_panels.project_panel;
+const DebugPanel = zui_panels.debug_panel;
+const DebugEventStreamPanel = zui_panels.debug_event_stream;
+const TerminalPanel = zui_panels.terminal_panel;
+const TerminalOutputPanel = zui_panels.terminal_output_panel;
 
 const PanelLayoutMetrics = form_layout.Metrics;
 
@@ -381,9 +390,119 @@ fn isSettingsPanelFocusField(field: SettingsFocusField) bool {
     };
 }
 
+// Panel extraction keeps host-owned text storage in SpiderApp, so these helpers
+// translate between the shared panel state enums and the host-local focus enum.
+fn settingsFocusFieldToExternal(field: SettingsFocusField) LauncherSettingsPanel.FocusField {
+    return switch (field) {
+        .server_url => .server_url,
+        .default_session => .default_session,
+        .default_agent => .default_agent,
+        .ui_theme => .ui_theme,
+        .ui_profile => .ui_profile,
+        .ui_theme_pack => .ui_theme_pack,
+        else => .none,
+    };
+}
+
+fn settingsFocusFieldFromExternal(field: LauncherSettingsPanel.FocusField) SettingsFocusField {
+    return switch (field) {
+        .server_url => .server_url,
+        .default_session => .default_session,
+        .default_agent => .default_agent,
+        .ui_theme => .ui_theme,
+        .ui_profile => .ui_profile,
+        .ui_theme_pack => .ui_theme_pack,
+        .none => .none,
+    };
+}
+
+fn filesystemFocusFieldToExternal(field: SettingsFocusField) FilesystemPanel.FocusField {
+    return switch (field) {
+        .filesystem_contract_payload => .contract_payload,
+        else => .none,
+    };
+}
+
+fn filesystemFocusFieldFromExternal(field: FilesystemPanel.FocusField) SettingsFocusField {
+    return switch (field) {
+        .contract_payload => .filesystem_contract_payload,
+        .none => .none,
+    };
+}
+
+fn debugFocusFieldToExternal(field: SettingsFocusField) DebugPanel.FocusField {
+    return switch (field) {
+        .perf_benchmark_label => .perf_benchmark_label,
+        .node_watch_filter => .node_watch_filter,
+        .node_watch_replay_limit => .node_watch_replay_limit,
+        .debug_search_filter => .debug_search_filter,
+        else => .none,
+    };
+}
+
+fn debugFocusFieldFromExternal(field: DebugPanel.FocusField) SettingsFocusField {
+    return switch (field) {
+        .perf_benchmark_label => .perf_benchmark_label,
+        .node_watch_filter => .node_watch_filter,
+        .node_watch_replay_limit => .node_watch_replay_limit,
+        .debug_search_filter => .debug_search_filter,
+        .none => .none,
+    };
+}
+
+fn isDebugPanelFocusField(field: SettingsFocusField) bool {
+    return switch (field) {
+        .perf_benchmark_label,
+        .node_watch_filter,
+        .node_watch_replay_limit,
+        .debug_search_filter,
+        => true,
+        else => false,
+    };
+}
+
+fn terminalFocusFieldToExternal(field: SettingsFocusField) TerminalPanel.FocusField {
+    return switch (field) {
+        .terminal_command_input => .command_input,
+        else => .none,
+    };
+}
+
+fn terminalFocusFieldFromExternal(field: TerminalPanel.FocusField) SettingsFocusField {
+    return switch (field) {
+        .command_input => .terminal_command_input,
+        .none => .none,
+    };
+}
+
+fn projectFocusFieldToExternal(field: SettingsFocusField) ProjectPanel.FocusField {
+    return switch (field) {
+        .project_token => .project_token,
+        .project_create_name => .create_name,
+        .project_create_vision => .create_vision,
+        .project_operator_token => .operator_token,
+        .project_mount_path => .mount_path,
+        .project_mount_node_id => .mount_node_id,
+        .project_mount_export_name => .mount_export_name,
+        else => .none,
+    };
+}
+
+fn projectFocusFieldFromExternal(field: ProjectPanel.FocusField) SettingsFocusField {
+    return switch (field) {
+        .project_token => .project_token,
+        .create_name => .project_create_name,
+        .create_vision => .project_create_vision,
+        .operator_token => .project_operator_token,
+        .mount_path => .project_mount_path,
+        .mount_node_id => .project_mount_node_id,
+        .mount_export_name => .project_mount_export_name,
+        .none => .none,
+    };
+}
+
 fn isProjectPanelFocusField(field: SettingsFocusField) bool {
     return switch (field) {
-        .project_id,
         .project_token,
         .project_create_name,
         .project_create_vision,
@@ -845,6 +964,7 @@ const App = struct {
     form_scroll_drag_start_scroll_y: f32 = 0.0,
     drag_mouse_capture_active: bool = false,
     ui_commands: zui.ui.render.command_list.CommandList,
+    ui_inbox: ui_command_inbox.UiCommandInbox,
 
     projects: std.ArrayListUnmanaged(workspace_types.ProjectSummary) = .{},
     nodes: std.ArrayListUnmanaged(workspace_types.NodeInfo) = .{},
@@ -1135,6 +1255,7 @@ const App = struct {
             .metrics_context = undefined,
             .config = config,
             .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
+            .ui_inbox = ui_command_inbox.UiCommandInbox.init(allocator),
             .frame_clock = zapp.frame_clock.FrameClock.init(60),
             .debug_folded_blocks = std.AutoHashMap(DebugFoldKey, void).init(allocator),
             .terminal_backend_kind = settings_panel.terminal_backend_kind,
@@ -1171,7 +1292,7 @@ const App = struct {
         app.manager = panel_manager.PanelManager.init(allocator, ws, &app.next_panel_id);
         app.bindNextPanelId(&app.manager);
         errdefer app.manager.deinit();
-        app.removeLegacyProjectPanels(&app.manager);
+        app.migrateLegacyHostPanels(&app.manager);
         app.focusSettingsPanel(&app.manager);
 
         app.captureWorkspaceSnapshot(&app.manager);
@@ -1285,6 +1406,7 @@ const App = struct {
 
         self.metrics_context.deinit();
         self.ui_commands.deinit();
+        self.ui_inbox.deinit(self.allocator);
         self.manager.deinit();
         while (self.ui_windows.items.len > 0) {
             const maybe_window = self.ui_windows.pop();
@@ -6785,6 +6907,7 @@ const App = struct {
 
     fn drawPanelContent(self: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId, rect: UiRect) void {
         const panel = self.findPanelById(manager, panel_id) orelse return;
+        self.promoteLegacyHostPanel(manager, panel);
         const inset = self.panelLayoutMetrics().inset;
 
         switch (panel.kind) {
@@ -6798,38 +6921,42 @@ const App = struct {
                 self.drawSettingsPanel(manager, rect);
                 self.perf_frame_panel_ns.settings += std.time.nanoTimestamp() - started_ns;
             },
-            .ToolOutput => {
-                if (self.debug_panel_id != null and self.debug_panel_id.? == panel.id) {
-                    const started_ns = std.time.nanoTimestamp();
-                    self.drawDebugPanel(manager, rect);
-                    self.perf_frame_panel_ns.debug += std.time.nanoTimestamp() - started_ns;
-                } else if (self.project_panel_id != null and self.project_panel_id.? == panel.id) {
-                    const started_ns = std.time.nanoTimestamp();
+            .ProjectWorkspace => {
+                const started_ns = std.time.nanoTimestamp();
+                if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
                     self.drawProjectPanel(manager, rect);
-                    self.perf_frame_panel_ns.projects += std.time.nanoTimestamp() - started_ns;
-                } else if (self.filesystem_panel_id != null and self.filesystem_panel_id.? == panel.id) {
-                    const started_ns = std.time.nanoTimestamp();
+                }
+                self.project_panel_id = panel.id;
+                self.perf_frame_panel_ns.projects += std.time.nanoTimestamp() - started_ns;
+            },
+            .FilesystemBrowser => {
+                const started_ns = std.time.nanoTimestamp();
+                if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
                     self.drawFilesystemPanel(manager, rect);
-                    self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
-                } else if (self.terminal_panel_id != null and self.terminal_panel_id.? == panel.id) {
+                }
+                self.filesystem_panel_id = panel.id;
+                self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
+            },
+            .DebugStream => {
+                const started_ns = std.time.nanoTimestamp();
+                if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
+                    self.drawDebugPanel(manager, rect);
+                }
+                self.debug_panel_id = panel.id;
+                self.perf_frame_panel_ns.debug += std.time.nanoTimestamp() - started_ns;
+            },
+            .ToolOutput => {
+                if (self.terminal_panel_id != null and self.terminal_panel_id.? == panel.id) {
                     const started_ns = std.time.nanoTimestamp();
                     self.drawTerminalPanel(manager, rect);
                     self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
-                } else if (std.mem.eql(u8, panel.title, "Debug Stream")) {
-                    self.debug_panel_id = panel.id;
-                    const started_ns = std.time.nanoTimestamp();
-                    self.drawDebugPanel(manager, rect);
-                    self.perf_frame_panel_ns.debug += std.time.nanoTimestamp() - started_ns;
-                } else if (std.mem.eql(u8, panel.title, "Projects")) {
-                    self.project_panel_id = panel.id;
-                    const started_ns = std.time.nanoTimestamp();
-                    self.drawProjectPanel(manager, rect);
-                    self.perf_frame_panel_ns.projects += std.time.nanoTimestamp() - started_ns;
-                } else if (std.mem.eql(u8, panel.title, "Filesystem Browser")) {
-                    self.filesystem_panel_id = panel.id;
-                    const started_ns = std.time.nanoTimestamp();
-                    self.drawFilesystemPanel(manager, rect);
-                    self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
+                } else if (std.mem.eql(u8, panel.title, "Debug Stream") or
+                    std.mem.eql(u8, panel.title, "Projects") or
+                    std.mem.eql(u8, panel.title, "Filesystem Browser"))
+                {
+                    // Upgrade legacy ToolOutput-backed host panels in-place.
+                    self.promoteLegacyHostPanel(manager, panel);
+                    self.drawPanelContent(manager, panel_id, rect);
                 } else if (std.mem.eql(u8, panel.title, "Terminal")) {
                     self.terminal_panel_id = panel.id;
                     const started_ns = std.time.nanoTimestamp();
@@ -6860,1260 +6987,649 @@ const App = struct {
         }
     }
 
+    const HostPanelRuntimeCtx = struct {
+        app: *App,
+    };
+
+    fn drawHostPanelWithRuntime(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) bool {
+        if (panel.kind != .ProjectWorkspace and panel.kind != .FilesystemBrowser and panel.kind != .DebugStream) {
+            return false;
+        }
+
+        var runtime_ctx = HostPanelRuntimeCtx{ .app = self };
+        var action: panels_bridge.UiAction = .{};
+        var pending_attachment: ?panels_bridge.AttachmentOpen = null;
+        const host_registry = panels_bridge.runtime.HostPanelRegistry{
+            .project_workspace = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawProjectWorkspaceHostPanel },
+            .filesystem_browser = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawFilesystemBrowserHostPanel },
+            .debug_stream = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawDebugStreamHostPanel },
+        };
+        _ = panels_bridge.runtime.drawHostPanel(
+            self.allocator,
+            panel,
+            rect,
+            manager,
+            &action,
+            &pending_attachment,
+            &host_registry,
+        );
+        if (pending_attachment) |*value| {
+            value.deinit(self.allocator);
+        }
+        return true;
+    }
+
+    fn drawProjectWorkspaceHostPanel(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        panel: *workspace.Panel,
+        panel_rect: ?UiRect,
+        manager: *panel_manager.PanelManager,
+        action: *panels_bridge.UiAction,
+        pending_attachment: *?panels_bridge.AttachmentOpen,
+    ) void {
+        _ = allocator;
+        _ = panel;
+        _ = action;
+        _ = pending_attachment;
+        const runtime_ctx: *HostPanelRuntimeCtx = @ptrCast(@alignCast(ctx));
+        runtime_ctx.app.drawProjectPanel(manager, panel_rect orelse return);
+    }
+
+    fn drawFilesystemBrowserHostPanel(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        panel: *workspace.Panel,
+        panel_rect: ?UiRect,
+        manager: *panel_manager.PanelManager,
+        action: *panels_bridge.UiAction,
+        pending_attachment: *?panels_bridge.AttachmentOpen,
+    ) void {
+        _ = allocator;
+        _ = panel;
+        _ = action;
+        _ = pending_attachment;
+        const runtime_ctx: *HostPanelRuntimeCtx = @ptrCast(@alignCast(ctx));
+        runtime_ctx.app.drawFilesystemPanel(manager, panel_rect orelse return);
+    }
+
+    fn drawDebugStreamHostPanel(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        panel: *workspace.Panel,
+        panel_rect: ?UiRect,
+        manager: *panel_manager.PanelManager,
+        action: *panels_bridge.UiAction,
+        pending_attachment: *?panels_bridge.AttachmentOpen,
+    ) void {
+        _ = allocator;
+        _ = panel;
+        _ = action;
+        _ = pending_attachment;
+        const runtime_ctx: *HostPanelRuntimeCtx = @ptrCast(@alignCast(ctx));
+        runtime_ctx.app.drawDebugPanel(manager, panel_rect orelse return);
+    }
+
+    fn promoteLegacyHostPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel) void {
+        if (panel.kind != .ToolOutput) return;
+
+        const target_kind: ?workspace.PanelKind = blk: {
+            if (std.mem.eql(u8, panel.title, "Projects")) break :blk .ProjectWorkspace;
+            if (std.mem.eql(u8, panel.title, "Filesystem Browser")) break :blk .FilesystemBrowser;
+            if (std.mem.eql(u8, panel.title, "Debug Stream")) break :blk .DebugStream;
+            break :blk null;
+        };
+        const kind = target_kind orelse return;
+
+        panel.data.deinit(self.allocator);
+        panel.kind = kind;
+        panel.data = switch (kind) {
+            .ProjectWorkspace => .{ .ProjectWorkspace = {} },
+            .FilesystemBrowser => .{ .FilesystemBrowser = {} },
+            .DebugStream => .{ .DebugStream = {} },
+            else => unreachable,
+        };
+        switch (kind) {
+            .ProjectWorkspace => self.project_panel_id = panel.id,
+            .FilesystemBrowser => self.filesystem_panel_id = panel.id,
+            .DebugStream => self.debug_panel_id = panel.id,
+            else => {},
+        }
+        manager.workspace.markDirty();
+    }
+
+    fn migrateLegacyHostPanels(self: *App, manager: *panel_manager.PanelManager) void {
+        var changed = false;
+        for (manager.workspace.panels.items) |*panel| {
+            const before = panel.kind;
+            self.promoteLegacyHostPanel(manager, panel);
+            if (before != panel.kind) changed = true;
+        }
+        if (changed) {
+            _ = manager.workspace.syncDockLayout() catch false;
+            manager.workspace.markDirty();
+        }
+    }
+
+    fn launcherSettingsDrawFormSectionTitle(
+        ctx: *anyopaque,
+        x: f32,
+        y: *f32,
+        max_w: f32,
+        layout: PanelLayoutMetrics,
+        text: []const u8,
+    ) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawFormSectionTitle(x, y, max_w, layout, text);
+    }
+
+    fn launcherSettingsDrawFormFieldLabel(
+        ctx: *anyopaque,
+        x: f32,
+        y: *f32,
+        max_w: f32,
+        layout: PanelLayoutMetrics,
+        text: []const u8,
+    ) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawFormFieldLabel(x, y, max_w, layout, text);
+    }
+
+    fn launcherSettingsDrawTextInput(
+        ctx: *anyopaque,
+        rect: Rect,
+        text: []const u8,
+        focused: bool,
+        opts: widgets.text_input.Options,
+    ) bool {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        return self.drawTextInputWidget(rect, text, focused, opts);
+    }
+
+    fn launcherSettingsDrawButton(
+        ctx: *anyopaque,
+        rect: Rect,
+        label: []const u8,
+        opts: widgets.button.Options,
+    ) bool {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        return self.drawButtonWidget(rect, label, opts);
+    }
+
+    fn launcherSettingsDrawLabel(
+        ctx: *anyopaque,
+        x: f32,
+        y: f32,
+        text: []const u8,
+        color: [4]f32,
+    ) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawLabel(x, y, text, color);
+    }
+
+    fn launcherSettingsDrawTextTrimmed(
+        ctx: *anyopaque,
+        x: f32,
+        y: f32,
+        max_w: f32,
+        text: []const u8,
+        color: [4]f32,
+    ) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawTextTrimmed(x, y, max_w, text, color);
+    }
+
+    fn launcherSettingsDrawVerticalScrollbar(
+        ctx: *anyopaque,
+        viewport_rect: Rect,
+        content_height: f32,
+        scroll_y: *f32,
+    ) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawVerticalScrollbar(.settings, viewport_rect, content_height, scroll_y);
+    }
+
+    fn projectDrawStatusRow(ctx: *anyopaque, rect: Rect) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawStatusRow(rect);
+    }
+
+    fn projectDrawVerticalScrollbar(
+        ctx: *anyopaque,
+        viewport_rect: Rect,
+        content_height: f32,
+        scroll_y: *f32,
+    ) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawVerticalScrollbar(.projects, viewport_rect, content_height, scroll_y);
+    }
+
+    fn filesystemDrawSurfacePanel(ctx: *anyopaque, rect: Rect) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawSurfacePanel(rect);
+    }
+
+    fn filesystemDrawTextWrapped(
+        ctx: *anyopaque,
+        x: f32,
+        y: f32,
+        max_w: f32,
+        text: []const u8,
+        color: [4]f32,
+    ) f32 {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        return self.drawTextWrapped(x, y, max_w, text, color);
+    }
+
+    fn terminalDrawOutput(ctx: *anyopaque, rect: Rect, inner: f32) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const host = TerminalOutputPanel.Host{
+            .ctx = @ptrCast(self),
+            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
+            .draw_line = terminalDrawStyledLineAt,
+        };
+        TerminalOutputPanel.draw(
+            host,
+            rect,
+            inner,
+            .{ .text_secondary = self.theme.colors.text_secondary },
+            .{
+                .total_lines = self.terminal_backend.lineCount(),
+                .line_height = self.textLineHeight(),
+                .empty_text = "(terminal output empty)",
+            },
+        );
+    }
+
+    fn terminalDrawStyledLineAt(ctx: *anyopaque, line_index: usize, x: f32, y: f32, max_w: f32) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const line = self.terminal_backend.lineAt(line_index) orelse return;
+        self.drawTerminalStyledLine(x, y, max_w, line);
+    }
+
+    fn debugDrawPerfCharts(
+        ctx: *anyopaque,
+        rect: Rect,
+        layout: PanelLayoutMetrics,
+        y: f32,
+        perf_charts: []const panels_bridge.DebugSparklineSeriesView,
+    ) f32 {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        return self.drawDebugPerfCharts(rect, layout, y, perf_charts);
+    }
+
+    fn debugDrawEventStream(
+        ctx: *anyopaque,
+        output_rect: Rect,
+        view: panels_bridge.DebugEventStreamView,
+    ) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawDebugEventStream(output_rect, view);
+    }
+
+    fn debugEventStreamSetOutputRect(ctx: *anyopaque, rect: Rect) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.debug_output_rect = rect;
+    }
+
+    fn debugEventStreamFocusPanel(ctx: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        if (self.debug_panel_id) |panel_id| self.manager.focusPanel(panel_id);
+    }
+
+    fn debugEventStreamPushClip(ctx: *anyopaque, rect: Rect) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.ui_commands.pushClip(.{ .min = rect.min, .max = rect.max });
+    }
+
+    fn debugEventStreamPopClip(ctx: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.ui_commands.popClip();
+    }
+
+    fn debugEventStreamDrawFilledRect(ctx: *anyopaque, rect: Rect, color: [4]f32) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawFilledRect(rect, color);
+    }
+
+    fn debugEventStreamGetScrollY(ctx: *anyopaque) f32 {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        return self.debug_scroll_y;
+    }
+
+    fn debugEventStreamSetScrollY(ctx: *anyopaque, value: f32) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.debug_scroll_y = value;
+    }
+
+    fn debugEventStreamGetScrollbarDragging(ctx: *anyopaque) bool {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        return self.debug_scrollbar_dragging;
+    }
+
+    fn debugEventStreamSetScrollbarDragging(ctx: *anyopaque, value: bool) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.debug_scrollbar_dragging = value;
+    }
+
+    fn debugEventStreamGetDragStartY(ctx: *anyopaque) f32 {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        return self.debug_scrollbar_drag_start_y;
+    }
+
+    fn debugEventStreamSetDragStartY(ctx: *anyopaque, value: f32) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.debug_scrollbar_drag_start_y = value;
+    }
+
+    fn debugEventStreamGetDragStartScrollY(ctx: *anyopaque) f32 {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        return self.debug_scrollbar_drag_start_scroll_y;
+    }
+
+    fn debugEventStreamSetDragStartScrollY(ctx: *anyopaque, value: f32) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.debug_scrollbar_drag_start_scroll_y = value;
+    }
+
+    fn debugEventStreamSetDragCapture(ctx: *anyopaque, capture: bool) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.setDragMouseCapture(capture);
+    }
+
+    fn debugEventStreamReleaseDragCapture(ctx: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        if (self.form_scroll_drag_target == .none) self.setDragMouseCapture(false);
+    }
+
+    fn debugEventStreamEntryHeight(
+        ctx: *anyopaque,
+        filtered_index: usize,
+        content_min_x: f32,
+        content_max_x: f32,
+        selected: bool,
+    ) f32 {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        if (filtered_index >= self.debug_events.items.len) return 0.0;
+        const layout = self.panelLayoutMetrics();
+        const entry = &self.debug_events.items[filtered_index];
+        const payload_visible_rows = if (selected)
+            self.countVisibleDebugPayloadRows(content_min_x, content_max_x, entry)
+        else
+            0;
+        const visible_lines = 1 + payload_visible_rows;
+        return layout.line_height * @as(f32, @floatFromInt(visible_lines));
+    }
+
+    fn debugEventStreamDrawEntry(
+        ctx: *anyopaque,
+        filtered_index: usize,
+        content_min_x: f32,
+        y: f32,
+        content_max_x: f32,
+        output_rect: Rect,
+        selected: bool,
+        pointer: DebugEventStreamPanel.PointerState,
+    ) bool {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        if (filtered_index >= self.debug_events.items.len) return false;
+        const layout = self.panelLayoutMetrics();
+        const line_height = layout.line_height;
+        const entry = &self.debug_events.items[filtered_index];
+        if (selected) self.ensureDebugPayloadLines(entry);
+        self.drawDebugEventHeaderLine(content_min_x, y, content_max_x, entry.*);
+        var clicked_fold_marker = false;
+        const payload_visible_rows = if (selected)
+            self.countVisibleDebugPayloadRows(content_min_x, content_max_x, entry)
+        else
+            0;
+        if (selected and payload_visible_rows > 0) {
+            self.ensureDebugPayloadWrapRows(content_min_x, content_max_x, entry);
+            self.ensureDebugVisiblePayloadLines(content_min_x, content_max_x, entry);
+            const enable_syntax_color = entry.payload_json.len <= DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES;
+            const space_w = self.measureText(" ");
+            const fold_marker_w_open = self.measureText("[-]");
+            const fold_marker_w_closed = self.measureText("[+]");
+
+            const body_top_y = y + line_height;
+            const min_row: usize = if (output_rect.min[1] <= body_top_y)
+                0
+            else
+                @as(usize, @intFromFloat((output_rect.min[1] - body_top_y) / line_height));
+            const max_row_exclusive: usize = if (output_rect.max[1] <= body_top_y)
+                0
+            else
+                @as(usize, @intFromFloat(((output_rect.max[1] - body_top_y) / line_height) + 1.0));
+
+            var visible_idx = findFirstVisiblePayloadLine(entry, min_row);
+            while (visible_idx < entry.payload_visible_line_indices.items.len) : (visible_idx += 1) {
+                const payload_line_idx = @as(usize, @intCast(entry.payload_visible_line_indices.items[visible_idx]));
+                const row_start = @as(usize, @intCast(entry.payload_visible_line_row_starts.items[visible_idx]));
+                if (row_start >= max_row_exclusive) break;
+
+                _ = payloadLineRowsFromCache(entry, payload_line_idx);
+                const line_y = body_top_y + @as(f32, @floatFromInt(row_start)) * line_height;
+                if (line_y > output_rect.max[1]) break;
+
+                const meta = entry.payload_lines.items[payload_line_idx];
+                const can_fold = meta.opens_block and meta.matching_close_index != null and
+                    @as(usize, @intCast(meta.matching_close_index.?)) > payload_line_idx + 1;
+                const collapsed = can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx);
+
+                const line = entry.payload_json[meta.start..meta.end];
+                const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * space_w;
+                const line_x_base = content_min_x + indent_width;
+                const content_start = @min(meta.indent_spaces, line.len);
+                const content = line[content_start..];
+                var text_x = line_x_base;
+                if (can_fold) {
+                    const marker = if (collapsed) "[+]" else "[-]";
+                    const marker_w = if (collapsed) fold_marker_w_closed else fold_marker_w_open;
+                    const marker_rect = Rect.fromXYWH(line_x_base, line_y, marker_w, line_height);
+                    const marker_hovered = marker_rect.contains(.{ pointer.mouse_x, pointer.mouse_y });
+                    if (pointer.mouse_clicked and marker_hovered) {
+                        self.toggleDebugBlockCollapsed(entry.id, payload_line_idx);
+                        clicked_fold_marker = true;
+                    }
+
+                    const marker_color = if (marker_hovered)
+                        zcolors.blend(self.theme.colors.primary, self.theme.colors.text_primary, 0.22)
+                    else
+                        self.theme.colors.primary;
+                    self.drawText(line_x_base, line_y, marker, marker_color);
+                    text_x = line_x_base + marker_w + space_w;
+                }
+
+                if (enable_syntax_color and content.len <= DEBUG_SYNTAX_COLOR_MAX_LINE_BYTES) {
+                    _ = self.drawJsonLineColored(text_x, line_y, content_max_x, content);
+                } else {
+                    _ = self.drawTextWrapped(
+                        text_x,
+                        line_y,
+                        @max(1.0, content_max_x - text_x),
+                        content,
+                        self.theme.colors.text_primary,
+                    );
+                }
+            }
+        }
+        return clicked_fold_marker;
+    }
+
+    fn debugEventStreamSelectEntry(ctx: *anyopaque, filtered_index: usize) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        if (self.debug_selected_index == null or self.debug_selected_index.? != filtered_index) {
+            self.debug_selected_index = filtered_index;
+            self.clearSelectedNodeServiceEventCache();
+        }
+    }
+
+    fn debugEventStreamCopySelectedEvent(ctx: *anyopaque) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.performDebugPanelAction(&self.manager, .copy_selected_event);
+    }
+
+    fn debugEventStreamSelectedEventCount(ctx: *anyopaque) usize {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        if (self.debug_selected_index) |sel_idx| {
+            return if (sel_idx < self.debug_events.items.len) 1 else 0;
+        }
+        return 0;
+    }
+
     fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         if (self.ui_stage == .workspace) {
             self.drawWorkspaceSettingsPanel(rect);
             return;
         }
-
-        const layout = self.panelLayoutMetrics();
-        const pad = layout.inset;
-        var y = rect.min[1] + pad - self.settings_panel.settings_scroll_y;
-        const rect_width = rect.max[0] - rect.min[0];
-        const input_height = layout.input_height;
-        const button_height = layout.button_height;
-        const input_width = @max(220.0, rect_width - pad * 2.0);
-
-        self.drawFormSectionTitle(rect.min[0] + pad, &y, input_width, layout, "SpiderApp - Settings");
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Server URL");
-        const input_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
+        const host = LauncherSettingsPanel.Host{
+            .ctx = @ptrCast(self),
+            .draw_form_section_title = launcherSettingsDrawFormSectionTitle,
+            .draw_form_field_label = launcherSettingsDrawFormFieldLabel,
+            .draw_text_input = launcherSettingsDrawTextInput,
+            .draw_button = launcherSettingsDrawButton,
+            .draw_label = launcherSettingsDrawLabel,
+            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
+            .draw_vertical_scrollbar = launcherSettingsDrawVerticalScrollbar,
+        };
+        const panel_rect = Rect{ .min = rect.min, .max = rect.max };
+        var panel_state = LauncherSettingsPanel.State{
+            .focused_field = settingsFocusFieldToExternal(self.settings_panel.focused_field),
+            .scroll_y = self.settings_panel.settings_scroll_y,
+        };
+        const action = LauncherSettingsPanel.draw(
+            host,
+            panel_rect,
+            self.panelLayoutMetrics(),
+            self.ui_scale,
+            .{
+                .text_primary = self.theme.colors.text_primary,
+                .text_secondary = self.theme.colors.text_secondary,
+            },
+            self.launcherSettingsModel(),
+            .{
+                .server_url = self.settings_panel.server_url.items,
+                .default_session = self.settings_panel.default_session.items,
+                .default_agent = self.settings_panel.default_agent.items,
+                .ui_theme = self.settings_panel.ui_theme.items,
+                .ui_profile = self.settings_panel.ui_profile.items,
+                .ui_theme_pack = self.settings_panel.ui_theme_pack.items,
+            },
+            .{
+                .mouse_x = self.mouse_x,
+                .mouse_y = self.mouse_y,
+                .mouse_released = self.mouse_released,
+            },
+            &panel_state,
+            .launcher,
         );
-        const url_focused = self.drawTextInputWidget(
-            input_rect,
-            self.settings_panel.server_url.items,
-            self.settings_panel.focused_field == .server_url,
-            .{ .placeholder = "ws://127.0.0.1:18790" },
-        );
-        if (url_focused) self.settings_panel.focused_field = .server_url;
-
-        y += input_height + pad * 0.5;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Connect role",
-            self.theme.colors.text_primary,
-        );
-        y += 20.0 * self.ui_scale;
-        const role_button_width: f32 = @max(120.0, (rect_width - pad * 3.0) * 0.5);
-        const connect_role_admin_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            role_button_width,
-            input_height,
-        );
-        const connect_role_user_rect = Rect.fromXYWH(
-            connect_role_admin_rect.max[0] + pad,
-            y,
-            role_button_width,
-            input_height,
-        );
-        if (self.drawButtonWidget(
-            connect_role_admin_rect,
-            "Admin",
-            .{ .variant = if (self.config.active_role == .admin) .primary else .secondary },
-        )) {
-            self.setActiveConnectRole(.admin) catch |err| {
-                std.log.err("Failed to set connect role admin: {s}", .{@errorName(err)});
-            };
+        self.settings_panel.focused_field = settingsFocusFieldFromExternal(panel_state.focused_field);
+        self.settings_panel.settings_scroll_y = panel_state.scroll_y;
+        if (action) |value| {
+            self.performLauncherSettingsAction(manager, value);
         }
-        if (self.drawButtonWidget(
-            connect_role_user_rect,
-            "User",
-            .{ .variant = if (self.config.active_role == .user) .primary else .secondary },
-        )) {
-            self.setActiveConnectRole(.user) catch |err| {
-                std.log.err("Failed to set connect role user: {s}", .{@errorName(err)});
-            };
-        }
-        y += input_height + 4.0 * self.ui_scale;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            if (self.connection_state == .connected) "Role applies on next reconnect" else "Role applies on next connect",
-            self.theme.colors.text_secondary,
-        );
-
-        y += 18.0 * self.ui_scale + pad * 0.5;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Default session");
-        const default_session_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const default_session_focused = self.drawTextInputWidget(
-            default_session_rect,
-            self.settings_panel.default_session.items,
-            self.settings_panel.focused_field == .default_session,
-            .{ .placeholder = "main" },
-        );
-        if (default_session_focused) self.settings_panel.focused_field = .default_session;
-
-        y += input_height + layout.row_gap;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Default agent");
-        const default_agent_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const default_agent_focused = self.drawTextInputWidget(
-            default_agent_rect,
-            self.settings_panel.default_agent.items,
-            self.settings_panel.focused_field == .default_agent,
-            .{ .placeholder = "leave empty for role default" },
-        );
-        if (default_agent_focused) self.settings_panel.focused_field = .default_agent;
-
-        y += input_height + layout.row_gap;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Theme");
-        const ui_theme_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const ui_theme_focused = self.drawTextInputWidget(
-            ui_theme_rect,
-            self.settings_panel.ui_theme.items,
-            self.settings_panel.focused_field == .ui_theme,
-            .{ .placeholder = "default" },
-        );
-        if (ui_theme_focused) self.settings_panel.focused_field = .ui_theme;
-
-        y += input_height + layout.row_gap;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Profile");
-        const ui_profile_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const ui_profile_focused = self.drawTextInputWidget(
-            ui_profile_rect,
-            self.settings_panel.ui_profile.items,
-            self.settings_panel.focused_field == .ui_profile,
-            .{ .placeholder = "default" },
-        );
-        if (ui_profile_focused) self.settings_panel.focused_field = .ui_profile;
-
-        y += input_height + layout.row_gap;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Theme Pack");
-        const ui_theme_pack_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const ui_theme_pack_focused = self.drawTextInputWidget(
-            ui_theme_pack_rect,
-            self.settings_panel.ui_theme_pack.items,
-            self.settings_panel.focused_field == .ui_theme_pack,
-            .{ .placeholder = "" },
-        );
-        if (ui_theme_pack_focused) self.settings_panel.focused_field = .ui_theme_pack;
-
-        y += input_height + layout.section_gap * 0.55;
-        const watch_button_label = if (self.settings_panel.watch_theme_pack)
-            "Watch Theme Pack: On"
-        else
-            "Watch Theme Pack: Off";
-        const watch_button_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(220.0, rect_width * 0.62),
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            watch_button_rect,
-            watch_button_label,
-            .{ .variant = .secondary },
-        )) {
-            self.settings_panel.watch_theme_pack = !self.settings_panel.watch_theme_pack;
-        }
-
-        y += button_height + layout.row_gap;
-        const auto_connect_label = if (self.settings_panel.auto_connect_on_launch)
-            "Auto Connect: On"
-        else
-            "Auto Connect: Off";
-        const auto_connect_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(220.0, rect_width * 0.52),
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            auto_connect_rect,
-            auto_connect_label,
-            .{ .variant = .secondary },
-        )) {
-            self.settings_panel.auto_connect_on_launch = !self.settings_panel.auto_connect_on_launch;
-        }
-
-        y += button_height + layout.row_gap;
-        const ws_verbose_label = if (self.settings_panel.ws_verbose_logs)
-            "Verbose WS Logs: On"
-        else
-            "Verbose WS Logs: Off";
-        const ws_verbose_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(220.0, rect_width * 0.56),
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            ws_verbose_rect,
-            ws_verbose_label,
-            .{ .variant = .secondary },
-        )) {
-            self.settings_panel.ws_verbose_logs = !self.settings_panel.ws_verbose_logs;
-            if (self.ws_client) |*client| {
-                client.setVerboseLogs(self.settings_panel.ws_verbose_logs);
-            }
-        }
-
-        y += button_height + layout.row_gap;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Terminal renderer",
-            self.theme.colors.text_primary,
-        );
-        y += 20.0 * self.ui_scale;
-        const backend_button_width: f32 = @max(120.0, (rect_width - pad * 3.0) * 0.5);
-        const backend_plain_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            backend_button_width,
-            button_height,
-        );
-        const backend_ghostty_rect = Rect.fromXYWH(
-            backend_plain_rect.max[0] + pad,
-            y,
-            backend_button_width,
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            backend_plain_rect,
-            "Plain",
-            .{ .variant = if (self.settings_panel.terminal_backend_kind == .plain_text) .primary else .secondary },
-        )) {
-            self.settings_panel.terminal_backend_kind = .plain_text;
-            self.applySelectedTerminalBackend();
-        }
-        if (self.drawButtonWidget(
-            backend_ghostty_rect,
-            "Ghostty-VT",
-            .{ .variant = if (self.settings_panel.terminal_backend_kind == .ghostty_vt) .primary else .secondary },
-        )) {
-            self.settings_panel.terminal_backend_kind = .ghostty_vt;
-            self.applySelectedTerminalBackend();
-        }
-        y += button_height + layout.row_gap * 0.6;
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            "Runtime selection; saved when you press Save Config.",
-            self.theme.colors.text_secondary,
-        );
-
-        if (self.mouse_released and
-            isSettingsPanelFocusField(self.settings_panel.focused_field) and
-            !input_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !default_session_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !default_agent_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !ui_theme_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !ui_profile_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !ui_theme_pack_rect.contains(.{ self.mouse_x, self.mouse_y }))
-        {
-            self.settings_panel.focused_field = .none;
-        }
-
-        const button_width: f32 = @max(148.0 * self.ui_scale, rect_width * 0.25);
-        const control_ready = self.connection_state == .connected;
-        const action_row_y = y + layout.line_height + layout.section_gap * 0.45;
-        const connect_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            action_row_y,
-            button_width,
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            connect_rect,
-            "Connect",
-            .{ .variant = .primary, .disabled = self.connection_state == .connecting },
-        )) {
-            self.tryConnect(manager) catch {};
-        }
-
-        const save_rect = Rect.fromXYWH(
-            connect_rect.max[0] + pad,
-            action_row_y,
-            button_width,
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            save_rect,
-            "Save Config",
-            .{ .variant = .secondary },
-        )) {
-            self.saveConfig() catch |err| {
-                self.setConnectionState(.error_state, "Failed to save config");
-                std.log.err("Save config failed: {s}", .{@errorName(err)});
-            };
-        }
-
-        const history_row_y = action_row_y + button_height + layout.row_gap;
-        const load_history_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            history_row_y,
-            button_width,
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            load_history_rect,
-            "Load History",
-            .{ .variant = .secondary, .disabled = !control_ready },
-        )) {
-            self.loadSessionHistoryFromServer(true) catch |err| {
-                if (self.formatControlOpError("Session history failed", err)) |msg| {
-                    defer self.allocator.free(msg);
-                    self.setWorkspaceError(msg);
-                }
-            };
-        }
-
-        const restore_rect = Rect.fromXYWH(
-            load_history_rect.max[0] + pad,
-            history_row_y,
-            button_width,
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            restore_rect,
-            "Restore Last",
-            .{ .variant = .secondary, .disabled = !control_ready },
-        )) {
-            self.restoreLastSessionFromServer() catch |err| {
-                if (self.formatControlOpError("Session restore failed", err)) |msg| {
-                    defer self.allocator.free(msg);
-                    self.setWorkspaceError(msg);
-                }
-            };
-        }
-
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            history_row_y + button_height + layout.row_gap * 0.5,
-            input_width,
-            "Open panels from Windows menu (top bar).",
-            self.theme.colors.text_secondary,
-        );
-
-        const content_bottom_scrolled = history_row_y + button_height + layout.row_gap * 1.5 + layout.line_height;
-        const content_bottom = content_bottom_scrolled + self.settings_panel.settings_scroll_y;
-        const total_height = content_bottom - (rect.min[1] + pad);
-        const viewport_h = @max(0.0, rect.max[1] - rect.min[1] - pad * 2.0);
-        const max_scroll = if (total_height > viewport_h) total_height - viewport_h else 0.0;
-        if (self.settings_panel.settings_scroll_y < 0.0) self.settings_panel.settings_scroll_y = 0.0;
-        if (self.settings_panel.settings_scroll_y > max_scroll) self.settings_panel.settings_scroll_y = max_scroll;
-        const scroll_view_rect = Rect.fromXYWH(rect.min[0], rect.min[1] + pad, rect_width, viewport_h);
-        self.drawVerticalScrollbar(.settings, scroll_view_rect, total_height, &self.settings_panel.settings_scroll_y);
     }
 
     fn drawWorkspaceSettingsPanel(self: *App, rect: UiRect) void {
-        const layout = self.panelLayoutMetrics();
-        const pad = layout.inset;
-        var y = rect.min[1] + pad - self.settings_panel.settings_scroll_y;
-        const rect_width = rect.max[0] - rect.min[0];
-        const input_height = layout.input_height;
-        const button_height = layout.button_height;
-        const input_width = @max(220.0, rect_width - pad * 2.0);
-
-        self.drawFormSectionTitle(rect.min[0] + pad, &y, input_width, layout, "Workspace Settings");
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            "Connection/session/agent configuration moved to Launcher.",
-            self.theme.colors.text_secondary,
+        const host = LauncherSettingsPanel.Host{
+            .ctx = @ptrCast(self),
+            .draw_form_section_title = launcherSettingsDrawFormSectionTitle,
+            .draw_form_field_label = launcherSettingsDrawFormFieldLabel,
+            .draw_text_input = launcherSettingsDrawTextInput,
+            .draw_button = launcherSettingsDrawButton,
+            .draw_label = launcherSettingsDrawLabel,
+            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
+            .draw_vertical_scrollbar = launcherSettingsDrawVerticalScrollbar,
+        };
+        const panel_rect = Rect{ .min = rect.min, .max = rect.max };
+        var panel_state = LauncherSettingsPanel.State{
+            .focused_field = settingsFocusFieldToExternal(self.settings_panel.focused_field),
+            .scroll_y = self.settings_panel.settings_scroll_y,
+        };
+        const action = LauncherSettingsPanel.draw(
+            host,
+            panel_rect,
+            self.panelLayoutMetrics(),
+            self.ui_scale,
+            .{
+                .text_primary = self.theme.colors.text_primary,
+                .text_secondary = self.theme.colors.text_secondary,
+            },
+            self.launcherSettingsModel(),
+            .{
+                .ui_theme = self.settings_panel.ui_theme.items,
+                .ui_profile = self.settings_panel.ui_profile.items,
+                .ui_theme_pack = self.settings_panel.ui_theme_pack.items,
+            },
+            .{
+                .mouse_x = self.mouse_x,
+                .mouse_y = self.mouse_y,
+                .mouse_released = self.mouse_released,
+            },
+            &panel_state,
+            .workspace,
         );
-        y += layout.line_height + layout.section_gap * 0.5;
-
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Theme");
-        const ui_theme_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const ui_theme_focused = self.drawTextInputWidget(
-            ui_theme_rect,
-            self.settings_panel.ui_theme.items,
-            self.settings_panel.focused_field == .ui_theme,
-            .{ .placeholder = "default" },
-        );
-        if (ui_theme_focused) self.settings_panel.focused_field = .ui_theme;
-
-        y += input_height + layout.row_gap;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Profile");
-        const ui_profile_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const ui_profile_focused = self.drawTextInputWidget(
-            ui_profile_rect,
-            self.settings_panel.ui_profile.items,
-            self.settings_panel.focused_field == .ui_profile,
-            .{ .placeholder = "default" },
-        );
-        if (ui_profile_focused) self.settings_panel.focused_field = .ui_profile;
-
-        y += input_height + layout.row_gap;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "UI Theme Pack");
-        const ui_theme_pack_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const ui_theme_pack_focused = self.drawTextInputWidget(
-            ui_theme_pack_rect,
-            self.settings_panel.ui_theme_pack.items,
-            self.settings_panel.focused_field == .ui_theme_pack,
-            .{ .placeholder = "" },
-        );
-        if (ui_theme_pack_focused) self.settings_panel.focused_field = .ui_theme_pack;
-
-        y += input_height + layout.section_gap * 0.55;
-        const watch_button_label = if (self.settings_panel.watch_theme_pack)
-            "Watch Theme Pack: On"
-        else
-            "Watch Theme Pack: Off";
-        const watch_button_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(220.0, rect_width * 0.62),
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            watch_button_rect,
-            watch_button_label,
-            .{ .variant = .secondary },
-        )) {
-            self.settings_panel.watch_theme_pack = !self.settings_panel.watch_theme_pack;
+        self.settings_panel.focused_field = settingsFocusFieldFromExternal(panel_state.focused_field);
+        self.settings_panel.settings_scroll_y = panel_state.scroll_y;
+        if (action) |value| {
+            self.performLauncherSettingsAction(&self.manager, value);
         }
-
-        y += button_height + layout.row_gap;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Terminal renderer",
-            self.theme.colors.text_primary,
-        );
-        y += 20.0 * self.ui_scale;
-        const backend_button_width: f32 = @max(120.0, (rect_width - pad * 3.0) * 0.5);
-        const backend_plain_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            backend_button_width,
-            button_height,
-        );
-        const backend_ghostty_rect = Rect.fromXYWH(
-            backend_plain_rect.max[0] + pad,
-            y,
-            backend_button_width,
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            backend_plain_rect,
-            "Plain",
-            .{ .variant = if (self.settings_panel.terminal_backend_kind == .plain_text) .primary else .secondary },
-        )) {
-            self.settings_panel.terminal_backend_kind = .plain_text;
-            self.applySelectedTerminalBackend();
-        }
-        if (self.drawButtonWidget(
-            backend_ghostty_rect,
-            "Ghostty-VT",
-            .{ .variant = if (self.settings_panel.terminal_backend_kind == .ghostty_vt) .primary else .secondary },
-        )) {
-            self.settings_panel.terminal_backend_kind = .ghostty_vt;
-            self.applySelectedTerminalBackend();
-        }
-
-        y += button_height + layout.section_gap;
-        const save_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(148.0 * self.ui_scale, rect_width * 0.25),
-            button_height,
-        );
-        if (self.drawButtonWidget(
-            save_rect,
-            "Save Workspace Settings",
-            .{ .variant = .secondary },
-        )) {
-            self.saveConfig() catch |err| {
-                self.setConnectionState(.error_state, "Failed to save config");
-                std.log.err("Save config failed: {s}", .{@errorName(err)});
-            };
-        }
-
-        if (self.mouse_released and
-            isSettingsPanelFocusField(self.settings_panel.focused_field) and
-            !ui_theme_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !ui_profile_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !ui_theme_pack_rect.contains(.{ self.mouse_x, self.mouse_y }))
-        {
-            self.settings_panel.focused_field = .none;
-        }
-
-        const content_bottom_scrolled = y + button_height + layout.row_gap + layout.line_height;
-        const content_bottom = content_bottom_scrolled + self.settings_panel.settings_scroll_y;
-        const total_height = content_bottom - (rect.min[1] + pad);
-        const viewport_h = @max(0.0, rect.max[1] - rect.min[1] - pad * 2.0);
-        const max_scroll = if (total_height > viewport_h) total_height - viewport_h else 0.0;
-        if (self.settings_panel.settings_scroll_y < 0.0) self.settings_panel.settings_scroll_y = 0.0;
-        if (self.settings_panel.settings_scroll_y > max_scroll) self.settings_panel.settings_scroll_y = max_scroll;
-        const scroll_view_rect = Rect.fromXYWH(rect.min[0], rect.min[1] + pad, rect_width, viewport_h);
-        self.drawVerticalScrollbar(.settings, scroll_view_rect, total_height, &self.settings_panel.settings_scroll_y);
     }
 
     fn drawProjectPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         _ = manager;
-        const layout = self.panelLayoutMetrics();
-        const pad = layout.inset;
-        var y = rect.min[1] + pad - self.settings_panel.projects_scroll_y;
-        const rect_width = rect.max[0] - rect.min[0];
-        const input_height = layout.input_height;
-        const button_height = layout.button_height;
-        const input_width = @max(220.0, rect_width - pad * 2.0);
-
-        self.drawFormSectionTitle(rect.min[0] + pad, &y, input_width, layout, "Project Workspace");
-
-        if (self.settings_panel.focused_field == .project_id) {
-            self.settings_panel.focused_field = .none;
-        }
-
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Selected Project");
-        const project_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        if (self.projects.items.len == 0) self.project_selector_open = false;
-
-        var selected_project_label_buf: [512]u8 = undefined;
-        const selected_project_label: []const u8 = blk: {
-            if (self.settings_panel.project_id.items.len == 0) break :blk "Select project";
-            const selected_id = self.settings_panel.project_id.items;
-            for (self.projects.items) |project| {
-                if (std.mem.eql(u8, project.id, selected_id)) {
-                    const formatted = std.fmt.bufPrint(
-                        &selected_project_label_buf,
-                        "{s} ({s}) [{s}]",
-                        .{
-                            project.name,
-                            project.id,
-                            if (project.token_locked) "locked" else "open",
-                        },
-                    ) catch selected_id;
-                    break :blk formatted;
-                }
-            }
-            break :blk selected_id;
+        var view = self.buildProjectPanelView();
+        defer view.deinit(self.allocator);
+        const host = ProjectPanel.Host{
+            .ctx = @ptrCast(self),
+            .draw_form_section_title = launcherSettingsDrawFormSectionTitle,
+            .draw_form_field_label = launcherSettingsDrawFormFieldLabel,
+            .draw_text_input = launcherSettingsDrawTextInput,
+            .draw_button = launcherSettingsDrawButton,
+            .draw_label = launcherSettingsDrawLabel,
+            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
+            .draw_status_row = projectDrawStatusRow,
+            .draw_vertical_scrollbar = projectDrawVerticalScrollbar,
         };
-
-        if (self.drawButtonWidget(
-            project_rect,
-            selected_project_label,
-            .{ .variant = .secondary, .disabled = self.projects.items.len == 0 },
-        )) {
-            self.project_selector_open = false;
-            self.settings_panel.focused_field = .none;
-        }
-
-        y += input_height;
-        const project_dropdown_rect: ?Rect = null;
-        self.project_selector_open = false;
-
-        const selected_project_lock_state = self.selectedProjectTokenLocked();
-        const lock_state_text: []const u8 = if (self.selectedProjectId() == null)
-            "Project lock state: select a project"
-        else if (selected_project_lock_state) |locked|
-            if (locked)
-                "Project lock state: locked (project token required for non-admin)"
-            else
-                "Project lock state: unlocked (project token optional)"
-        else
-            "Project lock state: unknown (project not in current list)";
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            lock_state_text,
-            self.theme.colors.text_secondary,
-        );
-        y += layout.line_height + layout.row_gap * 0.45;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Project Token (optional; required only for locked projects)");
-        const project_token_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const project_token_focused = self.drawTextInputWidget(
-            project_token_rect,
-            self.settings_panel.project_token.items,
-            self.settings_panel.focused_field == .project_token,
-            .{ .placeholder = "proj-..." },
-        );
-        if (project_token_focused) self.settings_panel.focused_field = .project_token;
-
-        y += input_height + layout.row_gap;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Create Project Name");
-        const create_name_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const create_name_focused = self.drawTextInputWidget(
-            create_name_rect,
-            self.settings_panel.project_create_name.items,
-            self.settings_panel.focused_field == .project_create_name,
-            .{ .placeholder = "Distributed Workspace" },
-        );
-        if (create_name_focused) self.settings_panel.focused_field = .project_create_name;
-
-        y += input_height + layout.row_gap * 0.8;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Create Vision (optional)");
-        const create_vision_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const create_vision_focused = self.drawTextInputWidget(
-            create_vision_rect,
-            self.settings_panel.project_create_vision.items,
-            self.settings_panel.focused_field == .project_create_vision,
-            .{ .placeholder = "unified node mounts" },
-        );
-        if (create_vision_focused) self.settings_panel.focused_field = .project_create_vision;
-
-        y += input_height + layout.row_gap * 0.8;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Operator Token (optional)");
-        const operator_token_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const operator_token_focused = self.drawTextInputWidget(
-            operator_token_rect,
-            self.settings_panel.project_operator_token.items,
-            self.settings_panel.focused_field == .project_operator_token,
-            .{ .placeholder = "(fallback: saved admin token)" },
-        );
-        if (operator_token_focused) self.settings_panel.focused_field = .project_operator_token;
-
-        y += input_height + layout.section_gap;
-        const button_width: f32 = @max(152.0 * self.ui_scale, rect_width * 0.28);
-        const create_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
-        const refresh_rect = Rect.fromXYWH(create_rect.max[0] + pad, y, button_width, button_height);
-        const activate_rect = Rect.fromXYWH(refresh_rect.max[0] + pad, y, button_width, button_height);
-
-        if (self.drawButtonWidget(
-            create_rect,
-            "Create Project",
+        var panel_state = ProjectPanel.State{
+            .focused_field = projectFocusFieldToExternal(self.settings_panel.focused_field),
+            .scroll_y = self.settings_panel.projects_scroll_y,
+        };
+        const action = ProjectPanel.draw(
+            host,
+            Rect{ .min = rect.min, .max = rect.max },
+            self.panelLayoutMetrics(),
+            self.ui_scale,
             .{
-                .variant = .primary,
-                .disabled = self.connection_state != .connected or self.settings_panel.project_create_name.items.len == 0,
+                .text_primary = self.theme.colors.text_primary,
+                .text_secondary = self.theme.colors.text_secondary,
+                .warning_text = zcolors.rgba(236, 174, 36, 255),
+                .error_text = zcolors.rgba(220, 80, 80, 255),
             },
-        )) {
-            self.createProjectFromPanel() catch |err| {
-                const msg = self.formatControlOpError("Project create failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-
-        if (self.drawButtonWidget(
-            refresh_rect,
-            "Refresh Workspace",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.refreshWorkspaceData() catch |err| {
-                const msg = self.formatControlOpError("Workspace refresh failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-
-        if (self.drawButtonWidget(
-            activate_rect,
-            "Activate Project",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.selectedProjectId() == null },
-        )) {
-            self.activateSelectedProject() catch |err| {
-                const msg = self.formatControlOpError("Project activate failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-
-        y += button_height + layout.row_gap;
-        const lock_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
-        const unlock_rect = Rect.fromXYWH(lock_rect.max[0] + pad, y, button_width, button_height);
-        const selected_project_known = selected_project_lock_state != null;
-        const selected_is_locked = if (selected_project_lock_state) |locked| locked else false;
-        const lock_disabled = self.connection_state != .connected or !selected_project_known or selected_is_locked;
-        const unlock_disabled = self.connection_state != .connected or !selected_project_known or !selected_is_locked;
-
-        if (self.drawButtonWidget(
-            lock_rect,
-            "Lock Project",
-            .{ .variant = .secondary, .disabled = lock_disabled },
-        )) {
-            self.lockSelectedProjectFromPanel() catch |err| {
-                const msg = self.formatControlOpError("Project lock failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            unlock_rect,
-            "Unlock Project",
-            .{ .variant = .secondary, .disabled = unlock_disabled },
-        )) {
-            self.unlockSelectedProjectFromPanel() catch |err| {
-                const msg = self.formatControlOpError("Project unlock failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-
-        y += button_height + layout.section_gap * 0.7;
-        self.drawFormSectionTitle(rect.min[0] + pad, &y, input_width, layout, "Project Mount");
-
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Mount Path");
-        const mount_path_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const mount_path_focused = self.drawTextInputWidget(
-            mount_path_rect,
-            self.settings_panel.project_mount_path.items,
-            self.settings_panel.focused_field == .project_mount_path,
-            .{ .placeholder = "/work" },
-        );
-        if (mount_path_focused) self.settings_panel.focused_field = .project_mount_path;
-
-        y += input_height + layout.row_gap * 0.8;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Mount Node ID");
-        const mount_node_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const mount_node_focused = self.drawTextInputWidget(
-            mount_node_rect,
-            self.settings_panel.project_mount_node_id.items,
-            self.settings_panel.focused_field == .project_mount_node_id,
-            .{ .placeholder = "node-2" },
-        );
-        if (mount_node_focused) self.settings_panel.focused_field = .project_mount_node_id;
-
-        y += input_height + layout.row_gap * 0.8;
-        self.drawFormFieldLabel(rect.min[0] + pad, &y, input_width, layout, "Mount Export Name");
-        const mount_export_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            input_height,
-        );
-        const mount_export_focused = self.drawTextInputWidget(
-            mount_export_rect,
-            self.settings_panel.project_mount_export_name.items,
-            self.settings_panel.focused_field == .project_mount_export_name,
-            .{ .placeholder = "work" },
-        );
-        if (mount_export_focused) self.settings_panel.focused_field = .project_mount_export_name;
-
-        const add_mount_validation = self.validateProjectMountAddInput();
-        const remove_mount_validation = self.validateProjectMountRemoveInput();
-
-        y += input_height + layout.section_gap;
-        const add_mount_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
-        const remove_mount_rect = Rect.fromXYWH(add_mount_rect.max[0] + pad, y, button_width, button_height);
-
-        if (self.drawButtonWidget(
-            add_mount_rect,
-            "Add Mount",
+            self.projectPanelModel(),
+            view.view,
             .{
-                .variant = .primary,
-                .disabled = self.connection_state != .connected,
+                .project_token = self.settings_panel.project_token.items,
+                .create_name = self.settings_panel.project_create_name.items,
+                .create_vision = self.settings_panel.project_create_vision.items,
+                .operator_token = self.settings_panel.project_operator_token.items,
+                .mount_path = self.settings_panel.project_mount_path.items,
+                .mount_node_id = self.settings_panel.project_mount_node_id.items,
+                .mount_export_name = self.settings_panel.project_mount_export_name.items,
             },
-        )) {
-            if (add_mount_validation) |message| {
-                self.setWorkspaceError(message);
-            } else {
-                self.setProjectMountFromPanel() catch |err| {
-                    const msg = self.formatControlOpError("Mount set failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setWorkspaceError(text);
-                    }
-                };
-            }
-        }
-
-        if (self.drawButtonWidget(
-            remove_mount_rect,
-            "Remove Mount",
             .{
-                .variant = .secondary,
-                .disabled = self.connection_state != .connected,
+                .mouse_x = self.mouse_x,
+                .mouse_y = self.mouse_y,
+                .mouse_released = self.mouse_released,
             },
-        )) {
-            if (remove_mount_validation) |message| {
-                self.setWorkspaceError(message);
-            } else {
-                self.removeProjectMountFromPanel() catch |err| {
-                    const msg = self.formatControlOpError("Mount remove failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setWorkspaceError(text);
-                    }
-                };
-            }
-        }
-
-        const mount_hint = if (self.connection_state == .connected)
-            (add_mount_validation orelse remove_mount_validation)
-        else
-            null;
-        if (mount_hint) |hint| {
-            self.drawTextTrimmed(
-                rect.min[0] + pad,
-                y + button_height + layout.row_gap * 0.5,
-                input_width,
-                hint,
-                self.theme.colors.text_secondary,
-            );
-        }
-
-        y += button_height + layout.row_gap;
-        if (mount_hint != null) y += layout.line_height;
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y + @max(0.0, (button_height - layout.line_height) * 0.5),
-            input_width,
-            "Open Filesystem and Debug panels from the Windows menu.",
-            self.theme.colors.text_secondary,
+            &panel_state,
         );
-
-        y += button_height + layout.section_gap;
-        const auth_status_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
-        const auth_rotate_user_rect = Rect.fromXYWH(auth_status_rect.max[0] + pad, y, button_width, button_height);
-        const auth_rotate_admin_rect = Rect.fromXYWH(auth_rotate_user_rect.max[0] + pad, y, button_width, button_height);
-
-        if (self.drawButtonWidget(
-            auth_status_rect,
-            "Auth Status",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.fetchAuthStatusFromPanel(false) catch |err| {
-                const msg = self.formatControlOpError("Auth status failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
+        const mapped_focus = projectFocusFieldFromExternal(panel_state.focused_field);
+        if (mapped_focus != .none or isProjectPanelFocusField(self.settings_panel.focused_field)) {
+            self.settings_panel.focused_field = mapped_focus;
         }
-        if (self.drawButtonWidget(
-            auth_rotate_user_rect,
-            "Rotate User",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.rotateAuthTokenFromPanel("user") catch |err| {
-                const msg = self.formatControlOpError("Auth rotate(user) failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            auth_rotate_admin_rect,
-            "Rotate Admin",
-            .{ .variant = .primary, .disabled = self.connection_state != .connected },
-        )) {
-            self.rotateAuthTokenFromPanel("admin") catch |err| {
-                const msg = self.formatControlOpError("Auth rotate(admin) failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-
-        y += button_height + layout.row_gap;
-        const auth_reveal_admin_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
-        const auth_copy_admin_rect = Rect.fromXYWH(auth_reveal_admin_rect.max[0] + pad, y, button_width, button_height);
-        const auth_reveal_user_rect = Rect.fromXYWH(auth_copy_admin_rect.max[0] + pad, y, button_width, button_height);
-        if (self.drawButtonWidget(
-            auth_reveal_admin_rect,
-            "Reveal Admin",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.revealAuthTokenFromPanel("admin") catch |err| {
-                const msg = self.formatControlOpError("Reveal admin token failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            auth_copy_admin_rect,
-            "Copy Admin",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.copyAuthTokenFromPanel("admin") catch |err| {
-                const msg = self.formatControlOpError("Copy admin token failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            auth_reveal_user_rect,
-            "Reveal User",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.revealAuthTokenFromPanel("user") catch |err| {
-                const msg = self.formatControlOpError("Reveal user token failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-
-        y += button_height + layout.row_gap;
-        const auth_copy_user_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_width, button_height);
-        if (self.drawButtonWidget(
-            auth_copy_user_rect,
-            "Copy User",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.copyAuthTokenFromPanel("user") catch |err| {
-                const msg = self.formatControlOpError("Copy user token failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
-                }
-            };
-        }
-
-        y += button_height + layout.section_gap;
-        const status_height: f32 = @max(layout.line_height + layout.inner_inset * 2.2, 32.0 * self.ui_scale);
-        const status_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            input_width,
-            status_height,
-        );
-        self.drawStatusRow(status_rect);
-        y += status_height + layout.row_gap;
-
-        if (self.workspace_last_error) |err_text| {
-            self.drawLabel(
-                rect.min[0] + pad,
-                y,
-                err_text,
-                zcolors.rgba(220, 80, 80, 255),
-            );
-            y += layout.line_height;
-        }
-
-        const selected_project_text = if (self.settings_panel.project_id.items.len > 0)
-            self.settings_panel.project_id.items
-        else
-            "(none)";
-        const selected_project_lock_suffix: []const u8 = if (selected_project_lock_state) |locked|
-            if (locked) " [locked]" else " [open]"
-        else
-            "";
-        var selected_project_line_buf: [384]u8 = undefined;
-        const selected_project_line = std.fmt.bufPrint(
-            &selected_project_line_buf,
-            "Selected project: {s}{s}",
-            .{ selected_project_text, selected_project_lock_suffix },
-        ) catch null;
-        if (selected_project_line) |line| {
-            self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
-            y += layout.line_height;
-        }
-        if (self.connect_setup_hint) |hint| {
-            const setup_status = if (hint.required) "required" else "ready";
-            var setup_line_buf: [384]u8 = undefined;
-            const setup_line = std.fmt.bufPrint(
-                &setup_line_buf,
-                "Project setup: {s}",
-                .{setup_status},
-            ) catch null;
-            if (setup_line) |line| {
-                self.drawLabel(
-                    rect.min[0] + pad,
-                    y,
-                    line,
-                    if (hint.required) zcolors.rgba(236, 174, 36, 255) else self.theme.colors.text_secondary,
-                );
-                y += layout.line_height;
-            }
-            if (hint.project_vision) |vision| {
-                var vision_line_buf: [640]u8 = undefined;
-                const vision_line = std.fmt.bufPrint(
-                    &vision_line_buf,
-                    "Project vision: {s}",
-                    .{vision},
-                ) catch null;
-                if (vision_line) |line| {
-                    self.drawTextTrimmed(
-                        rect.min[0] + pad,
-                        y,
-                        input_width,
-                        line,
-                        self.theme.colors.text_secondary,
-                    );
-                    y += layout.line_height;
-                }
-            }
-        }
-
-        if (self.workspace_state) |*status| {
-            const root_text = status.workspace_root orelse "(none)";
-            const mounted_count: usize = if (status.actual_mounts.items.len > 0)
-                status.actual_mounts.items.len
-            else
-                status.mounts.items.len;
-            var workspace_line_buf: [384]u8 = undefined;
-            const workspace_line = std.fmt.bufPrint(
-                &workspace_line_buf,
-                "Workspace root: {s} | mounts: {d}",
-                .{ root_text, mounted_count },
-            ) catch null;
-            if (workspace_line) |line| {
-                self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
-                y += layout.line_height;
-            }
-
-            const health_state = workspaceHealthState(status);
-            var availability_line_buf: [512]u8 = undefined;
-            const availability_line = std.fmt.bufPrint(
-                &availability_line_buf,
-                "Workspace health: {s} | online={d}/{d} degraded={d} missing={d} drift={d}",
-                .{
-                    workspaceHealthStateLabel(health_state),
-                    status.availability_online,
-                    status.availability_mounts_total,
-                    status.availability_degraded,
-                    status.availability_missing,
-                    status.drift_count,
-                },
-            ) catch null;
-            if (availability_line) |line| {
-                self.drawLabel(
-                    rect.min[0] + pad,
-                    y,
-                    line,
-                    switch (health_state) {
-                        .healthy => self.theme.colors.text_secondary,
-                        .unknown => self.theme.colors.text_secondary,
-                        .degraded => zcolors.rgba(236, 174, 36, 255),
-                        .missing => zcolors.rgba(220, 80, 80, 255),
-                    },
-                );
-                y += layout.line_height;
-            }
-        }
-
-        var projects_line_buf: [256]u8 = undefined;
-        const projects_line = std.fmt.bufPrint(
-            &projects_line_buf,
-            "Projects: {d} | Nodes: {d}",
-            .{ self.projects.items.len, self.nodes.items.len },
-        ) catch null;
-        if (projects_line) |line| {
-            self.drawLabel(rect.min[0] + pad, y, line, self.theme.colors.text_secondary);
-            y += layout.line_height;
-        }
-        y += layout.row_gap * 0.6;
-
-        if (self.projects.items.len > 0) {
-            self.drawLabel(rect.min[0] + pad, y, "Project List:", self.theme.colors.text_primary);
-            y += layout.label_to_input_gap;
-            const row_h = @max(layout.button_height * 0.86, layout.line_height + layout.inner_inset);
-            const row_gap = @max(1.0, layout.inner_inset * 0.3);
-            const row_step = row_h + row_gap;
-            const list_top = y;
-            const list_bottom = rect.max[1] + self.settings_panel.projects_scroll_y;
-            const visible_start_idx: usize = @intFromFloat(@max(
-                0.0,
-                @floor((rect.min[1] - list_top) / row_step),
-            ));
-            const visible_end_idx_unclamped: usize = @intFromFloat(@max(
-                0.0,
-                @ceil((list_bottom - list_top) / row_step),
-            ));
-            const max_projects: usize = self.projects.items.len;
-            const visible_end_idx = @min(max_projects, visible_end_idx_unclamped + 1);
-
-            if (visible_start_idx > 0) {
-                y += row_step * @as(f32, @floatFromInt(visible_start_idx));
-            }
-
-            var idx: usize = visible_start_idx;
-            while (idx < max_projects) : (idx += 1) {
-                if (idx >= visible_end_idx) {
-                    const remaining = max_projects - idx;
-                    y += row_step * @as(f32, @floatFromInt(remaining));
-                    break;
-                }
-                const project = self.projects.items[idx];
-                var line_buf: [512]u8 = undefined;
-                const line = std.fmt.bufPrint(
-                    &line_buf,
-                    "{s} [{s}] access={s} mounts={d}",
-                    .{
-                        project.id,
-                        project.status,
-                        if (project.token_locked) "locked" else "open",
-                        project.mount_count,
-                    },
-                ) catch null;
-                if (line) |value| {
-                    const button_w = @max(90.0 * self.ui_scale, rect_width * 0.17);
-                    const text_max_w = @max(120.0, rect_width - (pad * 2.0) - button_w - pad);
-                    const text_y = y + @max(0.0, (row_h - layout.line_height) * 0.5);
-                    self.drawTextTrimmed(
-                        rect.min[0] + pad,
-                        text_y,
-                        text_max_w,
-                        value,
-                        self.theme.colors.text_secondary,
-                    );
-                    const project_selected = self.settings_panel.project_id.items.len > 0 and
-                        std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
-                    const use_rect = Rect.fromXYWH(
-                        rect.min[0] + pad + text_max_w + pad,
-                        y,
-                        button_w,
-                        row_h,
-                    );
-                    if (self.drawButtonWidget(
-                        use_rect,
-                        if (project_selected) "Selected" else "Use",
-                        .{ .variant = .secondary, .disabled = project_selected },
-                    )) {
-                        self.selectProjectInSettings(project.id) catch |err| {
-                            const msg = std.fmt.allocPrint(self.allocator, "Project select failed: {s}", .{@errorName(err)}) catch null;
-                            if (msg) |text| {
-                                defer self.allocator.free(text);
-                                self.setWorkspaceError(text);
-                            }
-                        };
-                    }
-                    y += row_step;
-                }
-            }
-        }
-
-        if (self.nodes.items.len > 0) {
-            y += layout.section_gap * 0.45;
-            self.drawLabel(rect.min[0] + pad, y, "Nodes:", self.theme.colors.text_primary);
-            y += layout.label_to_input_gap;
-            const max_nodes: usize = @min(self.nodes.items.len, 8);
-            const now_ms = std.time.milliTimestamp();
-            var idx: usize = 0;
-            while (idx < max_nodes) : (idx += 1) {
-                const node = self.nodes.items[idx];
-                const node_online = node.lease_expires_at_ms > now_ms;
-                var line_buf: [384]u8 = undefined;
-                const line = std.fmt.bufPrint(
-                    &line_buf,
-                    "  - {s} ({s}) [{s}]",
-                    .{ node.node_id, node.node_name, if (node_online) "online" else "degraded" },
-                ) catch null;
-                if (line) |value| {
-                    self.drawLabel(
-                        rect.min[0] + pad,
-                        y,
-                        value,
-                        if (node_online) self.theme.colors.text_secondary else zcolors.rgba(236, 174, 36, 255),
-                    );
-                    y += layout.line_height;
-                }
-            }
-        }
-
-        const clicked_outside_project_selector = !project_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !(project_dropdown_rect != null and project_dropdown_rect.?.contains(.{ self.mouse_x, self.mouse_y }));
-
-        if (self.mouse_released and clicked_outside_project_selector) {
-            self.project_selector_open = false;
-        }
-
-        if (self.mouse_released and
-            isProjectPanelFocusField(self.settings_panel.focused_field) and
-            clicked_outside_project_selector and
-            !project_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !create_name_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !create_vision_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !operator_token_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !mount_path_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !mount_node_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !mount_export_rect.contains(.{ self.mouse_x, self.mouse_y }))
-        {
-            self.settings_panel.focused_field = .none;
-        }
-
-        const content_bottom_scrolled = y;
-        const content_bottom = content_bottom_scrolled + self.settings_panel.projects_scroll_y;
-        const total_height = content_bottom - (rect.min[1] + pad);
-        const viewport_h = @max(0.0, rect.max[1] - rect.min[1] - pad * 2.0);
-        const max_scroll = if (total_height > viewport_h) total_height - viewport_h else 0.0;
-        if (self.settings_panel.projects_scroll_y < 0.0) self.settings_panel.projects_scroll_y = 0.0;
-        if (self.settings_panel.projects_scroll_y > max_scroll) self.settings_panel.projects_scroll_y = max_scroll;
-        const scroll_view_rect = Rect.fromXYWH(rect.min[0], rect.min[1] + pad, rect_width, viewport_h);
-        self.drawVerticalScrollbar(.projects, scroll_view_rect, total_height, &self.settings_panel.projects_scroll_y);
+        self.settings_panel.projects_scroll_y = panel_state.scroll_y;
+        if (action) |value| self.performProjectPanelAction(value);
     }
 
     fn pathWithinMount(path: []const u8, mount_path: []const u8) bool {
@@ -8767,224 +8283,38 @@ const App = struct {
 
     fn drawTerminalPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         _ = manager;
-        const layout = self.panelLayoutMetrics();
-        const pad = layout.inset;
-        const inner = layout.inner_inset;
-        const row_h = layout.button_height;
-        const width = rect.max[0] - rect.min[0];
-        const content_width = @max(220.0, width - pad * 2.0);
-        var y = rect.min[1] + pad;
-
-        self.drawLabel(rect.min[0] + pad, y, "Terminal", self.theme.colors.text_primary);
-        y += layout.title_gap;
-        const backend_line = std.fmt.allocPrint(
-            self.allocator,
-            "Backend: {s} (selected: {s}, build default: {s})",
+        const host = TerminalPanel.Host{
+            .ctx = @ptrCast(self),
+            .draw_label = launcherSettingsDrawLabel,
+            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
+            .draw_text_input = launcherSettingsDrawTextInput,
+            .draw_button = launcherSettingsDrawButton,
+            .draw_surface_panel = filesystemDrawSurfacePanel,
+            .draw_output = terminalDrawOutput,
+        };
+        var panel_state = TerminalPanel.State{
+            .focused_field = terminalFocusFieldToExternal(self.settings_panel.focused_field),
+        };
+        const action = TerminalPanel.draw(
+            host,
+            Rect{ .min = rect.min, .max = rect.max },
+            self.panelLayoutMetrics(),
             .{
-                self.terminal_backend.label(),
-                terminal_render_backend.Backend.kindName(self.terminal_backend_kind),
-                TERMINAL_BACKEND_KIND,
+                .text_primary = self.theme.colors.text_primary,
+                .text_secondary = self.theme.colors.text_secondary,
+                .error_text = zcolors.rgba(220, 80, 80, 255),
             },
-        ) catch null;
-        defer if (backend_line) |value| self.allocator.free(value);
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            backend_line orelse "Backend: unknown",
-            self.theme.colors.text_secondary,
+            self.terminalPanelModel(),
+            self.terminalPanelView(),
+            .{
+                .mouse_x = self.mouse_x,
+                .mouse_y = self.mouse_y,
+                .mouse_released = self.mouse_released,
+            },
+            &panel_state,
         );
-        y += layout.line_height;
-        if (self.terminal_backend.statusDetail()) |detail| {
-            self.drawTextTrimmed(
-                rect.min[0] + pad,
-                y,
-                content_width,
-                detail,
-                self.theme.colors.text_secondary,
-            );
-            y += layout.line_height;
-        }
-
-        const session_line = if (self.terminal_session_id) |id|
-            std.fmt.allocPrint(self.allocator, "Session: {s}", .{id}) catch null
-        else
-            self.allocator.dupe(u8, "Session: (not started)") catch null;
-        defer if (session_line) |value| self.allocator.free(value);
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            session_line orelse "Session: (unknown)",
-            self.theme.colors.text_secondary,
-        );
-        y += layout.line_height;
-
-        if (self.terminal_status) |status| {
-            self.drawTextTrimmed(
-                rect.min[0] + pad,
-                y,
-                content_width,
-                status,
-                self.theme.colors.text_secondary,
-            );
-            y += layout.line_height;
-        }
-        if (self.terminal_error) |err_text| {
-            self.drawTextTrimmed(
-                rect.min[0] + pad,
-                y,
-                content_width,
-                err_text,
-                zcolors.rgba(220, 80, 80, 255),
-            );
-            y += layout.line_height;
-        }
-
-        const button_w = @max(108.0, (content_width - pad * 4.0) / 5.0);
-        const disconnected = self.connection_state != .connected;
-        const start_rect = Rect.fromXYWH(rect.min[0] + pad, y, button_w, row_h);
-        const stop_rect = Rect.fromXYWH(start_rect.max[0] + pad, y, button_w, row_h);
-        const poll_rect = Rect.fromXYWH(stop_rect.max[0] + pad, y, button_w, row_h);
-        const resize_rect = Rect.fromXYWH(poll_rect.max[0] + pad, y, button_w, row_h);
-        const clear_rect = Rect.fromXYWH(resize_rect.max[0] + pad, y, button_w, row_h);
-
-        if (self.drawButtonWidget(
-            start_rect,
-            if (self.terminal_session_id == null) "Start" else "Restart",
-            .{ .variant = .primary, .disabled = disconnected },
-        )) {
-            if (self.terminal_session_id != null) {
-                self.closeTerminalSession() catch {};
-            }
-            self.ensureTerminalSession() catch |err| {
-                const msg = self.formatFilesystemOpError("Terminal start failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setTerminalError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            stop_rect,
-            "Stop",
-            .{ .variant = .secondary, .disabled = disconnected or self.terminal_session_id == null },
-        )) {
-            self.closeTerminalSession() catch |err| {
-                const msg = self.formatFilesystemOpError("Terminal close failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setTerminalError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            poll_rect,
-            "Read",
-            .{ .variant = .secondary, .disabled = disconnected or self.terminal_session_id == null },
-        )) {
-            self.terminalReadOnce(50) catch |err| {
-                const msg = self.formatFilesystemOpError("Terminal read failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setTerminalError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            resize_rect,
-            "Resize 120x36",
-            .{ .variant = .secondary, .disabled = disconnected or self.terminal_session_id == null },
-        )) {
-            self.resizeTerminalSession(120, 36) catch |err| {
-                const msg = self.formatFilesystemOpError("Terminal resize failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setTerminalError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(clear_rect, "Clear Output", .{ .variant = .secondary })) {
-            self.terminal_backend.clear(self.allocator);
-            self.clearTerminalError();
-            self.setTerminalStatus("Output cleared");
-        }
-        y += row_h + layout.row_gap * 0.5;
-
-        const auto_poll_rect = Rect.fromXYWH(rect.min[0] + pad, y, @max(180.0, button_w * 1.2), row_h);
-        if (self.drawButtonWidget(
-            auto_poll_rect,
-            if (self.terminal_auto_poll) "Auto Poll: On" else "Auto Poll: Off",
-            .{ .variant = .secondary },
-        )) {
-            self.terminal_auto_poll = !self.terminal_auto_poll;
-        }
-        const ctrl_c_rect = Rect.fromXYWH(auto_poll_rect.max[0] + pad, y, @max(108.0, button_w), row_h);
-        if (self.drawButtonWidget(
-            ctrl_c_rect,
-            "Send Ctrl+C",
-            .{ .variant = .secondary, .disabled = disconnected or self.terminal_session_id == null },
-        )) {
-            self.sendTerminalControlC() catch |err| {
-                const msg = self.formatFilesystemOpError("Terminal control failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setTerminalError(text);
-                }
-            };
-        }
-        y += row_h + layout.row_gap * 0.5;
-
-        const input_rect = Rect.fromXYWH(rect.min[0] + pad, y, @max(220.0, content_width - button_w - pad), row_h);
-        const send_rect = Rect.fromXYWH(input_rect.max[0] + pad, y, button_w, row_h);
-        const input_focused = self.drawTextInputWidget(
-            input_rect,
-            self.terminal_input.items,
-            self.settings_panel.focused_field == .terminal_command_input,
-            .{ .placeholder = "Type command and press Enter (or Send)" },
-        );
-        if (input_focused) self.settings_panel.focused_field = .terminal_command_input;
-        if (self.drawButtonWidget(
-            send_rect,
-            "Send",
-            .{ .variant = .primary, .disabled = disconnected or self.terminal_input.items.len == 0 },
-        )) {
-            self.sendTerminalInputFromUi() catch |err| {
-                const msg = self.formatFilesystemOpError("Terminal send failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setTerminalError(text);
-                }
-            };
-        }
-        if (self.mouse_released and
-            self.settings_panel.focused_field == .terminal_command_input and
-            !input_rect.contains(.{ self.mouse_x, self.mouse_y }))
-        {
-            self.settings_panel.focused_field = .none;
-        }
-
-        y += row_h + layout.row_gap;
-        const output_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            @max(120.0, rect.max[1] - y - pad),
-        );
-        self.drawSurfacePanel(output_rect);
-
-        if (self.terminal_backend.lineCount() == 0 or self.terminal_backend.text().len == 0) {
-            self.drawTextTrimmed(
-                output_rect.min[0] + inner,
-                output_rect.min[1] + inner,
-                output_rect.width() - inner * 2.0,
-                "(terminal output empty)",
-                self.theme.colors.text_secondary,
-            );
-            return;
-        }
-
-        self.drawTerminalStyledOutput(output_rect, inner);
+        self.settings_panel.focused_field = terminalFocusFieldFromExternal(panel_state.focused_field);
+        if (action) |value| self.performTerminalPanelAction(value);
     }
 
     fn terminalIndexedColor(index: u8) [4]f32 {
@@ -9122,325 +8452,520 @@ const App = struct {
         }
     }
 
-    fn drawTerminalStyledOutput(self: *App, output_rect: Rect, inner: f32) void {
-        const line_height = self.textLineHeight();
-        const usable_height = @max(1.0, output_rect.height() - inner * 2.0);
-        const max_lines_float = @floor(usable_height / line_height);
-        if (max_lines_float < 1.0) return;
-        const max_lines: usize = @intFromFloat(max_lines_float);
+    fn projectPanelModel(self: *App) panels_bridge.ProjectPanelModel {
+        const selected_project_lock_state = self.selectedProjectTokenLocked();
+        const selected_project_known = selected_project_lock_state != null;
+        const selected_is_locked = if (selected_project_lock_state) |locked| locked else false;
+        return .{
+            .connected = self.connection_state == .connected,
+            .has_projects = self.projects.items.len > 0,
+            .has_nodes = self.nodes.items.len > 0,
+            .can_create_project = self.connection_state == .connected and self.settings_panel.project_create_name.items.len > 0,
+            .can_activate_project = self.connection_state == .connected and self.selectedProjectId() != null,
+            .can_lock_project = self.connection_state == .connected and selected_project_known and !selected_is_locked,
+            .can_unlock_project = self.connection_state == .connected and selected_project_known and selected_is_locked,
+        };
+    }
 
-        const total_lines = self.terminal_backend.lineCount();
-        if (total_lines == 0) return;
-        const start_line = if (total_lines > max_lines) total_lines - max_lines else 0;
-        const draw_x = output_rect.min[0] + inner;
-        const draw_w = @max(1.0, output_rect.width() - inner * 2.0);
-        const max_y = output_rect.max[1] - inner;
-
-        var y = output_rect.min[1] + inner;
-        var line_idx = start_line;
-        while (line_idx < total_lines and y + line_height <= max_y + 0.5) : (line_idx += 1) {
-            const line = self.terminal_backend.lineAt(line_idx) orelse continue;
-            self.drawTerminalStyledLine(draw_x, y, draw_w, line);
-            y += line_height;
+    fn handleProjectPanelError(self: *App, prefix: []const u8, err: anyerror) void {
+        const msg = self.formatControlOpError(prefix, err);
+        if (msg) |text| {
+            defer self.allocator.free(text);
+            self.setWorkspaceError(text);
         }
     }
 
-    fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        _ = manager;
-        const layout = self.panelLayoutMetrics();
-        const pad = layout.inset;
-        const inner = layout.inner_inset;
-        var y = rect.min[1] + pad;
-        const width = rect.max[0] - rect.min[0];
-        const row_h = layout.button_height;
-        const content_width = @max(220.0, width - pad * 2.0);
+    const OwnedProjectPanelView = struct {
+        selected_project_button_label: ?[]u8 = null,
+        selected_project_line: ?[]u8 = null,
+        setup_status_line: ?[]u8 = null,
+        setup_vision_line: ?[]u8 = null,
+        workspace_summary_line: ?[]u8 = null,
+        workspace_health_line: ?[]u8 = null,
+        counts_line: ?[]u8 = null,
+        project_lines: std.ArrayListUnmanaged([]u8) = .{},
+        projects: std.ArrayListUnmanaged(panels_bridge.ProjectListEntryView) = .{},
+        node_lines: std.ArrayListUnmanaged([]u8) = .{},
+        nodes: std.ArrayListUnmanaged(panels_bridge.ProjectNodeEntryView) = .{},
+        view: panels_bridge.ProjectPanelView = .{},
 
-        self.drawLabel(rect.min[0] + pad, y, "Filesystem Browser", self.theme.colors.text_primary);
-        y += layout.title_gap;
-
-        const path_label = if (self.filesystem_path.items.len > 0)
-            self.filesystem_path.items
-        else
-            "/";
-        const path_line = std.fmt.allocPrint(self.allocator, "Path: {s}", .{path_label}) catch null;
-        if (path_line) |line| {
-            defer self.allocator.free(line);
-            self.drawTextTrimmed(rect.min[0] + pad, y, content_width, line, self.theme.colors.text_secondary);
+        fn deinit(self: *OwnedProjectPanelView, allocator: std.mem.Allocator) void {
+            if (self.selected_project_button_label) |value| allocator.free(value);
+            if (self.selected_project_line) |value| allocator.free(value);
+            if (self.setup_status_line) |value| allocator.free(value);
+            if (self.setup_vision_line) |value| allocator.free(value);
+            if (self.workspace_summary_line) |value| allocator.free(value);
+            if (self.workspace_health_line) |value| allocator.free(value);
+            if (self.counts_line) |value| allocator.free(value);
+            for (self.project_lines.items) |value| allocator.free(value);
+            for (self.node_lines.items) |value| allocator.free(value);
+            self.project_lines.deinit(allocator);
+            self.projects.deinit(allocator);
+            self.node_lines.deinit(allocator);
+            self.nodes.deinit(allocator);
+            self.* = undefined;
         }
-        y += layout.line_height + layout.row_gap * 0.55;
+    };
 
-        const action_w: f32 = @max(124.0, width * 0.21);
-        const refresh_rect = Rect.fromXYWH(rect.min[0] + pad, y, action_w, row_h);
-        const up_rect = Rect.fromXYWH(refresh_rect.max[0] + pad, y, action_w, row_h);
-        const root_rect = Rect.fromXYWH(up_rect.max[0] + pad, y, action_w * 1.35, row_h);
+    fn buildProjectPanelView(self: *App) OwnedProjectPanelView {
+        var owned: OwnedProjectPanelView = .{};
+        const selected_project_lock_state = self.selectedProjectTokenLocked();
 
-        if (self.drawButtonWidget(
-            refresh_rect,
-            "Refresh",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.filesystem_busy },
-        )) {
-            self.refreshFilesystemBrowser() catch |err| {
-                const msg = self.formatFilesystemOpError("Filesystem refresh failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setFilesystemError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            up_rect,
-            "Up",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.filesystem_busy },
-        )) {
-            const next_path = self.parentFilesystemPath(path_label) catch null;
-            if (next_path) |value| {
-                defer self.allocator.free(value);
-                self.queueFilesystemPathLoad(value, true, false) catch |err| {
-                    const msg = self.formatFilesystemOpError("Filesystem refresh failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
+        const selected_project_button_label: []const u8 = blk: {
+            if (self.settings_panel.project_id.items.len == 0) break :blk "Select project";
+            const selected_id = self.settings_panel.project_id.items;
+            for (self.projects.items) |project| {
+                if (std.mem.eql(u8, project.id, selected_id)) {
+                    const formatted = std.fmt.allocPrint(
+                        self.allocator,
+                        "{s} ({s}) [{s}]",
+                        .{
+                            project.name,
+                            project.id,
+                            if (project.token_locked) "locked" else "open",
+                        },
+                    ) catch null;
+                    if (formatted) |value| {
+                        owned.selected_project_button_label = value;
+                        break :blk value;
                     }
-                };
+                    break :blk selected_id;
+                }
+            }
+            break :blk selected_id;
+        };
+
+        const lock_state_text: []const u8 = if (self.selectedProjectId() == null)
+            "Project lock state: select a project"
+        else if (selected_project_lock_state) |locked|
+            if (locked)
+                "Project lock state: locked (project token required for non-admin)"
+            else
+                "Project lock state: unlocked (project token optional)"
+        else
+            "Project lock state: unknown (project not in current list)";
+
+        const add_mount_validation = self.validateProjectMountAddInput();
+        const remove_mount_validation = self.validateProjectMountRemoveInput();
+        const mount_hint = if (self.connection_state == .connected)
+            (add_mount_validation orelse remove_mount_validation)
+        else
+            null;
+
+        const selected_project_text = if (self.settings_panel.project_id.items.len > 0)
+            self.settings_panel.project_id.items
+        else
+            "(none)";
+        const selected_project_lock_suffix: []const u8 = if (selected_project_lock_state) |locked|
+            if (locked) " [locked]" else " [open]"
+        else
+            "";
+        owned.selected_project_line = std.fmt.allocPrint(
+            self.allocator,
+            "Selected project: {s}{s}",
+            .{ selected_project_text, selected_project_lock_suffix },
+        ) catch null;
+
+        var setup_status_warning = false;
+        if (self.connect_setup_hint) |hint| {
+            const setup_status = if (hint.required) "required" else "ready";
+            owned.setup_status_line = std.fmt.allocPrint(
+                self.allocator,
+                "Project setup: {s}",
+                .{setup_status},
+            ) catch null;
+            setup_status_warning = hint.required;
+            if (hint.project_vision) |vision| {
+                owned.setup_vision_line = std.fmt.allocPrint(
+                    self.allocator,
+                    "Project vision: {s}",
+                    .{vision},
+                ) catch null;
             }
         }
-        if (self.drawButtonWidget(
-            root_rect,
-            "Use Workspace Root",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.filesystem_busy },
-        )) {
-            var target_path: ?[]u8 = null;
-            defer if (target_path) |value| self.allocator.free(value);
-            if (self.workspace_state) |*status| {
-                if (status.workspace_root) |root| {
-                    const mapped = self.mapWorkspaceRootToFilesystemPath(root) catch null;
-                    if (mapped) |value| {
-                        target_path = value;
+
+        var workspace_health_warning = false;
+        var workspace_health_error = false;
+        if (self.workspace_state) |*status| {
+            const root_text = status.workspace_root orelse "(none)";
+            const mounted_count: usize = if (status.actual_mounts.items.len > 0)
+                status.actual_mounts.items.len
+            else
+                status.mounts.items.len;
+            owned.workspace_summary_line = std.fmt.allocPrint(
+                self.allocator,
+                "Workspace root: {s} | mounts: {d}",
+                .{ root_text, mounted_count },
+            ) catch null;
+
+            const health_state = workspaceHealthState(status);
+            owned.workspace_health_line = std.fmt.allocPrint(
+                self.allocator,
+                "Workspace health: {s} | online={d}/{d} degraded={d} missing={d} drift={d}",
+                .{
+                    workspaceHealthStateLabel(health_state),
+                    status.availability_online,
+                    status.availability_mounts_total,
+                    status.availability_degraded,
+                    status.availability_missing,
+                    status.drift_count,
+                },
+            ) catch null;
+            switch (health_state) {
+                .healthy, .unknown => {},
+                .degraded => workspace_health_warning = true,
+                .missing => workspace_health_error = true,
+            }
+        }
+
+        owned.counts_line = std.fmt.allocPrint(
+            self.allocator,
+            "Projects: {d} | Nodes: {d}",
+            .{ self.projects.items.len, self.nodes.items.len },
+        ) catch null;
+
+        for (self.projects.items, 0..) |project, idx| {
+            const line = std.fmt.allocPrint(
+                self.allocator,
+                "{s} [{s}] access={s} mounts={d}",
+                .{
+                    project.id,
+                    project.status,
+                    if (project.token_locked) "locked" else "open",
+                    project.mount_count,
+                },
+            ) catch continue;
+            owned.project_lines.append(self.allocator, line) catch {
+                self.allocator.free(line);
+                continue;
+            };
+            const project_selected = self.settings_panel.project_id.items.len > 0 and
+                std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
+            owned.projects.append(self.allocator, .{
+                .index = idx,
+                .line = line,
+                .selected = project_selected,
+            }) catch {};
+        }
+
+        const now_ms = std.time.milliTimestamp();
+        for (self.nodes.items) |node| {
+            const node_online = node.lease_expires_at_ms > now_ms;
+            const line = std.fmt.allocPrint(
+                self.allocator,
+                "  - {s} ({s}) [{s}]",
+                .{ node.node_id, node.node_name, if (node_online) "online" else "degraded" },
+            ) catch continue;
+            owned.node_lines.append(self.allocator, line) catch {
+                self.allocator.free(line);
+                continue;
+            };
+            owned.nodes.append(self.allocator, .{
+                .line = line,
+                .degraded = !node_online,
+            }) catch {};
+        }
+
+        owned.view = .{
+            .title = "Project Workspace",
+            .selected_project_button_label = selected_project_button_label,
+            .lock_state_text = lock_state_text,
+            .project_token = self.settings_panel.project_token.items,
+            .create_name = self.settings_panel.project_create_name.items,
+            .create_vision = self.settings_panel.project_create_vision.items,
+            .operator_token = self.settings_panel.project_operator_token.items,
+            .mount_path = self.settings_panel.project_mount_path.items,
+            .mount_node_id = self.settings_panel.project_mount_node_id.items,
+            .mount_export_name = self.settings_panel.project_mount_export_name.items,
+            .mount_hint = mount_hint,
+            .workspace_error_text = self.workspace_last_error,
+            .selected_project_line = owned.selected_project_line,
+            .setup_status_line = owned.setup_status_line,
+            .setup_status_warning = setup_status_warning,
+            .setup_vision_line = owned.setup_vision_line,
+            .workspace_summary_line = owned.workspace_summary_line,
+            .workspace_health_line = owned.workspace_health_line,
+            .workspace_health_warning = workspace_health_warning,
+            .workspace_health_error = workspace_health_error,
+            .counts_line = owned.counts_line,
+            .projects = owned.projects.items,
+            .nodes = owned.nodes.items,
+        };
+        return owned;
+    }
+
+    fn performProjectPanelAction(self: *App, action: panels_bridge.ProjectPanelAction) void {
+        switch (action) {
+            .select_project_index => |project_index| {
+                if (project_index >= self.projects.items.len) return;
+                const project = self.projects.items[project_index];
+                self.selectProjectInSettings(project.id) catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Project select failed: {s}", .{@errorName(err)}) catch null;
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setWorkspaceError(text);
+                    }
+                };
+            },
+            .create_project => {
+                self.createProjectFromPanel() catch |err| {
+                    self.handleProjectPanelError("Project create failed", err);
+                };
+            },
+            .refresh_workspace => {
+                self.refreshWorkspaceData() catch |err| {
+                    self.handleProjectPanelError("Workspace refresh failed", err);
+                };
+            },
+            .activate_project => {
+                self.activateSelectedProject() catch |err| {
+                    self.handleProjectPanelError("Project activate failed", err);
+                };
+            },
+            .lock_project => {
+                self.lockSelectedProjectFromPanel() catch |err| {
+                    self.handleProjectPanelError("Project lock failed", err);
+                };
+            },
+            .unlock_project => {
+                self.unlockSelectedProjectFromPanel() catch |err| {
+                    self.handleProjectPanelError("Project unlock failed", err);
+                };
+            },
+            .add_mount => {
+                if (self.validateProjectMountAddInput()) |message| {
+                    self.setWorkspaceError(message);
+                } else {
+                    self.setProjectMountFromPanel() catch |err| {
+                        self.handleProjectPanelError("Mount set failed", err);
+                    };
+                }
+            },
+            .remove_mount => {
+                if (self.validateProjectMountRemoveInput()) |message| {
+                    self.setWorkspaceError(message);
+                } else {
+                    self.removeProjectMountFromPanel() catch |err| {
+                        self.handleProjectPanelError("Mount remove failed", err);
+                    };
+                }
+            },
+            .auth_status => {
+                self.fetchAuthStatusFromPanel(false) catch |err| {
+                    self.handleProjectPanelError("Auth status failed", err);
+                };
+            },
+            .rotate_auth_user => {
+                self.rotateAuthTokenFromPanel("user") catch |err| {
+                    self.handleProjectPanelError("Auth rotate(user) failed", err);
+                };
+            },
+            .rotate_auth_admin => {
+                self.rotateAuthTokenFromPanel("admin") catch |err| {
+                    self.handleProjectPanelError("Auth rotate(admin) failed", err);
+                };
+            },
+            .reveal_auth_admin => {
+                self.revealAuthTokenFromPanel("admin") catch |err| {
+                    self.handleProjectPanelError("Reveal admin token failed", err);
+                };
+            },
+            .copy_auth_admin => {
+                self.copyAuthTokenFromPanel("admin") catch |err| {
+                    self.handleProjectPanelError("Copy admin token failed", err);
+                };
+            },
+            .reveal_auth_user => {
+                self.revealAuthTokenFromPanel("user") catch |err| {
+                    self.handleProjectPanelError("Reveal user token failed", err);
+                };
+            },
+            .copy_auth_user => {
+                self.copyAuthTokenFromPanel("user") catch |err| {
+                    self.handleProjectPanelError("Copy user token failed", err);
+                };
+            },
+        }
+    }
+
+    fn filesystemPanelModel(self: *App) panels_bridge.FilesystemPanelModel {
+        return .{
+            .connected = self.connection_state == .connected,
+            .busy = self.filesystem_busy,
+            .has_service_runtime_root = self.filesystemHasServiceRuntimeRoot(),
+            .has_selected_contract_service = self.selectedContractService() != null,
+            .contract_service_count = self.contract_services.items.len,
+        };
+    }
+
+    fn handleFilesystemPanelError(self: *App, prefix: []const u8, err: anyerror) void {
+        const msg = self.formatFilesystemOpError(prefix, err);
+        if (msg) |text| {
+            defer self.allocator.free(text);
+            self.setFilesystemError(text);
+        }
+    }
+
+    fn performFilesystemPanelAction(self: *App, action: panels_bridge.FilesystemPanelAction, path_label: []const u8) void {
+        switch (action) {
+            .refresh => {
+                self.refreshFilesystemBrowser() catch |err| {
+                    self.handleFilesystemPanelError("Filesystem refresh failed", err);
+                };
+            },
+            .navigate_up => {
+                const next_path = self.parentFilesystemPath(path_label) catch null;
+                if (next_path) |value| {
+                    defer self.allocator.free(value);
+                    self.queueFilesystemPathLoad(value, true, false) catch |err| {
+                        self.handleFilesystemPanelError("Filesystem refresh failed", err);
+                    };
+                }
+            },
+            .use_workspace_root => {
+                var target_path: ?[]u8 = null;
+                defer if (target_path) |value| self.allocator.free(value);
+                if (self.workspace_state) |*status| {
+                    if (status.workspace_root) |root| {
+                        const mapped = self.mapWorkspaceRootToFilesystemPath(root) catch null;
+                        if (mapped) |value| {
+                            target_path = value;
+                        } else {
+                            target_path = self.allocator.dupe(u8, "/") catch null;
+                        }
                     } else {
                         target_path = self.allocator.dupe(u8, "/") catch null;
                     }
                 } else {
                     target_path = self.allocator.dupe(u8, "/") catch null;
                 }
-            } else {
-                target_path = self.allocator.dupe(u8, "/") catch null;
-            }
 
-            const resolved_target = if (target_path) |value| value else "/";
-            self.queueFilesystemPathLoad(resolved_target, true, false) catch |err| {
-                const msg = self.formatFilesystemOpError("Filesystem refresh failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setFilesystemError(text);
+                const resolved_target = if (target_path) |value| value else "/";
+                self.queueFilesystemPathLoad(resolved_target, true, false) catch |err| {
+                    self.handleFilesystemPanelError("Filesystem refresh failed", err);
+                };
+            },
+            .open_entry_index => |entry_index| {
+                if (entry_index >= self.filesystem_entries.items.len) return;
+                const entry = self.filesystem_entries.items[entry_index];
+                self.openFilesystemEntry(&entry) catch |err| {
+                    self.handleFilesystemPanelError("Filesystem open failed", err);
+                };
+            },
+            .runtime_read => |target| {
+                const file_name: []const u8 = switch (target) {
+                    .status => "status.json",
+                    .health => "health.json",
+                    .metrics => "metrics.json",
+                    .config => "config.json",
+                };
+                const label: []const u8 = switch (target) {
+                    .status => "Runtime status failed",
+                    .health => "Runtime health failed",
+                    .metrics => "Runtime metrics failed",
+                    .config => "Runtime config failed",
+                };
+                self.readFilesystemServiceRuntimeFile(file_name) catch |err| {
+                    self.handleFilesystemPanelError(label, err);
+                };
+            },
+            .runtime_control => |target| {
+                const control_path: []const u8 = switch (target) {
+                    .enable => "enable",
+                    .disable => "disable",
+                    .restart => "restart",
+                    .reset => "reset",
+                    .invoke => "invoke.json",
+                };
+                const label: []const u8 = switch (target) {
+                    .enable => "Runtime enable failed",
+                    .disable => "Runtime disable failed",
+                    .restart => "Runtime restart failed",
+                    .reset => "Runtime reset failed",
+                    .invoke => "Runtime invoke failed",
+                };
+                self.writeFilesystemServiceRuntimeControl(control_path, "{}") catch |err| {
+                    self.handleFilesystemPanelError(label, err);
+                };
+            },
+            .contract_refresh => {
+                self.refreshContractServices() catch |err| {
+                    self.handleFilesystemPanelError("Contract refresh failed", err);
+                };
+            },
+            .contract_select_prev => {
+                if (self.contract_services.items.len > 1) {
+                    if (self.contract_service_selected_index == 0) {
+                        self.contract_service_selected_index = self.contract_services.items.len - 1;
+                    } else {
+                        self.contract_service_selected_index -= 1;
+                    }
                 }
-            };
-        }
-
-        y += row_h + layout.row_gap;
-        if (self.filesystem_busy) {
-            self.drawTextTrimmed(
-                rect.min[0] + pad,
-                y,
-                content_width,
-                "Loading filesystem...",
-                self.theme.colors.text_secondary,
-            );
-            y += layout.line_height;
-        }
-        if (self.filesystem_error) |err_text| {
-            self.drawTextTrimmed(
-                rect.min[0] + pad,
-                y,
-                content_width,
-                err_text,
-                zcolors.rgba(220, 80, 80, 255),
-            );
-            y += layout.line_height;
-        }
-
-        if (self.filesystemHasServiceRuntimeRoot()) {
-            self.drawTextTrimmed(
-                rect.min[0] + pad,
-                y,
-                content_width,
-                "Service Runtime Controls",
-                self.theme.colors.text_secondary,
-            );
-            y += layout.line_height + layout.row_gap * 0.4;
-
-            const runtime_disabled = self.connection_state != .connected or self.filesystem_busy;
-            const runtime_button_w: f32 = @max(96.0, (content_width - pad * 3.0) / 4.0);
-
-            const status_rect = Rect.fromXYWH(rect.min[0] + pad, y, runtime_button_w, row_h);
-            const health_rect = Rect.fromXYWH(status_rect.max[0] + pad, y, runtime_button_w, row_h);
-            const metrics_rect = Rect.fromXYWH(health_rect.max[0] + pad, y, runtime_button_w, row_h);
-            const config_rect = Rect.fromXYWH(metrics_rect.max[0] + pad, y, runtime_button_w, row_h);
-
-            if (self.drawButtonWidget(status_rect, "Status", .{ .variant = .secondary, .disabled = runtime_disabled })) {
-                self.readFilesystemServiceRuntimeFile("status.json") catch |err| {
-                    const msg = self.formatFilesystemOpError("Runtime status failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
-                    }
-                };
-            }
-            if (self.drawButtonWidget(health_rect, "Health", .{ .variant = .secondary, .disabled = runtime_disabled })) {
-                self.readFilesystemServiceRuntimeFile("health.json") catch |err| {
-                    const msg = self.formatFilesystemOpError("Runtime health failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
-                    }
-                };
-            }
-            if (self.drawButtonWidget(metrics_rect, "Metrics", .{ .variant = .secondary, .disabled = runtime_disabled })) {
-                self.readFilesystemServiceRuntimeFile("metrics.json") catch |err| {
-                    const msg = self.formatFilesystemOpError("Runtime metrics failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
-                    }
-                };
-            }
-            if (self.drawButtonWidget(config_rect, "Config", .{ .variant = .secondary, .disabled = runtime_disabled })) {
-                self.readFilesystemServiceRuntimeFile("config.json") catch |err| {
-                    const msg = self.formatFilesystemOpError("Runtime config failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
-                    }
-                };
-            }
-
-            y += row_h + layout.row_gap * 0.5;
-            const enable_rect = Rect.fromXYWH(rect.min[0] + pad, y, runtime_button_w, row_h);
-            const disable_rect = Rect.fromXYWH(enable_rect.max[0] + pad, y, runtime_button_w, row_h);
-            const restart_rect = Rect.fromXYWH(disable_rect.max[0] + pad, y, runtime_button_w, row_h);
-            const reset_rect = Rect.fromXYWH(restart_rect.max[0] + pad, y, runtime_button_w, row_h);
-
-            if (self.drawButtonWidget(enable_rect, "Enable", .{ .variant = .secondary, .disabled = runtime_disabled })) {
-                self.writeFilesystemServiceRuntimeControl("enable", "{}") catch |err| {
-                    const msg = self.formatFilesystemOpError("Runtime enable failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
-                    }
-                };
-            }
-            if (self.drawButtonWidget(disable_rect, "Disable", .{ .variant = .secondary, .disabled = runtime_disabled })) {
-                self.writeFilesystemServiceRuntimeControl("disable", "{}") catch |err| {
-                    const msg = self.formatFilesystemOpError("Runtime disable failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
-                    }
-                };
-            }
-            if (self.drawButtonWidget(restart_rect, "Restart", .{ .variant = .secondary, .disabled = runtime_disabled })) {
-                self.writeFilesystemServiceRuntimeControl("restart", "{}") catch |err| {
-                    const msg = self.formatFilesystemOpError("Runtime restart failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
-                    }
-                };
-            }
-            if (self.drawButtonWidget(reset_rect, "Reset", .{ .variant = .secondary, .disabled = runtime_disabled })) {
-                self.writeFilesystemServiceRuntimeControl("reset", "{}") catch |err| {
-                    const msg = self.formatFilesystemOpError("Runtime reset failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
-                    }
-                };
-            }
-
-            y += row_h + layout.row_gap * 0.5;
-            const invoke_rect = Rect.fromXYWH(
-                rect.min[0] + pad,
-                y,
-                @max(140.0, runtime_button_w * 1.4),
-                row_h,
-            );
-            if (self.drawButtonWidget(invoke_rect, "Invoke {}", .{ .variant = .primary, .disabled = runtime_disabled })) {
-                self.writeFilesystemServiceRuntimeControl("invoke.json", "{}") catch |err| {
-                    const msg = self.formatFilesystemOpError("Runtime invoke failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
-                    }
-                };
-            }
-
-            y += row_h + layout.row_gap;
-        }
-
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            "Agent Contract Services",
-            self.theme.colors.text_secondary,
-        );
-        y += layout.line_height + layout.row_gap * 0.4;
-
-        const contract_disabled = self.connection_state != .connected or self.filesystem_busy;
-        const contract_button_w: f32 = @max(100.0, (content_width - pad * 3.0) / 4.0);
-        const contract_refresh_rect = Rect.fromXYWH(rect.min[0] + pad, y, contract_button_w, row_h);
-        const contract_prev_rect = Rect.fromXYWH(contract_refresh_rect.max[0] + pad, y, contract_button_w, row_h);
-        const contract_next_rect = Rect.fromXYWH(contract_prev_rect.max[0] + pad, y, contract_button_w, row_h);
-        const contract_open_rect = Rect.fromXYWH(contract_next_rect.max[0] + pad, y, contract_button_w, row_h);
-
-        if (self.drawButtonWidget(
-            contract_refresh_rect,
-            "Refresh Contracts",
-            .{ .variant = .secondary, .disabled = contract_disabled },
-        )) {
-            self.refreshContractServices() catch |err| {
-                const msg = self.formatFilesystemOpError("Contract refresh failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setFilesystemError(text);
+            },
+            .contract_select_next => {
+                if (self.contract_services.items.len > 1) {
+                    self.contract_service_selected_index = (self.contract_service_selected_index + 1) % self.contract_services.items.len;
                 }
-            };
+            },
+            .contract_open_service_dir => {
+                self.openSelectedContractServicePath() catch |err| {
+                    self.handleFilesystemPanelError("Open contract service path failed", err);
+                };
+            },
+            .contract_invoke => {
+                self.invokeSelectedContractService() catch |err| {
+                    self.handleFilesystemPanelError("Contract invoke failed", err);
+                };
+            },
+            .contract_read_status => {
+                self.readSelectedContractServiceStatus() catch |err| {
+                    self.handleFilesystemPanelError("Contract status read failed", err);
+                };
+            },
+            .contract_read_result => {
+                self.readSelectedContractServiceResult() catch |err| {
+                    self.handleFilesystemPanelError("Contract result read failed", err);
+                };
+            },
+            .contract_read_help => {
+                self.readSelectedContractServiceHelp() catch |err| {
+                    self.handleFilesystemPanelError("Contract help read failed", err);
+                };
+            },
+            .contract_read_schema => {
+                self.readSelectedContractServiceSchema() catch |err| {
+                    self.handleFilesystemPanelError("Contract schema read failed", err);
+                };
+            },
+            .contract_use_template => {
+                self.useSelectedContractServiceTemplate() catch |err| {
+                    self.handleFilesystemPanelError("Contract template load failed", err);
+                };
+            },
         }
-        if (self.drawButtonWidget(
-            contract_prev_rect,
-            "Prev",
-            .{ .variant = .secondary, .disabled = contract_disabled or self.contract_services.items.len <= 1 },
-        )) {
-            if (self.contract_services.items.len > 1) {
-                if (self.contract_service_selected_index == 0) {
-                    self.contract_service_selected_index = self.contract_services.items.len - 1;
-                } else {
-                    self.contract_service_selected_index -= 1;
-                }
-            }
+    }
+
+    const OwnedFilesystemPanelView = struct {
+        entries: std.ArrayListUnmanaged(panels_bridge.FilesystemEntryView) = .{},
+        owned_labels: std.ArrayListUnmanaged([]u8) = .{},
+        owned_badges: std.ArrayListUnmanaged([]u8) = .{},
+        selected_contract_label: ?[]u8 = null,
+        view: panels_bridge.FilesystemPanelView = .{},
+
+        fn deinit(self: *OwnedFilesystemPanelView, allocator: std.mem.Allocator) void {
+            for (self.owned_labels.items) |value| allocator.free(value);
+            for (self.owned_badges.items) |value| allocator.free(value);
+            self.owned_labels.deinit(allocator);
+            self.owned_badges.deinit(allocator);
+            self.entries.deinit(allocator);
+            if (self.selected_contract_label) |value| allocator.free(value);
+            self.* = undefined;
         }
-        if (self.drawButtonWidget(
-            contract_next_rect,
-            "Next",
-            .{ .variant = .secondary, .disabled = contract_disabled or self.contract_services.items.len <= 1 },
-        )) {
-            if (self.contract_services.items.len > 1) {
-                self.contract_service_selected_index = (self.contract_service_selected_index + 1) % self.contract_services.items.len;
-            }
-        }
-        if (self.drawButtonWidget(
-            contract_open_rect,
-            "Open Service Dir",
-            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
-        )) {
-            self.openSelectedContractServicePath() catch |err| {
-                const msg = self.formatFilesystemOpError("Open contract service path failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setFilesystemError(text);
-                }
-            };
-        }
-        y += row_h + layout.row_gap * 0.45;
+    };
+
+    fn buildFilesystemPanelView(self: *App) OwnedFilesystemPanelView {
+        var owned: OwnedFilesystemPanelView = .{};
+        const path_label = if (self.filesystem_path.items.len > 0) self.filesystem_path.items else "/";
 
         const selected_contract_label = if (self.selectedContractService()) |entry|
             std.fmt.allocPrint(
@@ -9450,266 +8975,120 @@ const App = struct {
             ) catch null
         else
             self.allocator.dupe(u8, "Selected: (none loaded)") catch null;
-        defer if (selected_contract_label) |value| self.allocator.free(value);
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            selected_contract_label orelse "Selected: (none loaded)",
-            self.theme.colors.text_secondary,
-        );
-        y += layout.line_height + layout.row_gap * 0.35;
+        owned.selected_contract_label = selected_contract_label;
 
-        const payload_rect = Rect.fromXYWH(rect.min[0] + pad, y, content_width, row_h);
-        const payload_focused = self.drawTextInputWidget(
-            payload_rect,
-            self.contract_invoke_payload.items,
-            self.settings_panel.focused_field == .filesystem_contract_payload,
-            .{ .placeholder = "{\"tool_name\":\"memory_search\",\"arguments\":{\"query\":\"...\"}}" },
-        );
-        if (payload_focused) self.settings_panel.focused_field = .filesystem_contract_payload;
-        y += row_h + layout.row_gap * 0.45;
-
-        const invoke_rect = Rect.fromXYWH(rect.min[0] + pad, y, contract_button_w, row_h);
-        const status_rect = Rect.fromXYWH(invoke_rect.max[0] + pad, y, contract_button_w, row_h);
-        const result_rect = Rect.fromXYWH(status_rect.max[0] + pad, y, contract_button_w, row_h);
-        const help_rect = Rect.fromXYWH(result_rect.max[0] + pad, y, contract_button_w, row_h);
-        if (self.drawButtonWidget(
-            invoke_rect,
-            "Invoke",
-            .{ .variant = .primary, .disabled = contract_disabled or self.selectedContractService() == null },
-        )) {
-            self.invokeSelectedContractService() catch |err| {
-                const msg = self.formatFilesystemOpError("Contract invoke failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setFilesystemError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            status_rect,
-            "Read Status",
-            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
-        )) {
-            self.readSelectedContractServiceStatus() catch |err| {
-                const msg = self.formatFilesystemOpError("Contract status read failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setFilesystemError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            result_rect,
-            "Read Result",
-            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
-        )) {
-            self.readSelectedContractServiceResult() catch |err| {
-                const msg = self.formatFilesystemOpError("Contract result read failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setFilesystemError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            help_rect,
-            "Read Help",
-            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
-        )) {
-            self.readSelectedContractServiceHelp() catch |err| {
-                const msg = self.formatFilesystemOpError("Contract help read failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setFilesystemError(text);
-                }
-            };
-        }
-
-        y += row_h + layout.row_gap * 0.45;
-        const schema_rect = Rect.fromXYWH(rect.min[0] + pad, y, contract_button_w, row_h);
-        const template_rect = Rect.fromXYWH(schema_rect.max[0] + pad, y, contract_button_w, row_h);
-        if (self.drawButtonWidget(
-            schema_rect,
-            "Read Schema",
-            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
-        )) {
-            self.readSelectedContractServiceSchema() catch |err| {
-                const msg = self.formatFilesystemOpError("Contract schema read failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setFilesystemError(text);
-                }
-            };
-        }
-        if (self.drawButtonWidget(
-            template_rect,
-            "Use Template",
-            .{ .variant = .secondary, .disabled = contract_disabled or self.selectedContractService() == null },
-        )) {
-            self.useSelectedContractServiceTemplate() catch |err| {
-                const msg = self.formatFilesystemOpError("Contract template load failed", err);
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setFilesystemError(text);
-                }
-            };
-        }
-        if (self.mouse_released and
-            self.settings_panel.focused_field == .filesystem_contract_payload and
-            !payload_rect.contains(.{ self.mouse_x, self.mouse_y }))
-        {
-            self.settings_panel.focused_field = .none;
-        }
-
-        y += row_h + layout.row_gap;
-
-        const listing_height = @max(140.0, (rect.max[1] - y - pad * 2.0) * 0.52);
-        const listing_rect = Rect.fromXYWH(rect.min[0] + pad, y, content_width, listing_height);
-        self.drawSurfacePanel(listing_rect);
-
-        const list_row_h = @max(layout.button_height * 0.8, layout.line_height + inner * 0.9);
-        const list_row_gap = @max(1.0, inner * 0.35);
-        var list_y = listing_rect.min[1] + inner;
         const max_rows: usize = @min(self.filesystem_entries.items.len, 14);
         var idx: usize = 0;
         while (idx < max_rows and idx < self.filesystem_entries.items.len) : (idx += 1) {
             const entry = self.filesystem_entries.items[idx];
-            const row_rect = Rect.fromXYWH(
-                listing_rect.min[0] + inner,
-                list_y,
-                listing_rect.width() - inner * 2.0,
-                list_row_h,
-            );
             const prefix = switch (entry.kind) {
                 .unknown => "[?]",
                 .directory => "[dir]",
                 .file => "[file]",
             };
-            const label = std.fmt.allocPrint(self.allocator, "{s} {s}", .{ prefix, entry.name }) catch null;
-            const clicked = if (label) |text| blk: {
-                defer self.allocator.free(text);
-                break :blk self.drawButtonWidget(
-                    row_rect,
-                    text,
-                    .{ .variant = .secondary, .disabled = self.filesystem_busy },
-                );
-            } else false;
-            if (clicked) {
-                self.openFilesystemEntry(&entry) catch |err| {
-                    const msg = self.formatFilesystemOpError("Filesystem open failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setFilesystemError(text);
-                    }
-                };
-                // Opening a directory can replace filesystem_entries; stop iterating stale indices.
-                break;
-            }
+            const label = std.fmt.allocPrint(self.allocator, "{s} {s}", .{ prefix, entry.name }) catch continue;
+            owned.owned_labels.append(self.allocator, label) catch {
+                self.allocator.free(label);
+                continue;
+            };
 
+            var badge: ?[]u8 = null;
             if (self.findMountForPath(entry.path)) |mount| {
-                const badge = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ mount.node_id, mount.export_name }) catch null;
-                if (badge) |text| {
-                    defer self.allocator.free(text);
-                    self.drawTextTrimmed(
-                        row_rect.min[0] + @max(80.0, row_rect.width() * 0.5),
-                        row_rect.min[1] + @max(0.0, (row_rect.height() - layout.line_height) * 0.5),
-                        row_rect.width() * 0.46,
-                        text,
-                        self.theme.colors.primary,
-                    );
+                badge = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ mount.node_id, mount.export_name }) catch null;
+                if (badge) |value| {
+                    owned.owned_badges.append(self.allocator, value) catch {
+                        self.allocator.free(value);
+                        badge = null;
+                    };
                 }
             }
 
-            list_y += list_row_h + list_row_gap;
+            owned.entries.append(self.allocator, .{
+                .index = idx,
+                .label = label,
+                .badge = badge,
+            }) catch {};
         }
 
-        y = listing_rect.max[1] + pad;
-        const preview_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            @max(100.0, rect.max[1] - y - pad),
-        );
-        self.drawSurfacePanel(preview_rect);
-
-        const preview_title = if (self.filesystem_preview_path) |value|
-            value
-        else
-            "(select a file to preview)";
-        self.drawTextTrimmed(
-            preview_rect.min[0] + inner,
-            preview_rect.min[1] + inner,
-            preview_rect.width() - inner * 2.0,
-            preview_title,
-            self.theme.colors.text_secondary,
-        );
-
-        if (self.filesystem_preview_text) |text| {
-            _ = self.drawTextWrapped(
-                preview_rect.min[0] + inner,
-                preview_rect.min[1] + inner + layout.line_height + layout.row_gap * 0.5,
-                preview_rect.width() - inner * 2.0,
-                text,
-                self.theme.colors.text_primary,
-            );
-        }
+        owned.view = .{
+            .path_label = path_label,
+            .error_text = self.filesystem_error,
+            .selected_contract_label = if (selected_contract_label) |value| value else "Selected: (none loaded)",
+            .contract_payload = self.contract_invoke_payload.items,
+            .entries = owned.entries.items,
+            .preview_title = if (self.filesystem_preview_path) |value| value else "(select a file to preview)",
+            .preview_text = self.filesystem_preview_text,
+        };
+        return owned;
     }
 
-    fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        const layout = self.panelLayoutMetrics();
-        const pad = layout.inset;
-        const inner = layout.inner_inset;
-        const line_height = layout.line_height;
-        const row_height = layout.button_height;
-        const event_gap = @max(2.0 * self.ui_scale, inner * 0.35);
-        var y = rect.min[1] + pad;
-        const width = rect.max[0] - rect.min[0];
-        const content_width = @max(240.0, width - pad * 2.0);
-        const scrollbar_reserved = @max(14.0, 8.0 * self.ui_scale + inner);
-
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "SpiderWeb Debug Stream",
-            self.theme.colors.text_primary,
-        );
-        y += layout.title_gap;
-
-        const status_text = if (self.debug_stream_enabled)
-            "Status: live WebSocket debug events"
+    fn debugPanelModel(self: *App) panels_bridge.DebugPanelModel {
+        const search_trimmed = std.mem.trim(u8, self.debug_search_filter.items, " \t\r\n");
+        const selected_node_event = self.selectedNodeServiceEventInfo();
+        const selected_idx = selected_node_event.index;
+        const base_idx_opt = self.node_service_diff_base_index;
+        const can_generate_diff = if (selected_idx) |current_idx|
+            if (base_idx_opt) |base_idx|
+                base_idx < self.debug_events.items.len and base_idx != current_idx
+            else
+                false
         else
-            "Status: paused";
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            status_text,
-            self.theme.colors.text_secondary,
-        );
-        y += line_height;
+            false;
+        return .{
+            .connected = self.ws_client != null,
+            .stream_enabled = self.debug_stream_enabled,
+            .has_perf_history = self.perf_history.items.len > 0,
+            .perf_benchmark_active = self.perf_benchmark_active,
+            .has_perf_benchmark_capture = self.hasPerfBenchmarkCapture(),
+            .node_watch_enabled = self.node_service_watch_enabled,
+            .has_search_filter = search_trimmed.len > 0,
+            .has_selected_event = self.debug_selected_index != null and self.debug_selected_index.? < self.debug_events.items.len,
+            .has_selected_node_event = selected_node_event.index != null,
+            .has_diff_base_or_preview = self.node_service_diff_base_index != null or self.node_service_diff_preview != null,
+            .can_generate_diff = can_generate_diff,
+        };
+    }
 
-        const snapshot_status = if (self.debug_stream_snapshot_pending)
-            "Snapshot: refresh pending"
-        else if (self.debug_stream_snapshot != null)
-            "Snapshot: cached"
-        else
-            "Snapshot: none";
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            snapshot_status,
-            self.theme.colors.text_secondary,
-        );
-        y += line_height;
+    const OwnedDebugPanelView = struct {
+        perf_summary: ?[]u8 = null,
+        perf_history: ?[]u8 = null,
+        perf_command_stats: ?[]u8 = null,
+        perf_panel_stats: ?[]u8 = null,
+        perf_chart_points: std.ArrayListUnmanaged([]f32) = .{},
+        perf_charts: std.ArrayListUnmanaged(panels_bridge.DebugSparklineSeriesView) = .{},
+        filtered_indices: std.ArrayListUnmanaged(u32) = .{},
+        scope_preview: ?[]u8 = null,
+        filter_status: ?[]u8 = null,
+        jump_to_node_label: ?[]u8 = null,
+        diff_base_label: ?[]u8 = null,
+        view: panels_bridge.DebugPanelView = .{},
+        event_stream_view: panels_bridge.DebugEventStreamView = .{},
 
-        var perf_buf: [224]u8 = undefined;
+        fn deinit(self: *OwnedDebugPanelView, allocator: std.mem.Allocator) void {
+            if (self.perf_summary) |value| allocator.free(value);
+            if (self.perf_history) |value| allocator.free(value);
+            if (self.perf_command_stats) |value| allocator.free(value);
+            if (self.perf_panel_stats) |value| allocator.free(value);
+            for (self.perf_chart_points.items) |value| allocator.free(value);
+            self.perf_chart_points.deinit(allocator);
+            self.perf_charts.deinit(allocator);
+            self.filtered_indices.deinit(allocator);
+            if (self.scope_preview) |value| allocator.free(value);
+            if (self.filter_status) |value| allocator.free(value);
+            if (self.jump_to_node_label) |value| allocator.free(value);
+            if (self.diff_base_label) |value| allocator.free(value);
+            self.* = undefined;
+        }
+    };
+
+    fn buildDebugPanelView(self: *App) OwnedDebugPanelView {
+        var owned: OwnedDebugPanelView = .{};
         const perf_other_ms = @max(
             0.0,
             self.perf_last_frame_ms - (self.perf_last_draw_ms + self.perf_last_ws_ms + self.perf_last_fs_ms + self.perf_last_debug_ms + self.perf_last_terminal_ms),
         );
-        const perf_line = std.fmt.bufPrint(
-            &perf_buf,
+        owned.perf_summary = std.fmt.allocPrint(
+            self.allocator,
             "Perf: {d:.1} fps | frame {d:.2} ms | draw {d:.2} | other {d:.2} | ws-wait {d:.1} | fs-req {d:.1}",
             .{
                 self.perf_last_fps,
@@ -9719,23 +9098,14 @@ const App = struct {
                 self.perf_last_ws_wait_ms,
                 self.perf_last_fs_request_ms,
             },
-        ) catch "Perf: collecting...";
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            perf_line,
-            self.theme.colors.text_secondary,
-        );
-        y += line_height;
+        ) catch null;
 
-        var perf_meta_buf: [196]u8 = undefined;
         const perf_span_ms: i64 = if (self.perf_history.items.len >= 2)
             self.perf_history.items[self.perf_history.items.len - 1].timestamp_ms - self.perf_history.items[0].timestamp_ms
         else
             0;
-        const perf_meta = std.fmt.bufPrint(
-            &perf_meta_buf,
+        owned.perf_history = std.fmt.allocPrint(
+            self.allocator,
             "Perf history: {d} samples ({d:.1}s) | ws-poll {d:.3} | fs-poll {d:.3}",
             .{
                 self.perf_history.items.len,
@@ -9743,19 +9113,10 @@ const App = struct {
                 self.perf_last_ws_ms,
                 self.perf_last_fs_ms,
             },
-        ) catch "Perf history: unavailable";
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            perf_meta,
-            self.theme.colors.text_secondary,
-        );
-        y += line_height;
+        ) catch null;
 
-        var command_stats_buf: [256]u8 = undefined;
-        const command_stats = std.fmt.bufPrint(
-            &command_stats_buf,
+        owned.perf_command_stats = std.fmt.allocPrint(
+            self.allocator,
             "Cmd/frame: total {d:.0} text {d:.0} ({d:.1}%) shape {d:.0} line {d:.0} image {d:.0} clip {d:.0} text-bytes {d:.0}",
             .{
                 self.perf_last_cmd_total_per_frame,
@@ -9767,19 +9128,10 @@ const App = struct {
                 self.perf_last_cmd_clip_per_frame,
                 self.perf_last_text_bytes_per_frame,
             },
-        ) catch "Cmd/frame: collecting...";
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            command_stats,
-            self.theme.colors.text_secondary,
-        );
-        y += line_height;
+        ) catch null;
 
-        var panel_stats_buf: [256]u8 = undefined;
-        const panel_stats = std.fmt.bufPrint(
-            &panel_stats_buf,
+        owned.perf_panel_stats = std.fmt.allocPrint(
+            self.allocator,
             "Panel draw ms: debug {d:.2} settings {d:.2} chat {d:.2} fs {d:.2} terminal {d:.2} projects {d:.2} other {d:.2}",
             .{
                 self.perf_last_panel_debug_ms,
@@ -9790,208 +9142,7 @@ const App = struct {
                 self.perf_last_panel_projects_ms,
                 self.perf_last_panel_other_ms,
             },
-        ) catch "Panel draw: collecting...";
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            panel_stats,
-            self.theme.colors.text_secondary,
-        );
-        y += line_height;
-
-        const perf_copy_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(104.0, width * 0.14),
-            row_height,
-        );
-        if (self.drawButtonWidget(
-            perf_copy_rect,
-            "Copy Perf",
-            .{ .variant = .secondary, .disabled = self.perf_history.items.len == 0 },
-        )) {
-            const report = self.buildPerfReportText() catch null;
-            defer if (report) |value| self.allocator.free(value);
-            if (report) |value| {
-                self.copyTextToClipboard(value) catch {};
-                self.appendMessage("system", "Copied GUI perf report to clipboard.", null) catch {};
-            }
-        }
-
-        const perf_export_rect = Rect.fromXYWH(
-            perf_copy_rect.max[0] + layout.inner_inset,
-            y,
-            @max(112.0, width * 0.16),
-            row_height,
-        );
-        if (self.drawButtonWidget(
-            perf_export_rect,
-            "Export Perf",
-            .{ .variant = .secondary, .disabled = self.perf_history.items.len == 0 },
-        )) {
-            const report = self.buildPerfReportText() catch null;
-            defer if (report) |value| self.allocator.free(value);
-            if (report) |value| {
-                const export_path = self.exportPerfReport(value) catch null;
-                defer if (export_path) |path| self.allocator.free(path);
-                if (export_path) |path| {
-                    const msg = std.fmt.allocPrint(self.allocator, "Exported GUI perf report to {s}", .{path}) catch null;
-                    defer if (msg) |text| self.allocator.free(text);
-                    if (msg) |text| self.appendMessage("system", text, null) catch {};
-                }
-            }
-        }
-
-        const perf_clear_rect = Rect.fromXYWH(
-            perf_export_rect.max[0] + layout.inner_inset,
-            y,
-            @max(98.0, width * 0.13),
-            row_height,
-        );
-        if (self.drawButtonWidget(
-            perf_clear_rect,
-            "Clear Perf",
-            .{ .variant = .secondary, .disabled = self.perf_history.items.len == 0 },
-        )) {
-            self.perf_history.clearRetainingCapacity();
-            self.clearPerfBenchmarkCapture();
-            if (self.perf_benchmark_active) {
-                self.perf_benchmark_start_sample_index = 0;
-                self.perf_benchmark_start_timestamp_ms = std.time.milliTimestamp();
-            }
-            self.appendMessage("system", "Cleared GUI perf history.", null) catch {};
-        }
-        y += row_height + layout.row_gap * 0.35;
-
-        const benchmark_status = if (self.perf_benchmark_active)
-            "Benchmark capture: active"
-        else if (self.hasPerfBenchmarkCapture())
-            "Benchmark capture: ready"
-        else
-            "Benchmark capture: idle";
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            benchmark_status,
-            self.theme.colors.text_secondary,
-        );
-        y += line_height;
-
-        const benchmark_label_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(180.0, width * 0.24),
-            row_height,
-        );
-        const benchmark_label_focused = self.drawTextInputWidget(
-            benchmark_label_rect,
-            self.perf_benchmark_label_input.items,
-            self.settings_panel.focused_field == .perf_benchmark_label,
-            .{ .placeholder = "benchmark label" },
-        );
-        if (benchmark_label_focused) self.settings_panel.focused_field = .perf_benchmark_label;
-
-        const benchmark_toggle_rect = Rect.fromXYWH(
-            benchmark_label_rect.max[0] + layout.inner_inset,
-            y,
-            @max(126.0, width * 0.16),
-            row_height,
-        );
-        const benchmark_toggle_label = if (self.perf_benchmark_active) "Stop Bench" else "Start Bench";
-        if (self.drawButtonWidget(
-            benchmark_toggle_rect,
-            benchmark_toggle_label,
-            .{ .variant = if (self.perf_benchmark_active) .primary else .secondary },
-        )) {
-            if (self.perf_benchmark_active) {
-                self.stopPerfBenchmark() catch {};
-                const label = self.perf_benchmark_last_label orelse "benchmark";
-                const duration_ms = @max(0, self.perf_benchmark_last_end_timestamp_ms - self.perf_benchmark_last_start_timestamp_ms);
-                const msg = std.fmt.allocPrint(
-                    self.allocator,
-                    "Stopped benchmark '{s}' ({d:.2}s).",
-                    .{ label, @as(f32, @floatFromInt(duration_ms)) / 1000.0 },
-                ) catch null;
-                defer if (msg) |text| self.allocator.free(text);
-                if (msg) |text| self.appendMessage("system", text, null) catch {};
-            } else {
-                self.startPerfBenchmark() catch {};
-                const label = self.perf_benchmark_active_label orelse "benchmark";
-                const msg = std.fmt.allocPrint(self.allocator, "Started benchmark '{s}'.", .{label}) catch null;
-                defer if (msg) |text| self.allocator.free(text);
-                if (msg) |text| self.appendMessage("system", text, null) catch {};
-            }
-        }
-
-        const benchmark_copy_rect = Rect.fromXYWH(
-            benchmark_toggle_rect.max[0] + layout.inner_inset,
-            y,
-            @max(120.0, width * 0.14),
-            row_height,
-        );
-        if (self.drawButtonWidget(
-            benchmark_copy_rect,
-            "Copy Bench",
-            .{ .variant = .secondary, .disabled = !self.hasPerfBenchmarkCapture() },
-        )) {
-            const report = self.buildBenchmarkPerfReportText() catch null;
-            defer if (report) |value| self.allocator.free(value);
-            if (report) |value| {
-                self.copyTextToClipboard(value) catch {};
-                self.appendMessage("system", "Copied benchmark perf report to clipboard.", null) catch {};
-            }
-        }
-
-        const benchmark_export_rect = Rect.fromXYWH(
-            benchmark_copy_rect.max[0] + layout.inner_inset,
-            y,
-            @max(126.0, width * 0.15),
-            row_height,
-        );
-        if (self.drawButtonWidget(
-            benchmark_export_rect,
-            "Export Bench",
-            .{ .variant = .secondary, .disabled = !self.hasPerfBenchmarkCapture() },
-        )) {
-            const report = self.buildBenchmarkPerfReportText() catch null;
-            defer if (report) |value| self.allocator.free(value);
-            if (report) |value| {
-                const export_path = self.exportPerfReport(value) catch null;
-                defer if (export_path) |path| self.allocator.free(path);
-                if (export_path) |path| {
-                    const msg = std.fmt.allocPrint(self.allocator, "Exported benchmark perf report to {s}", .{path}) catch null;
-                    defer if (msg) |text| self.allocator.free(text);
-                    if (msg) |text| self.appendMessage("system", text, null) catch {};
-                }
-            }
-        }
-
-        const benchmark_clear_rect = Rect.fromXYWH(
-            benchmark_export_rect.max[0] + layout.inner_inset,
-            y,
-            @max(112.0, width * 0.14),
-            row_height,
-        );
-        if (self.drawButtonWidget(
-            benchmark_clear_rect,
-            "Clear Bench",
-            .{ .variant = .secondary, .disabled = !self.hasPerfBenchmarkCapture() and !self.perf_benchmark_active },
-        )) {
-            if (self.perf_benchmark_active) self.stopPerfBenchmark() catch {};
-            self.clearPerfBenchmarkCapture();
-            self.appendMessage("system", "Cleared benchmark capture.", null) catch {};
-        }
-
-        if (self.mouse_released and
-            self.settings_panel.focused_field == .perf_benchmark_label and
-            !benchmark_label_rect.contains(.{ self.mouse_x, self.mouse_y }))
-        {
-            self.settings_panel.focused_field = .none;
-        }
-
-        y += row_height + layout.row_gap * 0.45;
+        ) catch null;
 
         const spark_samples: []const PerfSample = blk: {
             const window: usize = 240;
@@ -10000,856 +9151,709 @@ const App = struct {
             }
             break :blk self.perf_history.items;
         };
-        var spark_ctx = spark_samples;
+        const chart_labels = [_][]const u8{ "Frame ms", "Draw ms", "WS wait ms", "FS req ms" };
+        var chart_idx: usize = 0;
+        while (chart_idx < chart_labels.len) : (chart_idx += 1) {
+            const points = self.allocator.alloc(f32, spark_samples.len) catch break;
+            var sample_idx: usize = 0;
+            while (sample_idx < spark_samples.len) : (sample_idx += 1) {
+                points[sample_idx] = switch (chart_idx) {
+                    0 => spark_samples[sample_idx].frame_ms,
+                    1 => spark_samples[sample_idx].draw_ms,
+                    2 => spark_samples[sample_idx].ws_wait_ms,
+                    3 => spark_samples[sample_idx].fs_request_ms,
+                    else => 0.0,
+                };
+            }
+            owned.perf_chart_points.append(self.allocator, points) catch {
+                self.allocator.free(points);
+                break;
+            };
+            owned.perf_charts.append(self.allocator, .{
+                .label = chart_labels[chart_idx],
+                .points = points,
+            }) catch {};
+        }
+
+        const role_name = if (self.config.active_role == .admin) "admin" else "user";
+        owned.scope_preview = if (self.selectedProjectId()) |project_id| blk: {
+            const token_present = if (self.selectedProjectToken(project_id)) |token| token.len > 0 else false;
+            break :blk std.fmt.allocPrint(
+                self.allocator,
+                "Node watch scope: role={s} project={s} token={s}",
+                .{ role_name, project_id, if (token_present) "set" else "none" },
+            ) catch null;
+        } else std.fmt.allocPrint(
+            self.allocator,
+            "Node watch scope: role={s} project=(session default)",
+            .{role_name},
+        ) catch null;
+
+        const search_trimmed = std.mem.trim(u8, self.debug_search_filter.items, " \t\r\n");
+        const filtered_source = self.ensureDebugFilteredIndices(search_trimmed);
+        owned.filtered_indices.appendSlice(self.allocator, filtered_source) catch {};
+        const filtered_events = owned.filtered_indices.items.len;
+        owned.filter_status = std.fmt.allocPrint(
+            self.allocator,
+            "Showing {d}/{d} events",
+            .{ filtered_events, self.debug_events.items.len },
+        ) catch null;
+
+        const selected_node_event = self.selectedNodeServiceEventInfo();
+        if (selected_node_event.node_id) |selected_node_id| {
+            owned.jump_to_node_label = std.fmt.allocPrint(
+                self.allocator,
+                "Jump To Node FS ({s})",
+                .{selected_node_id},
+            ) catch null;
+        }
+        if (selected_node_event.index != null) {
+            owned.diff_base_label = if (self.node_service_diff_base_index) |idx|
+                if (idx < self.debug_events.items.len)
+                    std.fmt.allocPrint(
+                        self.allocator,
+                        "Diff base event: #{d}",
+                        .{self.debug_events.items[idx].id},
+                    ) catch null
+                else
+                    self.allocator.dupe(u8, "Diff base event: (stale selection)") catch null
+            else
+                self.allocator.dupe(u8, "Diff base event: (not set)") catch null;
+        }
+
+        const show_large_payload_notice = if (selected_node_event.index) |selected_idx|
+            selected_idx < self.debug_events.items.len and
+                self.debug_events.items[selected_idx].payload_json.len > DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES
+        else
+            false;
+
+        owned.view = .{
+            .title = "SpiderWeb Debug Stream",
+            .stream_status = if (self.debug_stream_enabled) "Status: live WebSocket debug events" else "Status: paused",
+            .snapshot_status = if (self.debug_stream_snapshot_pending)
+                "Snapshot: refresh pending"
+            else if (self.debug_stream_snapshot != null)
+                "Snapshot: cached"
+            else
+                "Snapshot: none",
+            .perf_summary = if (owned.perf_summary) |value| value else "Perf: collecting...",
+            .perf_history = if (owned.perf_history) |value| value else "Perf history: unavailable",
+            .perf_command_stats = if (owned.perf_command_stats) |value| value else "Cmd/frame: collecting...",
+            .perf_panel_stats = if (owned.perf_panel_stats) |value| value else "Panel draw: collecting...",
+            .benchmark_status = if (self.perf_benchmark_active)
+                "Benchmark capture: active"
+            else if (self.hasPerfBenchmarkCapture())
+                "Benchmark capture: ready"
+            else
+                "Benchmark capture: idle",
+            .perf_benchmark_label = self.perf_benchmark_label_input.items,
+            .perf_charts = owned.perf_charts.items,
+            .node_watch_status = if (self.node_service_watch_enabled)
+                "Node service events: polling worldfs snapshot"
+            else
+                "Node service events: paused",
+            .scope_preview = if (owned.scope_preview) |value| value else "Node watch scope: role/project unavailable",
+            .show_user_scope_notice = self.config.active_role == .user,
+            .node_watch_filter = self.node_service_watch_filter.items,
+            .node_watch_replay_limit = self.node_service_watch_replay_limit.items,
+            .debug_search_filter = self.debug_search_filter.items,
+            .filter_status = if (owned.filter_status) |value| value else "Showing events",
+            .jump_to_node_label = owned.jump_to_node_label,
+            .diff_base_label = owned.diff_base_label,
+            .latest_reload_diag = self.node_service_latest_reload_diag,
+            .selected_diag = selected_node_event.diagnostics,
+            .diff_preview = self.node_service_diff_preview,
+            .show_large_payload_notice = show_large_payload_notice,
+        };
+        owned.event_stream_view = .{
+            .filtered_indices = owned.filtered_indices.items,
+            .selected_index = self.debug_selected_index,
+        };
+        return owned;
+    }
+
+    fn performDebugPanelAction(self: *App, manager: *panel_manager.PanelManager, action: panels_bridge.DebugPanelAction) void {
+        switch (action) {
+            .toggle_stream => {
+                self.debug_stream_enabled = !self.debug_stream_enabled;
+                if (self.debug_stream_enabled) {
+                    self.requestDebugStreamSnapshot(true);
+                }
+            },
+            .refresh_snapshot => {
+                self.requestDebugStreamSnapshot(true);
+            },
+            .copy_perf => {
+                const report = self.buildPerfReportText() catch null;
+                defer if (report) |value| self.allocator.free(value);
+                if (report) |value| {
+                    self.copyTextToClipboard(value) catch {};
+                    self.appendMessage("system", "Copied GUI perf report to clipboard.", null) catch {};
+                }
+            },
+            .export_perf => {
+                const report = self.buildPerfReportText() catch null;
+                defer if (report) |value| self.allocator.free(value);
+                if (report) |value| {
+                    const export_path = self.exportPerfReport(value) catch null;
+                    defer if (export_path) |path| self.allocator.free(path);
+                    if (export_path) |path| {
+                        const msg = std.fmt.allocPrint(self.allocator, "Exported GUI perf report to {s}", .{path}) catch null;
+                        defer if (msg) |text| self.allocator.free(text);
+                        if (msg) |text| self.appendMessage("system", text, null) catch {};
+                    }
+                }
+            },
+            .clear_perf => {
+                self.perf_history.clearRetainingCapacity();
+                self.clearPerfBenchmarkCapture();
+                if (self.perf_benchmark_active) {
+                    self.perf_benchmark_start_sample_index = 0;
+                    self.perf_benchmark_start_timestamp_ms = std.time.milliTimestamp();
+                }
+                self.appendMessage("system", "Cleared GUI perf history.", null) catch {};
+            },
+            .toggle_benchmark => {
+                if (self.perf_benchmark_active) {
+                    self.stopPerfBenchmark() catch {};
+                    const label = self.perf_benchmark_last_label orelse "benchmark";
+                    const duration_ms = @max(0, self.perf_benchmark_last_end_timestamp_ms - self.perf_benchmark_last_start_timestamp_ms);
+                    const msg = std.fmt.allocPrint(
+                        self.allocator,
+                        "Stopped benchmark '{s}' ({d:.2}s).",
+                        .{ label, @as(f32, @floatFromInt(duration_ms)) / 1000.0 },
+                    ) catch null;
+                    defer if (msg) |text| self.allocator.free(text);
+                    if (msg) |text| self.appendMessage("system", text, null) catch {};
+                } else {
+                    self.startPerfBenchmark() catch {};
+                    const label = self.perf_benchmark_active_label orelse "benchmark";
+                    const msg = std.fmt.allocPrint(self.allocator, "Started benchmark '{s}'.", .{label}) catch null;
+                    defer if (msg) |text| self.allocator.free(text);
+                    if (msg) |text| self.appendMessage("system", text, null) catch {};
+                }
+            },
+            .copy_benchmark => {
+                const report = self.buildBenchmarkPerfReportText() catch null;
+                defer if (report) |value| self.allocator.free(value);
+                if (report) |value| {
+                    self.copyTextToClipboard(value) catch {};
+                    self.appendMessage("system", "Copied benchmark perf report to clipboard.", null) catch {};
+                }
+            },
+            .export_benchmark => {
+                const report = self.buildBenchmarkPerfReportText() catch null;
+                defer if (report) |value| self.allocator.free(value);
+                if (report) |value| {
+                    const export_path = self.exportPerfReport(value) catch null;
+                    defer if (export_path) |path| self.allocator.free(path);
+                    if (export_path) |path| {
+                        const msg = std.fmt.allocPrint(self.allocator, "Exported benchmark perf report to {s}", .{path}) catch null;
+                        defer if (msg) |text| self.allocator.free(text);
+                        if (msg) |text| self.appendMessage("system", text, null) catch {};
+                    }
+                }
+            },
+            .clear_benchmark => {
+                if (self.perf_benchmark_active) self.stopPerfBenchmark() catch {};
+                self.clearPerfBenchmarkCapture();
+                self.appendMessage("system", "Cleared benchmark capture.", null) catch {};
+            },
+            .refresh_node_feed => {
+                self.subscribeNodeServiceEventsFromUi() catch |err| {
+                    std.log.warn("node watch update failed: {s}", .{@errorName(err)});
+                };
+            },
+            .pause_node_feed => {
+                self.unsubscribeNodeServiceEventsFromUi() catch |err| {
+                    std.log.warn("node unwatch failed: {s}", .{@errorName(err)});
+                };
+            },
+            .clear_search => {
+                self.debug_search_filter.clearRetainingCapacity();
+                self.debug_selected_index = null;
+                self.clearSelectedNodeServiceEventCache();
+                self.debug_scroll_y = 0;
+            },
+            .jump_to_selected_node_fs => {
+                const selected = self.selectedNodeServiceEventInfo();
+                const node_id = selected.node_id orelse return;
+                self.jumpFilesystemToNode(manager, node_id) catch |err| {
+                    std.log.warn("jump to node fs failed: {s}", .{@errorName(err)});
+                };
+            },
+            .set_diff_base => {
+                const selected_idx = self.selectedNodeServiceEventInfo().index orelse return;
+                self.node_service_diff_base_index = selected_idx;
+                self.clearNodeServiceDiffPreview();
+                const msg = std.fmt.allocPrint(self.allocator, "Node diff base set to event #{d}", .{self.debug_events.items[selected_idx].id}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.appendMessage("system", value, null) catch {};
+            },
+            .clear_diff_base => {
+                self.node_service_diff_base_index = null;
+                self.clearNodeServiceDiffPreview();
+            },
+            .generate_diff => {
+                const selected_idx = self.selectedNodeServiceEventInfo().index orelse return;
+                const base_idx = self.node_service_diff_base_index orelse return;
+                if (base_idx >= self.debug_events.items.len or base_idx == selected_idx) return;
+                if (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null) |diff| {
+                    self.clearNodeServiceDiffPreview();
+                    self.node_service_diff_preview = diff;
+                } else {
+                    self.appendMessage("system", "Unable to build node service diff from selected events.", null) catch {};
+                }
+            },
+            .copy_diff => {
+                const selected_idx = self.selectedNodeServiceEventInfo().index orelse return;
+                const base_idx = self.node_service_diff_base_index orelse return;
+                if (base_idx >= self.debug_events.items.len or base_idx == selected_idx) return;
+                const diff_text = if (self.node_service_diff_preview) |value|
+                    self.allocator.dupe(u8, value) catch null
+                else
+                    (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null);
+                defer if (diff_text) |value| self.allocator.free(value);
+                if (diff_text) |value| {
+                    self.copyTextToClipboard(value) catch {};
+                    self.appendMessage("system", "Copied node service diff snapshot to clipboard.", null) catch {};
+                }
+            },
+            .export_diff => {
+                const selected_idx = self.selectedNodeServiceEventInfo().index orelse return;
+                const base_idx = self.node_service_diff_base_index orelse return;
+                if (base_idx >= self.debug_events.items.len or base_idx == selected_idx) return;
+                const diff_text = if (self.node_service_diff_preview) |value|
+                    self.allocator.dupe(u8, value) catch null
+                else
+                    (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null);
+                defer if (diff_text) |value| self.allocator.free(value);
+                if (diff_text) |value| {
+                    const export_path = self.exportNodeServiceDiffSnapshot(
+                        value,
+                        self.debug_events.items[base_idx].id,
+                        self.debug_events.items[selected_idx].id,
+                    ) catch null;
+                    defer if (export_path) |path| self.allocator.free(path);
+                    if (export_path) |path| {
+                        const msg = std.fmt.allocPrint(self.allocator, "Exported node diff snapshot to {s}", .{path}) catch null;
+                        defer if (msg) |text| self.allocator.free(text);
+                        if (msg) |text| self.appendMessage("system", text, null) catch {};
+                    } else {
+                        self.appendMessage("system", "Failed to export node diff snapshot.", null) catch {};
+                    }
+                }
+            },
+            .copy_selected_event => {
+                const sel_idx = self.debug_selected_index orelse return;
+                if (sel_idx >= self.debug_events.items.len) return;
+                const entry = self.debug_events.items[sel_idx];
+                const to_copy = self.formatDebugEventLine(entry) catch "";
+                defer if (to_copy.len > 0) self.allocator.free(to_copy);
+                if (to_copy.len > 0) {
+                    self.copyTextToClipboard(to_copy) catch {};
+                    self.appendMessage("system", "Copied debug event.", null) catch {};
+                }
+            },
+        }
+    }
+
+    fn launcherSettingsModel(self: *App) panels_bridge.LauncherSettingsModel {
+        const connection_state: panels_bridge.SettingsConnectionState = switch (self.connection_state) {
+            .disconnected => .disconnected,
+            .connecting => .connecting,
+            .connected => .connected,
+            .error_state => .error_state,
+        };
+        const active_role: panels_bridge.ConnectRole = switch (self.config.active_role) {
+            .admin => .admin,
+            .user => .user,
+        };
+        const terminal_backend: panels_bridge.SettingsTerminalBackend = switch (self.settings_panel.terminal_backend_kind) {
+            .plain_text => .plain_text,
+            .ghostty_vt => .ghostty_vt,
+        };
+        return .{
+            .connection_state = connection_state,
+            .active_role = active_role,
+            .watch_theme_pack = self.settings_panel.watch_theme_pack,
+            .auto_connect_on_launch = self.settings_panel.auto_connect_on_launch,
+            .ws_verbose_logs = self.settings_panel.ws_verbose_logs,
+            .terminal_backend = terminal_backend,
+        };
+    }
+
+    fn performLauncherSettingsAction(self: *App, manager: *panel_manager.PanelManager, action: panels_bridge.LauncherSettingsAction) void {
+        switch (action) {
+            .set_connect_role => |role| {
+                const target_role = switch (role) {
+                    .admin => config_mod.Config.TokenRole.admin,
+                    .user => config_mod.Config.TokenRole.user,
+                };
+                self.setActiveConnectRole(target_role) catch |err| {
+                    std.log.err("Failed to set connect role {s}: {s}", .{ @tagName(role), @errorName(err) });
+                };
+            },
+            .toggle_watch_theme_pack => {
+                self.settings_panel.watch_theme_pack = !self.settings_panel.watch_theme_pack;
+            },
+            .toggle_auto_connect_on_launch => {
+                self.settings_panel.auto_connect_on_launch = !self.settings_panel.auto_connect_on_launch;
+            },
+            .toggle_ws_verbose_logs => {
+                self.settings_panel.ws_verbose_logs = !self.settings_panel.ws_verbose_logs;
+                if (self.ws_client) |*client| {
+                    client.setVerboseLogs(self.settings_panel.ws_verbose_logs);
+                }
+            },
+            .set_terminal_backend => |backend| {
+                self.settings_panel.terminal_backend_kind = switch (backend) {
+                    .plain_text => .plain_text,
+                    .ghostty_vt => .ghostty_vt,
+                };
+                self.applySelectedTerminalBackend();
+            },
+            .connect => {
+                self.tryConnect(manager) catch {};
+            },
+            .save_config => {
+                self.saveConfig() catch |err| {
+                    self.setConnectionState(.error_state, "Failed to save config");
+                    std.log.err("Save config failed: {s}", .{@errorName(err)});
+                };
+            },
+            .load_history => {
+                self.loadSessionHistoryFromServer(true) catch |err| {
+                    if (self.formatControlOpError("Session history failed", err)) |msg| {
+                        defer self.allocator.free(msg);
+                        self.setWorkspaceError(msg);
+                    }
+                };
+            },
+            .restore_last => {
+                self.restoreLastSessionFromServer() catch |err| {
+                    if (self.formatControlOpError("Session restore failed", err)) |msg| {
+                        defer self.allocator.free(msg);
+                        self.setWorkspaceError(msg);
+                    }
+                };
+            },
+        }
+    }
+
+    fn terminalPanelModel(self: *App) panels_bridge.TerminalPanelModel {
+        return .{
+            .connected = self.connection_state == .connected,
+            .has_session = self.terminal_session_id != null,
+            .auto_poll = self.terminal_auto_poll,
+            .has_input = std.mem.trim(u8, self.terminal_input.items, " \t\r\n").len > 0,
+            .has_output = self.terminal_backend.text().len > 0,
+        };
+    }
+
+    fn terminalPanelView(self: *App) panels_bridge.TerminalPanelView {
+        const backend_line = std.fmt.allocPrint(
+            self.allocator,
+            "Backend: {s} (selected: {s}, build default: {s})",
+            .{
+                self.terminal_backend.label(),
+                terminal_render_backend.Backend.kindName(self.terminal_backend_kind),
+                TERMINAL_BACKEND_KIND,
+            },
+        ) catch null;
+        defer if (backend_line) |value| self.allocator.free(value);
+        const session_line = if (self.terminal_session_id) |id|
+            std.fmt.allocPrint(self.allocator, "Session: {s}", .{id}) catch null
+        else
+            self.allocator.dupe(u8, "Session: (not started)") catch null;
+        defer if (session_line) |value| self.allocator.free(value);
+        return .{
+            .title = "Terminal",
+            .backend_line = backend_line orelse "Backend: unknown",
+            .backend_detail = self.terminal_backend.statusDetail(),
+            .session_line = session_line orelse "Session: (unknown)",
+            .status_text = self.terminal_status,
+            .error_text = self.terminal_error,
+            .input_text = self.terminal_input.items,
+            .start_label = if (self.terminal_session_id == null) "Start" else "Restart",
+        };
+    }
+
+    fn performTerminalPanelAction(self: *App, action: panels_bridge.TerminalPanelAction) void {
+        switch (action) {
+            .start_or_restart => {
+                if (self.terminal_session_id != null) {
+                    self.closeTerminalSession() catch {};
+                }
+                self.ensureTerminalSession() catch |err| {
+                    const msg = self.formatFilesystemOpError("Terminal start failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setTerminalError(text);
+                    }
+                };
+            },
+            .stop => {
+                self.closeTerminalSession() catch |err| {
+                    const msg = self.formatFilesystemOpError("Terminal close failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setTerminalError(text);
+                    }
+                };
+            },
+            .read => {
+                self.terminalReadOnce(50) catch |err| {
+                    const msg = self.formatFilesystemOpError("Terminal read failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setTerminalError(text);
+                    }
+                };
+            },
+            .resize_default => {
+                self.resizeTerminalSession(120, 36) catch |err| {
+                    const msg = self.formatFilesystemOpError("Terminal resize failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setTerminalError(text);
+                    }
+                };
+            },
+            .clear_output => {
+                self.terminal_backend.clear(self.allocator);
+                self.clearTerminalError();
+                self.setTerminalStatus("Output cleared");
+            },
+            .toggle_auto_poll => {
+                self.terminal_auto_poll = !self.terminal_auto_poll;
+            },
+            .send_ctrl_c => {
+                self.sendTerminalControlC() catch |err| {
+                    const msg = self.formatFilesystemOpError("Terminal control failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setTerminalError(text);
+                    }
+                };
+            },
+            .send_input => {
+                self.sendTerminalInputFromUi() catch |err| {
+                    const msg = self.formatFilesystemOpError("Terminal send failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setTerminalError(text);
+                    }
+                };
+            },
+            .copy_output => {
+                self.copyTextToClipboard(self.terminal_backend.text()) catch {};
+                self.setTerminalStatus("Copied terminal output");
+            },
+        }
+    }
+
+    fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        _ = manager;
+        const model = self.filesystemPanelModel();
+        const host = FilesystemPanel.Host{
+            .ctx = @ptrCast(self),
+            .draw_label = launcherSettingsDrawLabel,
+            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
+            .draw_text_input = launcherSettingsDrawTextInput,
+            .draw_button = launcherSettingsDrawButton,
+            .draw_surface_panel = filesystemDrawSurfacePanel,
+            .draw_text_wrapped = filesystemDrawTextWrapped,
+        };
+        const path_label = if (self.filesystem_path.items.len > 0) self.filesystem_path.items else "/";
+        var view = self.buildFilesystemPanelView();
+        defer view.deinit(self.allocator);
+        var panel_state = FilesystemPanel.State{
+            .focused_field = filesystemFocusFieldToExternal(self.settings_panel.focused_field),
+        };
+        const action = FilesystemPanel.draw(
+            host,
+            Rect{ .min = rect.min, .max = rect.max },
+            self.panelLayoutMetrics(),
+            model,
+            view.view,
+            .{
+                .text_primary = self.theme.colors.text_primary,
+                .text_secondary = self.theme.colors.text_secondary,
+                .primary = self.theme.colors.primary,
+                .error_text = zcolors.rgba(220, 80, 80, 255),
+            },
+            .{
+                .mouse_x = self.mouse_x,
+                .mouse_y = self.mouse_y,
+                .mouse_released = self.mouse_released,
+            },
+            &panel_state,
+        );
+        self.settings_panel.focused_field = filesystemFocusFieldFromExternal(panel_state.focused_field);
+        if (action) |value| {
+            self.performFilesystemPanelAction(value, path_label);
+        }
+    }
+
+    fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        const host = DebugPanel.Host{
+            .ctx = @ptrCast(self),
+            .draw_label = launcherSettingsDrawLabel,
+            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
+            .draw_text_input = launcherSettingsDrawTextInput,
+            .draw_button = launcherSettingsDrawButton,
+            .draw_text_wrapped = filesystemDrawTextWrapped,
+            .draw_perf_charts = debugDrawPerfCharts,
+            .draw_event_stream = debugDrawEventStream,
+        };
+        var view = self.buildDebugPanelView();
+        defer view.deinit(self.allocator);
+        var panel_state = DebugPanel.State{
+            .focused_field = debugFocusFieldToExternal(self.settings_panel.focused_field),
+        };
+        const action = DebugPanel.draw(
+            host,
+            Rect{ .min = rect.min, .max = rect.max },
+            self.panelLayoutMetrics(),
+            .{
+                .text_primary = self.theme.colors.text_primary,
+                .text_secondary = self.theme.colors.text_secondary,
+            },
+            self.debugPanelModel(),
+            view.view,
+            view.event_stream_view,
+            .{
+                .mouse_x = self.mouse_x,
+                .mouse_y = self.mouse_y,
+                .mouse_released = self.mouse_released,
+            },
+            &panel_state,
+        );
+        const mapped_focus = debugFocusFieldFromExternal(panel_state.focused_field);
+        if (mapped_focus != .none or isDebugPanelFocusField(self.settings_panel.focused_field)) {
+            self.settings_panel.focused_field = mapped_focus;
+        }
+        if (action) |value| self.performDebugPanelAction(manager, value);
+    }
+
+    const SparklinePointsCtx = struct {
+        points: []const f32,
+    };
+
+    fn sparklinePointAt(ctx: *const anyopaque, idx: usize) f32 {
+        const points_ctx: *const SparklinePointsCtx = @ptrCast(@alignCast(ctx));
+        return if (idx < points_ctx.points.len) points_ctx.points[idx] else 0.0;
+    }
+
+    fn drawDebugPerfCharts(
+        self: *App,
+        rect: Rect,
+        layout: PanelLayoutMetrics,
+        y_start: f32,
+        perf_charts: []const panels_bridge.DebugSparklineSeriesView,
+    ) f32 {
+        const pad = layout.inset;
+        const line_height = layout.line_height;
+        const row_height = layout.button_height;
+        const width = rect.max[0] - rect.min[0];
+        const content_width = @max(240.0, width - pad * 2.0);
+        var y = y_start;
+        if (perf_charts.len == 0) return y;
         const spark_gap = @max(6.0 * self.ui_scale, layout.inner_inset * 0.8);
         const spark_h = @max(52.0 * self.ui_scale, row_height * 1.9);
         const spark_min_card_w = @max(150.0 * self.ui_scale, 90.0);
-        const spark_chart_count: usize = 4;
+        const spark_chart_count: usize = perf_charts.len;
         const spark_cols_float = @floor((content_width + spark_gap) / (spark_min_card_w + spark_gap));
         const spark_cols = std.math.clamp(@as(usize, @intFromFloat(@max(1.0, spark_cols_float))), 1, spark_chart_count);
         const spark_rows = @divTrunc(spark_chart_count + spark_cols - 1, spark_cols);
         const spark_card_w = @max(72.0 * self.ui_scale, (content_width - spark_gap * @as(f32, @floatFromInt(spark_cols - 1))) / @as(f32, @floatFromInt(spark_cols)));
         const spark_label_h = line_height;
         const spark_row_h = spark_label_h + spark_h + layout.row_gap * 0.35;
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            "Perf sparkline charts (recent window)",
-            self.theme.colors.text_secondary,
-        );
+        self.drawTextTrimmed(rect.min[0] + pad, y, content_width, "Perf sparkline charts (recent window)", self.theme.colors.text_secondary);
         y += line_height;
-        var spark_frame_rect = Rect.fromXYWH(0, 0, 0, 0);
-        var spark_draw_rect = Rect.fromXYWH(0, 0, 0, 0);
-        var spark_ws_rect = Rect.fromXYWH(0, 0, 0, 0);
-        var spark_fs_rect = Rect.fromXYWH(0, 0, 0, 0);
 
-        inline for ([_][]const u8{ "Frame ms", "Draw ms", "WS wait ms", "FS req ms" }, 0..) |label, idx| {
+        for (perf_charts, 0..) |chart, idx| {
             const row = @divTrunc(idx, spark_cols);
             const col = idx % spark_cols;
             const row_y = y + @as(f32, @floatFromInt(row)) * spark_row_h;
             const x = rect.min[0] + pad + @as(f32, @floatFromInt(col)) * (spark_card_w + spark_gap);
             const chart_rect = Rect.fromXYWH(x, row_y + spark_label_h, spark_card_w, spark_h);
-            switch (idx) {
-                0 => spark_frame_rect = chart_rect,
-                1 => spark_draw_rect = chart_rect,
-                2 => spark_ws_rect = chart_rect,
-                3 => spark_fs_rect = chart_rect,
-                else => {},
-            }
             self.drawTextCenteredTrimmed(
                 x + spark_card_w * 0.5,
                 row_y,
                 spark_card_w - @max(8.0 * self.ui_scale, 4.0),
-                label,
+                chart.label,
                 self.theme.colors.text_secondary,
             );
-        }
-
-        widgets.sparkline.draw(
-            &self.ui_commands,
-            spark_frame_rect,
-            .{ .ctx = @as(*const anyopaque, @ptrCast(&spark_ctx)), .count = spark_samples.len, .at = &perfSampleFrameMsAt },
-            .{
-                .stroke_color = zcolors.rgba(92, 173, 255, 255),
-                .fill_color = zcolors.withAlpha(zcolors.rgba(92, 173, 255, 255), 0.28),
-                .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
-                .border_color = self.theme.colors.border,
-                .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
-            },
-        );
-        widgets.sparkline.draw(
-            &self.ui_commands,
-            spark_draw_rect,
-            .{ .ctx = @as(*const anyopaque, @ptrCast(&spark_ctx)), .count = spark_samples.len, .at = &perfSampleDrawMsAt },
-            .{
-                .stroke_color = zcolors.rgba(255, 170, 72, 255),
-                .fill_color = zcolors.withAlpha(zcolors.rgba(255, 170, 72, 255), 0.28),
-                .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
-                .border_color = self.theme.colors.border,
-                .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
-            },
-        );
-        widgets.sparkline.draw(
-            &self.ui_commands,
-            spark_ws_rect,
-            .{ .ctx = @as(*const anyopaque, @ptrCast(&spark_ctx)), .count = spark_samples.len, .at = &perfSampleWsMsAt },
-            .{
-                .stroke_color = zcolors.rgba(175, 122, 255, 255),
-                .fill_color = zcolors.withAlpha(zcolors.rgba(175, 122, 255, 255), 0.28),
-                .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
-                .border_color = self.theme.colors.border,
-                .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
-            },
-        );
-        widgets.sparkline.draw(
-            &self.ui_commands,
-            spark_fs_rect,
-            .{ .ctx = @as(*const anyopaque, @ptrCast(&spark_ctx)), .count = spark_samples.len, .at = &perfSampleFsMsAt },
-            .{
-                .stroke_color = zcolors.rgba(98, 205, 128, 255),
-                .fill_color = zcolors.withAlpha(zcolors.rgba(98, 205, 128, 255), 0.28),
-                .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
-                .border_color = self.theme.colors.border,
-                .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
-            },
-        );
-        y += @as(f32, @floatFromInt(spark_rows)) * spark_row_h + layout.row_gap * 0.2;
-
-        const node_watch_status = if (self.node_service_watch_enabled)
-            "Node service events: polling worldfs snapshot"
-        else
-            "Node service events: paused";
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            node_watch_status,
-            self.theme.colors.text_secondary,
-        );
-        y += line_height;
-
-        const role_name = if (self.config.active_role == .admin) "admin" else "user";
-        var scope_preview_buf: [320]u8 = undefined;
-        const scope_preview = if (self.selectedProjectId()) |project_id| blk: {
-            const token_present = if (self.selectedProjectToken(project_id)) |token| token.len > 0 else false;
-            break :blk std.fmt.bufPrint(
-                &scope_preview_buf,
-                "Node watch scope: role={s} project={s} token={s}",
-                .{ role_name, project_id, if (token_present) "set" else "none" },
-            ) catch "Node watch scope: role/project unavailable";
-        } else std.fmt.bufPrint(
-            &scope_preview_buf,
-            "Node watch scope: role={s} project=(session default)",
-            .{role_name},
-        ) catch "Node watch scope: role/project unavailable";
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            scope_preview,
-            self.theme.colors.text_secondary,
-        );
-        y += line_height;
-        if (self.config.active_role == .user) {
-            self.drawTextTrimmed(
-                rect.min[0] + pad,
-                y,
-                content_width,
-                "User node service history is filtered to mounted nodes allowed by project observe policy.",
-                self.theme.colors.text_secondary,
-            );
-            y += line_height;
-        }
-
-        const toggle_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(220.0, width * 0.34),
-            row_height,
-        );
-        const toggle_label = if (self.debug_stream_enabled) "Pause Debug Stream" else "Resume Debug Stream";
-        const toggle_clicked = self.drawButtonWidget(
-            toggle_rect,
-            toggle_label,
-            .{ .variant = .primary },
-        );
-        if (toggle_clicked) {
-            self.debug_stream_enabled = !self.debug_stream_enabled;
-            if (self.debug_stream_enabled) {
-                self.requestDebugStreamSnapshot(true);
-            }
-        }
-
-        const refresh_rect = Rect.fromXYWH(
-            toggle_rect.max[0] + layout.inner_inset,
-            y,
-            @max(160.0, width * 0.24),
-            row_height,
-        );
-        if (self.drawButtonWidget(
-            refresh_rect,
-            "Refresh Snapshot",
-            .{ .variant = .secondary, .disabled = self.ws_client == null or !self.debug_stream_enabled },
-        )) {
-            self.requestDebugStreamSnapshot(true);
-        }
-
-        y += row_height + layout.row_gap * 0.65;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Node Watch Filter (optional node_id)",
-            self.theme.colors.text_primary,
-        );
-        y += line_height;
-
-        const node_watch_filter_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(220.0, width * 0.44),
-            row_height,
-        );
-        const node_filter_focused = self.drawTextInputWidget(
-            node_watch_filter_rect,
-            self.node_service_watch_filter.items,
-            self.settings_panel.focused_field == .node_watch_filter,
-            .{ .placeholder = "node-2" },
-        );
-        if (node_filter_focused) self.settings_panel.focused_field = .node_watch_filter;
-
-        const node_watch_replay_rect = Rect.fromXYWH(
-            node_watch_filter_rect.max[0] + layout.inner_inset,
-            y,
-            @max(88.0, width * 0.12),
-            row_height,
-        );
-        const replay_focused = self.drawTextInputWidget(
-            node_watch_replay_rect,
-            self.node_service_watch_replay_limit.items,
-            self.settings_panel.focused_field == .node_watch_replay_limit,
-            .{ .placeholder = "25" },
-        );
-        if (replay_focused) self.settings_panel.focused_field = .node_watch_replay_limit;
-
-        const apply_watch_rect = Rect.fromXYWH(
-            node_watch_replay_rect.max[0] + layout.inner_inset,
-            y,
-            @max(136.0, width * 0.20),
-            row_height,
-        );
-        if (self.drawButtonWidget(
-            apply_watch_rect,
-            "Refresh Node Feed",
-            .{ .variant = .secondary, .disabled = self.ws_client == null },
-        )) {
-            self.subscribeNodeServiceEventsFromUi() catch |err| {
-                std.log.warn("node watch update failed: {s}", .{@errorName(err)});
+            var points_ctx = SparklinePointsCtx{ .points = chart.points };
+            const stroke_color = switch (idx) {
+                0 => zcolors.rgba(92, 173, 255, 255),
+                1 => zcolors.rgba(255, 170, 72, 255),
+                2 => zcolors.rgba(175, 122, 255, 255),
+                3 => zcolors.rgba(98, 205, 128, 255),
+                else => self.theme.colors.primary,
             };
-        }
-
-        const stop_watch_rect = Rect.fromXYWH(
-            apply_watch_rect.max[0] + layout.inner_inset,
-            y,
-            @max(126.0, width * 0.17),
-            row_height,
-        );
-        if (self.drawButtonWidget(
-            stop_watch_rect,
-            "Pause Node Feed",
-            .{ .variant = .secondary, .disabled = self.ws_client == null or !self.node_service_watch_enabled },
-        )) {
-            self.unsubscribeNodeServiceEventsFromUi() catch |err| {
-                std.log.warn("node unwatch failed: {s}", .{@errorName(err)});
-            };
-        }
-
-        if (self.mouse_released and
-            (self.settings_panel.focused_field == .node_watch_filter or
-                self.settings_panel.focused_field == .node_watch_replay_limit) and
-            !node_watch_filter_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !node_watch_replay_rect.contains(.{ self.mouse_x, self.mouse_y }))
-        {
-            self.settings_panel.focused_field = .none;
-        }
-
-        y += row_height + layout.row_gap * 0.65;
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Search Debug Events",
-            self.theme.colors.text_primary,
-        );
-        y += line_height;
-
-        const debug_search_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            @max(260.0, width * 0.46),
-            row_height,
-        );
-        const debug_search_focused = self.drawTextInputWidget(
-            debug_search_rect,
-            self.debug_search_filter.items,
-            self.settings_panel.focused_field == .debug_search_filter,
-            .{ .placeholder = "tool_result, timeout, node_service_upsert..." },
-        );
-        if (debug_search_focused) self.settings_panel.focused_field = .debug_search_filter;
-
-        const clear_search_rect = Rect.fromXYWH(
-            debug_search_rect.max[0] + layout.inner_inset,
-            y,
-            @max(88.0, width * 0.12),
-            row_height,
-        );
-        const search_trimmed = std.mem.trim(u8, self.debug_search_filter.items, " \t\r\n");
-        if (self.drawButtonWidget(
-            clear_search_rect,
-            "Clear",
-            .{ .variant = .secondary, .disabled = search_trimmed.len == 0 },
-        )) {
-            self.debug_search_filter.clearRetainingCapacity();
-            self.debug_selected_index = null;
-            self.clearSelectedNodeServiceEventCache();
-            self.debug_scroll_y = 0;
-        }
-        if (self.mouse_released and
-            self.settings_panel.focused_field == .debug_search_filter and
-            !debug_search_rect.contains(.{ self.mouse_x, self.mouse_y }) and
-            !clear_search_rect.contains(.{ self.mouse_x, self.mouse_y }))
-        {
-            self.settings_panel.focused_field = .none;
-        }
-        const filtered_indices = self.ensureDebugFilteredIndices(search_trimmed);
-        const filtered_events = filtered_indices.len;
-        var filter_status_buf: [64]u8 = undefined;
-        const filter_status = std.fmt.bufPrint(
-            &filter_status_buf,
-            "Showing {d}/{d} events",
-            .{ filtered_events, self.debug_events.items.len },
-        ) catch "Showing events";
-        y += row_height + layout.row_gap * 0.45;
-        self.drawTextTrimmed(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            filter_status,
-            self.theme.colors.text_secondary,
-        );
-        y += line_height;
-
-        const selected_node_event = self.selectedNodeServiceEventInfo();
-        y += layout.row_gap * 0.25;
-        if (selected_node_event.node_id) |selected_node_id| {
-            var jump_label_buf: [256]u8 = undefined;
-            const jump_label = std.fmt.bufPrint(
-                &jump_label_buf,
-                "Jump To Node FS ({s})",
-                .{selected_node_id},
-            ) catch "Jump To Node FS";
-            const jump_rect = Rect.fromXYWH(
-                rect.min[0] + pad,
-                y,
-                @max(220.0, width * 0.45),
-                row_height,
+            widgets.sparkline.draw(
+                &self.ui_commands,
+                chart_rect,
+                .{ .ctx = @as(*const anyopaque, @ptrCast(&points_ctx)), .count = chart.points.len, .at = &sparklinePointAt },
+                .{
+                    .stroke_color = stroke_color,
+                    .fill_color = zcolors.withAlpha(stroke_color, 0.28),
+                    .background_color = zcolors.withAlpha(self.theme.colors.surface, 0.96),
+                    .border_color = self.theme.colors.border,
+                    .max_columns = PERF_SPARKLINE_MAX_COLUMNS,
+                },
             );
-            if (self.drawButtonWidget(
-                jump_rect,
-                jump_label,
-                .{ .variant = .secondary },
-            )) {
-                self.jumpFilesystemToNode(manager, selected_node_id) catch |err| {
-                    std.log.warn("jump to node fs failed: {s}", .{@errorName(err)});
-                };
-            }
-            y += row_height + layout.row_gap * 0.45;
         }
-
-        if (selected_node_event.index) |selected_idx| {
-            const set_base_rect = Rect.fromXYWH(
-                rect.min[0] + pad,
-                y,
-                @max(140.0, width * 0.2),
-                row_height,
-            );
-            const clear_base_rect = Rect.fromXYWH(
-                set_base_rect.max[0] + layout.inner_inset,
-                y,
-                @max(126.0, width * 0.18),
-                row_height,
-            );
-            const generate_diff_rect = Rect.fromXYWH(
-                clear_base_rect.max[0] + layout.inner_inset,
-                y,
-                @max(134.0, width * 0.2),
-                row_height,
-            );
-            const copy_diff_rect = Rect.fromXYWH(
-                generate_diff_rect.max[0] + layout.inner_inset,
-                y,
-                @max(98.0, width * 0.14),
-                row_height,
-            );
-            const export_diff_rect = Rect.fromXYWH(
-                copy_diff_rect.max[0] + layout.inner_inset,
-                y,
-                @max(102.0, width * 0.14),
-                row_height,
-            );
-
-            const base_idx_opt = self.node_service_diff_base_index;
-            const can_diff = if (base_idx_opt) |idx|
-                idx < self.debug_events.items.len and idx != selected_idx
-            else
-                false;
-
-            if (self.drawButtonWidget(set_base_rect, "Set Diff Base", .{ .variant = .secondary })) {
-                self.node_service_diff_base_index = selected_idx;
-                self.clearNodeServiceDiffPreview();
-                const msg = std.fmt.allocPrint(self.allocator, "Node diff base set to event #{d}", .{self.debug_events.items[selected_idx].id}) catch null;
-                defer if (msg) |value| self.allocator.free(value);
-                if (msg) |value| self.appendMessage("system", value, null) catch {};
-            }
-            if (self.drawButtonWidget(
-                clear_base_rect,
-                "Clear Base",
-                .{ .variant = .secondary, .disabled = self.node_service_diff_base_index == null and self.node_service_diff_preview == null },
-            )) {
-                self.node_service_diff_base_index = null;
-                self.clearNodeServiceDiffPreview();
-            }
-            if (self.drawButtonWidget(
-                generate_diff_rect,
-                "Generate Diff",
-                .{ .variant = .secondary, .disabled = !can_diff },
-            )) {
-                if (base_idx_opt) |base_idx| {
-                    if (base_idx < self.debug_events.items.len and base_idx != selected_idx) {
-                        if (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null) |diff| {
-                            self.clearNodeServiceDiffPreview();
-                            self.node_service_diff_preview = diff;
-                        } else {
-                            self.appendMessage("system", "Unable to build node service diff from selected events.", null) catch {};
-                        }
-                    }
-                }
-            }
-            if (self.drawButtonWidget(
-                copy_diff_rect,
-                "Copy Diff",
-                .{ .variant = .secondary, .disabled = !can_diff },
-            )) {
-                if (base_idx_opt) |base_idx| {
-                    if (base_idx < self.debug_events.items.len and base_idx != selected_idx) {
-                        const diff_text = if (self.node_service_diff_preview) |value|
-                            self.allocator.dupe(u8, value) catch null
-                        else
-                            (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null);
-                        defer if (diff_text) |value| self.allocator.free(value);
-                        if (diff_text) |value| {
-                            const buf = self.allocator.alloc(u8, value.len + 1) catch null;
-                            if (buf) |zbuf| {
-                                @memcpy(zbuf[0..value.len], value);
-                                zbuf[value.len] = 0;
-                                const zslice: [:0]const u8 = zbuf[0..value.len :0];
-                                zapp.clipboard.setTextZ(zslice);
-                                self.allocator.free(zbuf);
-                                self.appendMessage("system", "Copied node service diff snapshot to clipboard.", null) catch {};
-                            }
-                        }
-                    }
-                }
-            }
-            if (self.drawButtonWidget(
-                export_diff_rect,
-                "Export Diff",
-                .{ .variant = .primary, .disabled = !can_diff },
-            )) {
-                if (base_idx_opt) |base_idx| {
-                    if (base_idx < self.debug_events.items.len and base_idx != selected_idx) {
-                        const diff_text = if (self.node_service_diff_preview) |value|
-                            self.allocator.dupe(u8, value) catch null
-                        else
-                            (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null);
-                        defer if (diff_text) |value| self.allocator.free(value);
-                        if (diff_text) |value| {
-                            const export_path = self.exportNodeServiceDiffSnapshot(
-                                value,
-                                self.debug_events.items[base_idx].id,
-                                self.debug_events.items[selected_idx].id,
-                            ) catch null;
-                            defer if (export_path) |path| self.allocator.free(path);
-                            if (export_path) |path| {
-                                const msg = std.fmt.allocPrint(self.allocator, "Exported node diff snapshot to {s}", .{path}) catch null;
-                                defer if (msg) |text| self.allocator.free(text);
-                                if (msg) |text| self.appendMessage("system", text, null) catch {};
-                            } else {
-                                self.appendMessage("system", "Failed to export node diff snapshot.", null) catch {};
-                            }
-                        }
-                    }
-                }
-            }
-            y += row_height + layout.row_gap * 0.45;
-
-            var base_label_buf: [96]u8 = undefined;
-            const base_label = if (self.node_service_diff_base_index) |idx|
-                if (idx < self.debug_events.items.len)
-                    std.fmt.bufPrint(
-                        &base_label_buf,
-                        "Diff base event: #{d}",
-                        .{self.debug_events.items[idx].id},
-                    ) catch "Diff base event: (unavailable)"
-                else
-                    "Diff base event: (stale selection)"
-            else
-                "Diff base event: (not set)";
-            self.drawTextTrimmed(
-                rect.min[0] + pad,
-                y,
-                content_width,
-                base_label,
-                self.theme.colors.text_secondary,
-            );
-            y += line_height;
-        }
-
-        const selected_diag = selected_node_event.diagnostics;
-        if (self.node_service_latest_reload_diag != null or selected_diag != null or self.node_service_diff_preview != null) {
-            self.drawLabel(
-                rect.min[0] + pad,
-                y,
-                "Manifest/Service Diff Diagnostics",
-                self.theme.colors.text_primary,
-            );
-            y += line_height;
-            if (self.node_service_latest_reload_diag) |diag| {
-                self.drawTextTrimmed(
-                    rect.min[0] + pad,
-                    y,
-                    content_width,
-                    "Latest node_service_upsert delta",
-                    self.theme.colors.text_secondary,
-                );
-                y += line_height;
-                y += self.drawTextWrapped(
-                    rect.min[0] + pad,
-                    y,
-                    content_width,
-                    diag,
-                    self.theme.colors.text_primary,
-                );
-                y += layout.row_gap * 0.4;
-            }
-            if (selected_diag) |diag| {
-                self.drawTextTrimmed(
-                    rect.min[0] + pad,
-                    y,
-                    content_width,
-                    "Selected event delta",
-                    self.theme.colors.text_secondary,
-                );
-                y += line_height;
-                y += self.drawTextWrapped(
-                    rect.min[0] + pad,
-                    y,
-                    content_width,
-                    diag,
-                    self.theme.colors.text_primary,
-                );
-                y += layout.row_gap * 0.4;
-            }
-            if (self.node_service_diff_preview) |diff_text| {
-                self.drawTextTrimmed(
-                    rect.min[0] + pad,
-                    y,
-                    content_width,
-                    "Historical event diff snapshot",
-                    self.theme.colors.text_secondary,
-                );
-                y += line_height;
-                y += self.drawTextWrapped(
-                    rect.min[0] + pad,
-                    y,
-                    content_width,
-                    diff_text,
-                    self.theme.colors.text_primary,
-                );
-                y += layout.row_gap * 0.4;
-            }
-        }
-
-        if (selected_node_event.index) |selected_idx| {
-            if (selected_idx < self.debug_events.items.len and
-                self.debug_events.items[selected_idx].payload_json.len > DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES)
-            {
-                self.drawTextTrimmed(
-                    rect.min[0] + pad,
-                    y,
-                    content_width,
-                    "Large payload mode: syntax coloring disabled for this event to keep UI responsive.",
-                    self.theme.colors.text_secondary,
-                );
-                y += line_height;
-            }
-        }
-
-        self.drawLabel(
-            rect.min[0] + pad,
-            y,
-            "Fold nested JSON with [+]/[-].",
-            self.theme.colors.text_secondary,
-        );
-        y += line_height + layout.row_gap * 0.45;
-
-        y += row_height + layout.row_gap;
-        const output_rect = Rect.fromXYWH(
-            rect.min[0] + pad,
-            y,
-            content_width,
-            @max(120.0, rect.max[1] - y - pad),
-        );
-        self.debug_output_rect = output_rect;
-        if (self.mouse_clicked and output_rect.contains(.{ self.mouse_x, self.mouse_y })) {
-            if (self.debug_panel_id) |panel_id| {
-                manager.focusPanel(panel_id);
-            }
-        }
-        self.drawSurfacePanel(output_rect);
-
-        const usable_height = @max(0.0, output_rect.height() - inner * 2.0);
-        if (usable_height <= 0) return;
-
-        var have_copy_rect = false;
-        var copy_btn_rect: Rect = Rect.fromXYWH(0, 0, 0, 0);
-        const selected_visible = blk: {
-            const selected_idx = self.debug_selected_index orelse break :blk false;
-            if (selected_idx >= self.debug_events.items.len) break :blk false;
-            var lo: usize = 0;
-            var hi: usize = filtered_indices.len;
-            while (lo < hi) {
-                const mid = lo + (hi - lo) / 2;
-                const value = @as(usize, @intCast(filtered_indices[mid]));
-                if (value == selected_idx) break :blk true;
-                if (value < selected_idx) {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
-            }
-            break :blk false;
-        };
-        if (selected_visible) {
-            const copy_btn_w: f32 = @max(84.0 * self.ui_scale, layout.line_height * 4.1);
-            const copy_btn_h: f32 = @max(layout.button_height * 0.74, 24.0 * self.ui_scale);
-            copy_btn_rect = Rect.fromXYWH(
-                output_rect.max[0] - copy_btn_w - inner * 0.5,
-                output_rect.min[1] + inner * 0.5,
-                copy_btn_w,
-                copy_btn_h,
-            );
-            have_copy_rect = true;
-        }
-
-        const content_min_x = output_rect.min[0] + inner + 2.0;
-        const content_max_x = output_rect.max[0] - scrollbar_reserved;
-
-        var total_content_height: f32 = inner * 2.0;
-        for (filtered_indices) |raw_idx| {
-            const idx = @as(usize, @intCast(raw_idx));
-            if (idx >= self.debug_events.items.len) continue;
-            const entry = &self.debug_events.items[idx];
-            const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
-            const payload_visible_rows = if (is_selected)
-                self.countVisibleDebugPayloadRows(content_min_x, content_max_x, entry)
-            else
-                0;
-            const visible_lines = 1 + payload_visible_rows;
-            total_content_height += line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
-        }
-        const max_scroll = @max(0.0, total_content_height - output_rect.height());
-        if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
-        if (self.debug_scroll_y > max_scroll) self.debug_scroll_y = max_scroll;
-        const sb_width: f32 = 8.0 * self.ui_scale;
-        const sb_track_rect = if (max_scroll > 0)
-            Rect.fromXYWH(
-                output_rect.max[0] - sb_width - inner * 0.35,
-                output_rect.min[1] + inner * 0.35,
-                sb_width,
-                output_rect.height() - inner * 0.7,
-            )
-        else
-            Rect.fromXYWH(0, 0, 0, 0);
-        const clicked_scrollbar_track = self.mouse_clicked and max_scroll > 0 and sb_track_rect.contains(.{ self.mouse_x, self.mouse_y });
-
-        self.ui_commands.pushClip(.{ .min = output_rect.min, .max = output_rect.max });
-        defer self.ui_commands.popClip();
-
-        var cur_y = output_rect.min[1] + inner - self.debug_scroll_y;
-        for (filtered_indices) |raw_idx| {
-            const idx = @as(usize, @intCast(raw_idx));
-            if (idx >= self.debug_events.items.len) continue;
-            const entry = &self.debug_events.items[idx];
-            const is_selected = self.debug_selected_index != null and self.debug_selected_index.? == idx;
-            if (is_selected) self.ensureDebugPayloadLines(entry);
-            const payload_visible_rows = if (is_selected)
-                self.countVisibleDebugPayloadRows(content_min_x, content_max_x, entry)
-            else
-                0;
-            const visible_lines = 1 + payload_visible_rows;
-            const entry_h = line_height * @as(f32, @floatFromInt(visible_lines)) + event_gap;
-
-            if (cur_y + entry_h < output_rect.min[1]) {
-                cur_y += entry_h;
-                continue;
-            }
-            if (cur_y > output_rect.max[1]) break;
-
-            const entry_rect = Rect.fromXYWH(output_rect.min[0], cur_y, output_rect.width(), entry_h - event_gap);
-            if (is_selected) {
-                const select_color = zcolors.withAlpha(self.theme.colors.primary, 0.25);
-                self.drawFilledRect(entry_rect, select_color);
-            }
-
-            self.drawDebugEventHeaderLine(content_min_x, cur_y, content_max_x, entry.*);
-            var clicked_fold_marker = false;
-            if (is_selected and payload_visible_rows > 0) {
-                self.ensureDebugPayloadWrapRows(content_min_x, content_max_x, entry);
-                self.ensureDebugVisiblePayloadLines(content_min_x, content_max_x, entry);
-                const enable_syntax_color = entry.payload_json.len <= DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES;
-                const space_w = self.measureText(" ");
-                const fold_marker_w_open = self.measureText("[-]");
-                const fold_marker_w_closed = self.measureText("[+]");
-
-                const body_top_y = cur_y + line_height;
-                const min_row: usize = if (output_rect.min[1] <= body_top_y)
-                    0
-                else
-                    @as(usize, @intFromFloat((output_rect.min[1] - body_top_y) / line_height));
-                const max_row_exclusive: usize = if (output_rect.max[1] <= body_top_y)
-                    0
-                else
-                    @as(usize, @intFromFloat(((output_rect.max[1] - body_top_y) / line_height) + 1.0));
-
-                var visible_idx = findFirstVisiblePayloadLine(entry, min_row);
-                while (visible_idx < entry.payload_visible_line_indices.items.len) : (visible_idx += 1) {
-                    const payload_line_idx = @as(usize, @intCast(entry.payload_visible_line_indices.items[visible_idx]));
-                    const row_start = @as(usize, @intCast(entry.payload_visible_line_row_starts.items[visible_idx]));
-                    if (row_start >= max_row_exclusive) break;
-
-                    _ = payloadLineRowsFromCache(entry, payload_line_idx);
-                    const line_y = body_top_y + @as(f32, @floatFromInt(row_start)) * line_height;
-                    if (line_y > output_rect.max[1]) break;
-
-                    const meta = entry.payload_lines.items[payload_line_idx];
-                    const can_fold = meta.opens_block and meta.matching_close_index != null and
-                        @as(usize, @intCast(meta.matching_close_index.?)) > payload_line_idx + 1;
-                    const collapsed = can_fold and self.isDebugBlockCollapsed(entry.id, payload_line_idx);
-
-                    const line = entry.payload_json[meta.start..meta.end];
-                    const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * space_w;
-                    const line_x_base = content_min_x + indent_width;
-                    const content_start = @min(meta.indent_spaces, line.len);
-                    const content = line[content_start..];
-                    var text_x = line_x_base;
-                    if (can_fold) {
-                        const marker = if (collapsed) "[+]" else "[-]";
-                        const marker_w = if (collapsed) fold_marker_w_closed else fold_marker_w_open;
-                        const marker_rect = Rect.fromXYWH(line_x_base, line_y, marker_w, line_height);
-                        const marker_hovered = marker_rect.contains(.{ self.mouse_x, self.mouse_y });
-                        if (self.mouse_clicked and marker_hovered) {
-                            self.toggleDebugBlockCollapsed(entry.id, payload_line_idx);
-                            clicked_fold_marker = true;
-                        }
-
-                        const marker_color = if (marker_hovered)
-                            zcolors.blend(self.theme.colors.primary, self.theme.colors.text_primary, 0.22)
-                        else
-                            self.theme.colors.primary;
-                        self.drawText(line_x_base, line_y, marker, marker_color);
-                        text_x = line_x_base + marker_w + space_w;
-                    }
-
-                    if (enable_syntax_color and content.len <= DEBUG_SYNTAX_COLOR_MAX_LINE_BYTES) {
-                        _ = self.drawJsonLineColored(text_x, line_y, content_max_x, content);
-                    } else {
-                        _ = self.drawTextWrapped(
-                            text_x,
-                            line_y,
-                            @max(1.0, content_max_x - text_x),
-                            content,
-                            self.theme.colors.text_primary,
-                        );
-                    }
-                }
-            }
-
-            const clicked_entry = self.mouse_clicked and !clicked_scrollbar_track and entry_rect.contains(.{ self.mouse_x, self.mouse_y });
-            const clicked_copy = have_copy_rect and copy_btn_rect.contains(.{ self.mouse_x, self.mouse_y });
-            if (clicked_entry and !clicked_copy and !clicked_fold_marker) {
-                if (self.debug_selected_index == null or self.debug_selected_index.? != idx) {
-                    self.debug_selected_index = idx;
-                    self.clearSelectedNodeServiceEventCache();
-                }
-            }
-
-            cur_y += entry_h;
-        }
-
-        if (max_scroll > 0) {
-            const thumb_height = @max(20.0, sb_track_rect.height() * (output_rect.height() / total_content_height));
-            const thumb_y_ratio = self.debug_scroll_y / max_scroll;
-            const thumb_y = sb_track_rect.min[1] + thumb_y_ratio * (sb_track_rect.height() - thumb_height);
-            const thumb_rect = Rect.fromXYWH(
-                sb_track_rect.min[0],
-                thumb_y,
-                sb_width,
-                thumb_height,
-            );
-
-            self.drawFilledRect(sb_track_rect, zcolors.withAlpha(self.theme.colors.border, 0.3));
-
-            const is_hovered = thumb_rect.contains(.{ self.mouse_x, self.mouse_y });
-            const thumb_color = if (self.debug_scrollbar_dragging)
-                self.theme.colors.primary
-            else if (is_hovered)
-                zcolors.blend(self.theme.colors.border, self.theme.colors.primary, 0.5)
-            else
-                self.theme.colors.border;
-            self.drawFilledRect(thumb_rect, thumb_color);
-
-            if (self.mouse_clicked and is_hovered) {
-                self.debug_scrollbar_dragging = true;
-                self.debug_scrollbar_drag_start_y = self.mouse_y;
-                self.debug_scrollbar_drag_start_scroll_y = self.debug_scroll_y;
-                self.setDragMouseCapture(true);
-            } else if (self.mouse_clicked and sb_track_rect.contains(.{ self.mouse_x, self.mouse_y })) {
-                const page_scroll = @max(line_height * 3.0, output_rect.height() * 0.9);
-                if (self.mouse_y < thumb_rect.min[1]) {
-                    self.debug_scroll_y -= page_scroll;
-                } else if (self.mouse_y > thumb_rect.max[1]) {
-                    self.debug_scroll_y += page_scroll;
-                }
-                if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
-                if (self.debug_scroll_y > max_scroll) self.debug_scroll_y = max_scroll;
-            }
-
-            if (self.debug_scrollbar_dragging) {
-                if (self.mouse_down) {
-                    const delta_y = self.mouse_y - self.debug_scrollbar_drag_start_y;
-                    const scroll_per_pixel = max_scroll / (sb_track_rect.height() - thumb_height);
-                    self.debug_scroll_y = self.debug_scrollbar_drag_start_scroll_y + delta_y * scroll_per_pixel;
-                } else {
-                    self.debug_scrollbar_dragging = false;
-                    if (self.form_scroll_drag_target == .none) self.setDragMouseCapture(false);
-                }
-            }
-        } else {
-            self.debug_scrollbar_dragging = false;
-            if (self.form_scroll_drag_target == .none) self.setDragMouseCapture(false);
-        }
-
-        if (self.debug_selected_index) |sel_idx| {
-            if (sel_idx < self.debug_events.items.len) {
-                if (self.drawButtonWidget(copy_btn_rect, "Copy", .{ .variant = .secondary })) {
-                    const entry = self.debug_events.items[sel_idx];
-                    const to_copy = self.formatDebugEventLine(entry) catch "";
-                    if (to_copy.len > 0) {
-                        const buf = self.allocator.alloc(u8, to_copy.len + 1) catch {
-                            self.allocator.free(to_copy);
-                            return;
-                        };
-                        @memcpy(buf[0..to_copy.len], to_copy);
-                        buf[to_copy.len] = 0;
-                        const zslice: [:0]const u8 = buf[0..to_copy.len :0];
-                        zapp.clipboard.setTextZ(zslice);
-                        self.allocator.free(buf);
-                        self.allocator.free(to_copy);
-                    }
-                }
-            }
-        }
+        return y + @as(f32, @floatFromInt(spark_rows)) * spark_row_h + layout.row_gap * 0.2;
     }
 
+    fn drawDebugEventStream(self: *App, output_rect: Rect, view: panels_bridge.DebugEventStreamView) void {
+        const host = DebugEventStreamPanel.Host{
+            .ctx = @ptrCast(self),
+            .set_output_rect = debugEventStreamSetOutputRect,
+            .focus_panel = debugEventStreamFocusPanel,
+            .draw_surface_panel = filesystemDrawSurfacePanel,
+            .push_clip = debugEventStreamPushClip,
+            .pop_clip = debugEventStreamPopClip,
+            .draw_filled_rect = debugEventStreamDrawFilledRect,
+            .draw_button = launcherSettingsDrawButton,
+            .get_scroll_y = debugEventStreamGetScrollY,
+            .set_scroll_y = debugEventStreamSetScrollY,
+            .get_scrollbar_dragging = debugEventStreamGetScrollbarDragging,
+            .set_scrollbar_dragging = debugEventStreamSetScrollbarDragging,
+            .get_drag_start_y = debugEventStreamGetDragStartY,
+            .set_drag_start_y = debugEventStreamSetDragStartY,
+            .get_drag_start_scroll_y = debugEventStreamGetDragStartScrollY,
+            .set_drag_start_scroll_y = debugEventStreamSetDragStartScrollY,
+            .set_drag_capture = debugEventStreamSetDragCapture,
+            .release_drag_capture = debugEventStreamReleaseDragCapture,
+            .entry_height = debugEventStreamEntryHeight,
+            .draw_entry = debugEventStreamDrawEntry,
+            .select_entry = debugEventStreamSelectEntry,
+            .copy_selected_event = debugEventStreamCopySelectedEvent,
+            .selected_event_count = debugEventStreamSelectedEventCount,
+        };
+        DebugEventStreamPanel.draw(
+            host,
+            output_rect,
+            self.panelLayoutMetrics(),
+            self.ui_scale,
+            .{
+                .primary = self.theme.colors.primary,
+                .border = self.theme.colors.border,
+            },
+            view,
+            .{
+                .mouse_x = self.mouse_x,
+                .mouse_y = self.mouse_y,
+                .mouse_clicked = self.mouse_clicked,
+                .mouse_down = self.mouse_down,
+            },
+        );
+    }
     fn makeDebugFoldKey(event_id: u64, line_index: usize) DebugFoldKey {
         return .{
             .event_id = event_id,
@@ -12060,7 +11064,9 @@ const App = struct {
 
         ui_input_router.setExternalQueue(self.render_input_queue);
 
-        const action = ChatPanel.draw(
+        const action = ChatWorkspacePanel.draw(
+            ChatMessage,
+            ChatSession,
             self.allocator,
             &self.chat_panel_state,
             "spider-gui",
@@ -12073,7 +11079,6 @@ const App = struct {
             self.chat_sessions.items,
             0,
             panel_rect,
-            null,
         );
 
         self.handleChatPanelAction(action);
@@ -13640,7 +12645,7 @@ const App = struct {
         self.manager = panel_manager.PanelManager.init(self.allocator, next_workspace, &self.next_panel_id);
         self.bindNextPanelId(&self.manager);
         self.bindMainWindowManager();
-        self.removeLegacyProjectPanels(&self.manager);
+        self.migrateLegacyHostPanels(&self.manager);
         self.removeWorkspaceSettingsPanels(&self.manager);
         self.focusChatPanel(&self.manager);
     }
@@ -16023,7 +15028,14 @@ const App = struct {
         }
 
         for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .DebugStream) {
+                self.debug_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                self.requestDebugStreamSnapshot(true);
+                return panel.id;
+            }
             if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Debug Stream")) {
+                self.promoteLegacyHostPanel(manager, panel);
                 self.debug_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 self.requestDebugStreamSnapshot(true);
@@ -16031,19 +15043,8 @@ const App = struct {
             }
         }
 
-        const tool_name = try self.allocator.dupe(u8, "SpiderWeb Debug");
-        errdefer self.allocator.free(tool_name);
-        var stdout_buf = try text_buffer.TextBuffer.init(self.allocator, "");
-        errdefer stdout_buf.deinit(self.allocator);
-        var stderr_buf = try text_buffer.TextBuffer.init(self.allocator, "");
-        errdefer stderr_buf.deinit(self.allocator);
-        const panel_data = workspace.PanelData{ .ToolOutput = .{
-            .tool_name = tool_name,
-            .stdout = stdout_buf,
-            .stderr = stderr_buf,
-            .exit_code = 0,
-        } };
-        const panel_id = try manager.openPanel(.ToolOutput, "Debug Stream", panel_data);
+        const panel_data = workspace.PanelData{ .DebugStream = {} };
+        const panel_id = try manager.openPanel(.DebugStream, "Debug Stream", panel_data);
         self.debug_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
@@ -16063,53 +15064,27 @@ const App = struct {
         }
 
         for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .ProjectWorkspace) {
+                self.project_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
             if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Projects")) {
+                self.promoteLegacyHostPanel(manager, panel);
                 self.project_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
         }
 
-        const tool_name = try self.allocator.dupe(u8, "Project Workspace");
-        errdefer self.allocator.free(tool_name);
-        var stdout_buf = try text_buffer.TextBuffer.init(self.allocator, "");
-        errdefer stdout_buf.deinit(self.allocator);
-        var stderr_buf = try text_buffer.TextBuffer.init(self.allocator, "");
-        errdefer stderr_buf.deinit(self.allocator);
-        const panel_data = workspace.PanelData{ .ToolOutput = .{
-            .tool_name = tool_name,
-            .stdout = stdout_buf,
-            .stderr = stderr_buf,
-            .exit_code = 0,
-        } };
-        const panel_id = try manager.openPanel(.ToolOutput, "Projects", panel_data);
+        const panel_data = workspace.PanelData{ .ProjectWorkspace = {} };
+        const panel_id = try manager.openPanel(.ProjectWorkspace, "Projects", panel_data);
         self.project_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
         }
         manager.focusPanel(panel_id);
         return panel_id;
-    }
-
-    fn removeLegacyProjectPanels(self: *App, manager: *panel_manager.PanelManager) void {
-        var removed_any = false;
-        var idx: usize = 0;
-        while (idx < manager.workspace.panels.items.len) {
-            const panel = manager.workspace.panels.items[idx];
-            if (panel.kind != .ToolOutput or !std.mem.eql(u8, panel.title, "Projects")) {
-                idx += 1;
-                continue;
-            }
-
-            var removed_panel = manager.workspace.panels.swapRemove(idx);
-            removed_panel.deinit(self.allocator);
-            removed_any = true;
-        }
-        self.project_panel_id = null;
-        if (removed_any) {
-            _ = manager.workspace.syncDockLayout() catch false;
-            manager.workspace.markDirty();
-        }
     }
 
     fn removeWorkspaceSettingsPanels(self: *App, manager: *panel_manager.PanelManager) void {
@@ -16142,26 +15117,21 @@ const App = struct {
         }
 
         for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .FilesystemBrowser) {
+                self.filesystem_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
             if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Filesystem Browser")) {
+                self.promoteLegacyHostPanel(manager, panel);
                 self.filesystem_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
         }
 
-        const tool_name = try self.allocator.dupe(u8, "Filesystem Browser");
-        errdefer self.allocator.free(tool_name);
-        var stdout_buf = try text_buffer.TextBuffer.init(self.allocator, "");
-        errdefer stdout_buf.deinit(self.allocator);
-        var stderr_buf = try text_buffer.TextBuffer.init(self.allocator, "");
-        errdefer stderr_buf.deinit(self.allocator);
-        const panel_data = workspace.PanelData{ .ToolOutput = .{
-            .tool_name = tool_name,
-            .stdout = stdout_buf,
-            .stderr = stderr_buf,
-            .exit_code = 0,
-        } };
-        const panel_id = try manager.openPanel(.ToolOutput, "Filesystem Browser", panel_data);
+        const panel_data = workspace.PanelData{ .FilesystemBrowser = {} };
+        const panel_id = try manager.openPanel(.FilesystemBrowser, "Filesystem Browser", panel_data);
         self.filesystem_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
@@ -16304,7 +15274,7 @@ const App = struct {
         }
     }
 
-    fn handleChatPanelAction(self: *App, action: zui.ChatPanelAction) void {
+    fn handleChatPanelAction(self: *App, action: panels_bridge.ChatPanelAction) void {
         if (action.send_message) |message| {
             std.log.info("[GUI] handleChatPanelAction send_message len={d}", .{message.len});
             defer self.allocator.free(message);

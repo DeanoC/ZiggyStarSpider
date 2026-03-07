@@ -76,6 +76,16 @@ fn addGuiArtifact(
         .target = target,
         .optimize = optimize,
     });
+    const ziggy_ui_panels = b.dependency("ziggy_ui_panels", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const ziggy_ui_panels_module = b.createModule(.{
+        .root_source_file = ziggy_ui_panels.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ziggy_ui_panels_module.addImport("ziggy-ui", ziggy_ui_module);
 
     const gui_module = b.createModule(.{
         .root_source_file = b.path("src/gui/root.zig"),
@@ -84,6 +94,7 @@ fn addGuiArtifact(
     });
     gui_module.addImport("websocket", websocket.module("websocket"));
     gui_module.addImport("ziggy-ui", ziggy_ui_module);
+    gui_module.addImport("ziggy-ui-panels", ziggy_ui_panels_module);
     gui_module.addImport("client-config", client_config_module);
     gui_module.addImport("control_plane", control_plane_module);
     gui_module.addImport("build_options", build_options_module);
