@@ -430,6 +430,13 @@ fn filesystemFocusFieldFromExternal(field: FilesystemPanel.FocusField) SettingsF
     };
 }
 
+fn isFilesystemPanelFocusField(field: SettingsFocusField) bool {
+    return switch (field) {
+        .filesystem_contract_payload => true,
+        else => false,
+    };
+}
+
 fn debugFocusFieldToExternal(field: SettingsFocusField) DebugPanel.FocusField {
     return switch (field) {
         .perf_benchmark_label => .perf_benchmark_label,
@@ -7530,7 +7537,10 @@ const App = struct {
             &panel_state,
             .launcher,
         );
-        self.settings_panel.focused_field = settingsFocusFieldFromExternal(panel_state.focused_field);
+        const mapped_focus = settingsFocusFieldFromExternal(panel_state.focused_field);
+        if (mapped_focus != .none or isSettingsPanelFocusField(self.settings_panel.focused_field)) {
+            self.settings_panel.focused_field = mapped_focus;
+        }
         self.settings_panel.settings_scroll_y = panel_state.scroll_y;
         if (action) |value| {
             self.performLauncherSettingsAction(manager, value);
@@ -7576,7 +7586,10 @@ const App = struct {
             &panel_state,
             .workspace,
         );
-        self.settings_panel.focused_field = settingsFocusFieldFromExternal(panel_state.focused_field);
+        const mapped_focus = settingsFocusFieldFromExternal(panel_state.focused_field);
+        if (mapped_focus != .none or isSettingsPanelFocusField(self.settings_panel.focused_field)) {
+            self.settings_panel.focused_field = mapped_focus;
+        }
         self.settings_panel.settings_scroll_y = panel_state.scroll_y;
         if (action) |value| {
             self.performLauncherSettingsAction(&self.manager, value);
@@ -9716,7 +9729,10 @@ const App = struct {
             },
             &panel_state,
         );
-        self.settings_panel.focused_field = filesystemFocusFieldFromExternal(panel_state.focused_field);
+        const mapped_focus = filesystemFocusFieldFromExternal(panel_state.focused_field);
+        if (mapped_focus != .none or isFilesystemPanelFocusField(self.settings_panel.focused_field)) {
+            self.settings_panel.focused_field = mapped_focus;
+        }
         if (action) |value| {
             self.performFilesystemPanelAction(value, path_label);
         }
