@@ -153,7 +153,7 @@ test "message type parsing" {
     const connect = "{\"type\":\"connect\"}";
     try std.testing.expect(messages.parseMessageType(connect).? == .connect);
 
-    const chat_send = "{\"type\":\"chat.send\"}";
+    const chat_send = "{\"type\":\"session.send\"}";
     try std.testing.expect(messages.parseMessageType(chat_send).? == .chat_send);
 
     const project_create = "{\"type\":\"project.create\"}";
@@ -175,7 +175,7 @@ test "buildChatReceive" {
     const response = try messages.buildChatReceive(allocator, "msg123", "Hello, world!", "assistant");
     defer allocator.free(response);
 
-    try std.testing.expect(std.mem.indexOf(u8, response, "chat.receive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "session.receive") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "msg123") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "Hello, world!") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "assistant") != null);
@@ -222,32 +222,6 @@ test "buildError" {
     try std.testing.expect(std.mem.indexOf(u8, error_msg, "error") != null);
     try std.testing.expect(std.mem.indexOf(u8, error_msg, "NOT_FOUND") != null);
     try std.testing.expect(std.mem.indexOf(u8, error_msg, "Resource not found") != null);
-}
-
-// ============================================================================
-// Legacy Compatibility Tests
-// ============================================================================
-
-test "legacy protocol message parsing" {
-    const connect = "{\"type\":\"connect\"}";
-    try std.testing.expect(protocol.parseMessageType(connect).? == .connect);
-
-    const chat_send = "{\"type\":\"chat.send\"}";
-    try std.testing.expect(protocol.parseMessageType(chat_send).? == .chat_send);
-
-    const project_create = "{\"type\":\"project.create\"}";
-    try std.testing.expect(protocol.parseMessageType(project_create).? == .project_create);
-}
-
-test "legacy buildChatReceive" {
-    const allocator = std.testing.allocator;
-
-    const response = try protocol.buildChatReceive(allocator, "msg123", "Hello");
-    defer allocator.free(response);
-
-    try std.testing.expect(std.mem.indexOf(u8, response, "chat.receive") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response, "msg123") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response, "Hello") != null);
 }
 
 // ============================================================================

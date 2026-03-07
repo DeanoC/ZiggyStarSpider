@@ -60,8 +60,8 @@ spider node info node-1
 
 # Unified filesystem access
 spider fs ls /
-spider fs tree /spiderweb
-spider fs read /spiderweb/projects/proj-1/workspace/README.md
+spider fs tree /
+spider fs read /nodes/local/fs/README.md
 
 # Agent chat via FS-RPC capability path
 spider chat send "summarize current mounts"

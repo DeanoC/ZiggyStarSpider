@@ -77,7 +77,7 @@ Create/update and activate a project with desired mounts in one command.
 **Examples:**
 ```bash
 spider project up "Distributed Workspace"
-spider project up "Distributed Workspace" --mount /workspace=node-1:work
+spider project up "Distributed Workspace" --mount /nodes/local/fs=node-1:work
 ```
 
 ## project doctor

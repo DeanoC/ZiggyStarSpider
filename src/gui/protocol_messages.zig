@@ -10,15 +10,10 @@ pub const MessageType = enum {
 
 pub fn classifyTypeString(type_str: []const u8) MessageType {
     if (std.mem.eql(u8, type_str, "session.send")) return .session_send;
-    if (std.mem.eql(u8, type_str, "chat.send")) return .session_send; // legacy
     if (std.mem.eql(u8, type_str, "session.receive")) return .session_receive;
-    if (std.mem.eql(u8, type_str, "chat.receive")) return .session_receive; // legacy
-    if (std.mem.eql(u8, type_str, "connect.ack")) return .connect_ack;
     if (std.mem.eql(u8, type_str, "control.connect_ack")) return .connect_ack;
     if (std.mem.eql(u8, type_str, "control.session_attach")) return .connect_ack;
     if (std.mem.eql(u8, type_str, "control.session_resume")) return .connect_ack;
-    if (std.mem.eql(u8, type_str, "session.ack")) return .connect_ack; // legacy
-    if (std.mem.eql(u8, type_str, "chat_ack")) return .connect_ack; // legacy
     if (std.mem.eql(u8, type_str, "error")) return .error_response;
     if (std.mem.eql(u8, type_str, "control.error")) return .error_response;
     return .other;

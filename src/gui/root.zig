@@ -8200,22 +8200,6 @@ const App = struct {
     fn mapWorkspaceRootToFilesystemPath(self: *App, workspace_root: []const u8) ![]u8 {
         const trimmed = std.mem.trim(u8, workspace_root, " \t\r\n");
         if (trimmed.len == 0) return self.allocator.dupe(u8, "/");
-
-        const legacy_prefix = "/spiderweb/projects/";
-        if (std.mem.startsWith(u8, trimmed, legacy_prefix)) {
-            const after_prefix = trimmed[legacy_prefix.len..];
-            const slash_after_project = std.mem.indexOfScalar(u8, after_prefix, '/') orelse return self.allocator.dupe(u8, "/workspace");
-            const after_project = after_prefix[slash_after_project + 1 ..];
-
-            if (std.mem.eql(u8, after_project, "workspace")) {
-                return self.allocator.dupe(u8, "/workspace");
-            }
-            if (std.mem.startsWith(u8, after_project, "workspace/")) {
-                return std.fmt.allocPrint(self.allocator, "/workspace/{s}", .{after_project["workspace/".len..]});
-            }
-            return self.allocator.dupe(u8, trimmed);
-        }
-
         return self.allocator.dupe(u8, trimmed);
     }
 
@@ -12697,43 +12681,13 @@ const App = struct {
             effective_project_id = self.preferredAttachProjectId();
         }
         var effective_project_token = self.projectTokenForSessionProject(effective_project_id);
-        var restore_warning: ?[]u8 = null;
-        defer if (restore_warning) |value| self.allocator.free(value);
-
         self.attachSessionBindingExplicit(
             client,
             session.session_key,
             session.agent_id,
             effective_project_id,
             effective_project_token,
-        ) catch |err| {
-            const primary_detail = if (err == error.RemoteError)
-                (control_plane.lastRemoteError() orelse @errorName(err))
-            else
-                @errorName(err);
-            if (effective_project_id != null and isSelectedProjectAttachRemoteError(primary_detail)) {
-                const fallback_project_id = self.defaultAttachProjectId() orelse return err;
-                const fallback_project_token = self.projectTokenForSessionProject(fallback_project_id);
-                self.attachSessionBindingExplicit(
-                    client,
-                    session.session_key,
-                    session.agent_id,
-                    fallback_project_id,
-                    fallback_project_token,
-                ) catch {
-                    return err;
-                };
-                effective_project_id = fallback_project_id;
-                effective_project_token = fallback_project_token;
-                restore_warning = try std.fmt.allocPrint(
-                    self.allocator,
-                    "Restored session {s}, but project context was unavailable ({s}).",
-                    .{ session.session_key, primary_detail },
-                );
-            } else {
-                return err;
-            }
-        };
+        ) catch |err| return err;
 
         if (effective_project_id) |project_id| {
             try self.ensureSelectedProjectInSettings(project_id);
@@ -13231,73 +13185,14 @@ const App = struct {
                         return;
                     }
 
-                    const has_selected_project = self.selectedProjectId() != null;
-                    if (has_selected_project) {
-                        std.log.warn(
-                            "Session attach with selected project failed; retrying default attach: {s}",
-                            .{primary_detail_owned},
-                        );
-                        const selected_project_invalid = isSelectedProjectAttachRemoteError(primary_detail_owned);
-                        if (selected_project_invalid) {
-                            self.clearSelectedProjectAfterAttachFailure();
-                        }
-                        var fallback_ok = true;
-                        const fallback_project_id = self.defaultAttachProjectId();
-                        const fallback_project_token = self.projectTokenForSessionProject(fallback_project_id);
-                        if (fallback_project_id == null) {
-                            fallback_ok = false;
-                            attach_warning = try std.fmt.allocPrint(
-                                self.allocator,
-                                "Session attach failed: {s}. Select a project and reconnect.",
-                                .{primary_detail_owned},
-                            );
-                        } else {
-                            self.attachSessionBindingWithProject(client, attach_session, fallback_project_id, fallback_project_token) catch |fallback_err| {
-                                fallback_ok = false;
-                                const fallback_detail = if (fallback_err == error.RemoteError)
-                                    (control_plane.lastRemoteError() orelse @errorName(fallback_err))
-                                else
-                                    @errorName(fallback_err);
-                                std.log.err(
-                                    "Session attach failed with selected project ({s}); fallback attach also failed ({s})",
-                                    .{ primary_detail_owned, fallback_detail },
-                                );
-                                attach_warning = try std.fmt.allocPrint(
-                                    self.allocator,
-                                    "Session attach failed: {s} (fallback also failed: {s}). Select a project and reconnect.",
-                                    .{ primary_detail_owned, fallback_detail },
-                                );
-                            };
-                        }
-                        if (fallback_ok) {
-                            worker_attach_project_id = fallback_project_id;
-                            worker_attach_project_token = fallback_project_token;
-                            if (selected_project_invalid) {
-                                attach_warning = try self.allocator.dupe(
-                                    u8,
-                                    "Selected project is not available for this session; connected using default project.",
-                                );
-                            } else {
-                                attach_warning = try std.fmt.allocPrint(
-                                    self.allocator,
-                                    "Selected project attach failed ({s}); connected using default project.",
-                                    .{primary_detail_owned},
-                                );
-                            }
-                        } else {
-                            worker_attach_project_id = null;
-                            worker_attach_project_token = null;
-                        }
-                    } else {
-                        std.log.err("Session attach failed: {s}", .{primary_detail_owned});
-                        worker_attach_project_id = null;
-                        worker_attach_project_token = null;
-                        attach_warning = try std.fmt.allocPrint(
-                            self.allocator,
-                            "Session attach failed ({s}). Select a project and reconnect.",
-                            .{primary_detail_owned},
-                        );
-                    }
+                    std.log.err("Session attach failed: {s}", .{primary_detail_owned});
+                    worker_attach_project_id = null;
+                    worker_attach_project_token = null;
+                    attach_warning = try std.fmt.allocPrint(
+                        self.allocator,
+                        "Session attach failed ({s}). Select a project and reconnect.",
+                        .{primary_detail_owned},
+                    );
                 }
             };
 
@@ -13857,54 +13752,11 @@ const App = struct {
                     return err;
                 }
 
-                const has_selected_project = self.selectedProjectId() != null;
-                if (has_selected_project) {
-                    const selected_project_invalid = isSelectedProjectAttachRemoteError(primary_detail_owned);
-                    if (selected_project_invalid) {
-                        self.clearSelectedProjectAfterAttachFailure();
-                    }
-                    const fallback_project_id = self.defaultAttachProjectId();
-                    const fallback_project_token = self.projectTokenForSessionProject(fallback_project_id);
-                    if (fallback_project_id == null) {
-                        const err_text = try std.fmt.allocPrint(
-                            self.allocator,
-                            "Session attach failed: {s}. Select a project and retry.",
-                            .{primary_detail_owned},
-                        );
-                        defer self.allocator.free(err_text);
-                        try self.appendMessage("system", err_text, null);
-                        return err;
-                    }
-                    self.attachSessionBindingWithProject(client, session_key, fallback_project_id, fallback_project_token) catch |fallback_err| {
-                        const fallback_detail = if (fallback_err == error.RemoteError)
-                            (control_plane.lastRemoteError() orelse @errorName(fallback_err))
-                        else
-                            @errorName(fallback_err);
-                        const err_text = try std.fmt.allocPrint(
-                            self.allocator,
-                            "Session attach failed: {s} (fallback also failed: {s})",
-                            .{ primary_detail_owned, fallback_detail },
-                        );
-                        defer self.allocator.free(err_text);
-                        try self.appendMessage("system", err_text, null);
-                        return fallback_err;
-                    };
-                    attach_project_id = fallback_project_id;
-                    attach_project_token = fallback_project_token;
-
-                    const warning = if (selected_project_invalid) blk: {
-                        break :blk "Selected project is not available for this session; using default project for this message.";
-                    } else blk: {
-                        break :blk "Selected project attach failed; using default project for this message.";
-                    };
-                    self.setWorkspaceError(warning);
-                    try self.appendMessage("system", warning, null);
-                } else {
-                    const err_text = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
-                    defer self.allocator.free(err_text);
-                    try self.appendMessage("system", err_text, null);
-                    return err;
-                }
+                const err_text = try std.fmt.allocPrint(self.allocator, "Session attach failed: {s}", .{primary_detail_owned});
+                defer self.allocator.free(err_text);
+                self.setWorkspaceError(err_text);
+                try self.appendMessage("system", err_text, null);
+                return err;
             };
             attached_during_send = true;
             self.refreshSessionAttachStatusOnce(client, session_key);
@@ -14504,10 +14356,7 @@ const App = struct {
         if (self.readFsPathTextGui(client, global_jobs_path) catch null) |raw| {
             return raw;
         }
-
-        const legacy_jobs_path = try std.fmt.allocPrint(self.allocator, "/agents/self/jobs/{s}/{s}", .{ job_id, leaf });
-        defer self.allocator.free(legacy_jobs_path);
-        return self.readFsPathTextGui(client, legacy_jobs_path);
+        return error.FileNotFound;
     }
 
     fn replaySessionReceiveFromJobLog(self: *App, fallback_session_key: []const u8, log_text: []const u8) !bool {
