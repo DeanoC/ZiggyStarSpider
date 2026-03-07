@@ -134,7 +134,8 @@ fn close(fd: std.posix.fd_t) void {
     const builtin = @import("builtin");
     const native_os = builtin.os.tag;
     if (native_os == .windows) {
-        return std.os.windows.CloseHandle(fd);
+        _ = std.os.windows.ws2_32.closesocket(fd);
+        return;
     }
     if (native_os == .wasi and !builtin.link_libc) {
         _ = std.os.wasi.fd_close(fd);

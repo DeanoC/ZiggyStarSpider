@@ -512,7 +512,9 @@ pub const Stream = struct {
         // we don't want to crash on double close
 
         if (native_os == .windows) {
-            return std.os.windows.CloseHandle(fd);
+            _ = std.os.windows.ws2_32.closesocket(fd);
+            self.stream.handle = std.os.windows.ws2_32.INVALID_SOCKET;
+            return;
         }
         if (native_os == .wasi and !builtin.link_libc) {
             _ = std.os.wasi.fd_close(fd);

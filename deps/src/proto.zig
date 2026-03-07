@@ -247,7 +247,20 @@ pub const Reader = struct {
                 8 => message_type = .close,
                 9 => message_type = .ping,
                 10 => message_type = .pong,
-                else => return error.InvalidMessageType,
+                else => {
+                    // Unknown opcodes are skipped so extension frames don't tear down
+                    // the whole connection for clients that don't understand them.
+                    const next = self.start + message_len;
+                    if (next == self.pos) {
+                        self.pos = 0;
+                        self.start = 0;
+                    } else {
+                        std.debug.assert(next < self.pos);
+                        self.start = next;
+                        continue :loop;
+                    }
+                    return null;
+                },
             }
 
             // FIN, RSV1, RSV2, RSV3, OP,OP,OP,OP
