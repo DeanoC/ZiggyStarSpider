@@ -16,6 +16,10 @@
         .ziggy_ui = .{
             .path = "deps/ziggy-ui",
         },
+        .ziggy_ui_panels = .{
+            .url = "https://github.com/DeanoC/ZiggyUIPanels/archive/5e4c605283fcb36afd5ecb6f658f69f4f441ccec.tar.gz",
+            .hash = "ziggy_ui_panels-0.1.0-Zht7qXp-AgBEL0NJQJkOLghiZTwmTppW4PjyVkgganFi",
+        },
         .sdl3 = .{
             .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",
             .hash = "sdl-0.3.3+3.2.28-7uIn9MiRfwFhqxnwBi_vCQlKr82YpwkQBVwdz2uy46S1",
