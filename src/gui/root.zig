@@ -11727,7 +11727,7 @@ const App = struct {
         if (effective_project_id == null) {
             effective_project_id = self.preferredAttachProjectId();
         }
-        var effective_project_token = self.projectTokenForSessionProject(effective_project_id);
+        const effective_project_token = self.projectTokenForSessionProject(effective_project_id);
         self.attachSessionBindingExplicit(
             client,
             session.session_key,
@@ -12759,8 +12759,7 @@ const App = struct {
             try self.appendMessage("system", "No active session available", null);
             return;
         }
-        var attach_project_id = self.preferredAttachProjectId();
-        var attach_project_token = self.projectTokenForSessionProject(attach_project_id);
+        const attach_project_id = self.preferredAttachProjectId();
         var attached_during_send = false;
         if (self.session_attach_state == .unknown or self.session_attach_state == .err or self.session_attach_state == .warming) {
             self.attachSessionBinding(client, session_key) catch |err| {
