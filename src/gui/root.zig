@@ -12735,6 +12735,14 @@ const App = struct {
             .disconnected => self.setLauncherNotice("Disconnected from Spider Web."),
             .none => self.clearLauncherNotice(),
         }
+
+        if (reason == .switched_project and self.connection_state == .connected and self.ws_client != null) {
+            self.refreshWorkspaceData() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Project refresh failed: {s}", .{@errorName(err)}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.setLauncherNotice(value);
+            };
+        }
     }
 
     fn closeAllSecondaryWindows(self: *App) void {
