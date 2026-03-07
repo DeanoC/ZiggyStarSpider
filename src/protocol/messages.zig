@@ -17,13 +17,13 @@ const types = @import("types.zig");
 // ============================================================================
 
 pub const MessageType = enum {
-    // Connection lifecycle (OpenClaw compatible)
+    // Connection lifecycle
     connect,
     connect_ack,
     chat_ack,
     disconnect,
 
-    // Messaging (OpenClaw compatible)
+    // Messaging
     chat_send,
     chat_receive,
 
@@ -154,20 +154,14 @@ pub const MessageType = enum {
         // Connection
         if (std.mem.eql(u8, s, "connect")) return .connect;
         if (std.mem.eql(u8, s, "control.connect")) return .connect;
-        if (std.mem.eql(u8, s, "connect_ack")) return .connect_ack;
-        if (std.mem.eql(u8, s, "connect.ack")) return .connect_ack;
         if (std.mem.eql(u8, s, "control.connect_ack")) return .connect_ack;
         if (std.mem.eql(u8, s, "control.session_attach")) return .connect_ack;
         if (std.mem.eql(u8, s, "control.session_resume")) return .connect_ack;
-        if (std.mem.eql(u8, s, "chat_ack")) return .chat_ack;
-        if (std.mem.eql(u8, s, "session.ack")) return .chat_ack;
         if (std.mem.eql(u8, s, "disconnect")) return .disconnect;
 
         // Chat
         if (std.mem.eql(u8, s, "session.send")) return .chat_send;
-        if (std.mem.eql(u8, s, "chat.send")) return .chat_send;
         if (std.mem.eql(u8, s, "session.receive")) return .chat_receive;
-        if (std.mem.eql(u8, s, "chat.receive")) return .chat_receive;
 
         // Project
         if (std.mem.eql(u8, s, "project.create")) return .project_create;

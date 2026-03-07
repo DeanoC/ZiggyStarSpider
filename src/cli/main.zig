@@ -1043,7 +1043,7 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
             return error.InvalidArguments;
         }
         try mounts.append(allocator, .{
-            .mount_path = "/workspace",
+            .mount_path = "/nodes/local/fs",
             .node_id = nodes.items[0].node_id,
             .export_name = "work",
         });
@@ -3434,7 +3434,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     try fsrpcBootstrap(allocator, client);
 
     logger.info("Submitting chat job...", .{});
-    const chat_input_fid = try fsrpcWalkPath(allocator, client, "/agents/self/chat/control/input");
+    const chat_input_fid = try fsrpcWalkPath(allocator, client, "/global/chat/control/input");
     defer fsrpcClunkBestEffort(allocator, client, chat_input_fid);
     try fsrpcOpen(allocator, client, chat_input_fid, "rw");
 
@@ -3448,7 +3448,7 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
         return error.InvalidResponse;
     };
 
-    const result_path = try std.fmt.allocPrint(allocator, "/agents/self/jobs/{s}/result.txt", .{job_name});
+    const result_path = try std.fmt.allocPrint(allocator, "/global/jobs/{s}/result.txt", .{job_name});
     defer allocator.free(result_path);
 
     const result_fid = try fsrpcWalkPath(allocator, client, result_path);
@@ -3511,7 +3511,7 @@ fn parseJobStatusInfo(allocator: std.mem.Allocator, status_json: []const u8) !Jo
 }
 
 fn readJobStatus(allocator: std.mem.Allocator, client: *WebSocketClient, job_name: []const u8) !JobStatusInfo {
-    const status_path = try std.fmt.allocPrint(allocator, "/agents/self/jobs/{s}/status.json", .{job_name});
+    const status_path = try std.fmt.allocPrint(allocator, "/global/jobs/{s}/status.json", .{job_name});
     defer allocator.free(status_path);
     const status_fid = try fsrpcWalkPath(allocator, client, status_path);
     defer fsrpcClunkBestEffort(allocator, client, status_fid);
@@ -3528,7 +3528,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
     try fsrpcBootstrap(allocator, client);
 
     if (cmd.args.len == 0) {
-        const jobs_fid = try fsrpcWalkPath(allocator, client, "/agents/self/jobs");
+        const jobs_fid = try fsrpcWalkPath(allocator, client, "/global/jobs");
         defer fsrpcClunkBestEffort(allocator, client, jobs_fid);
         try fsrpcOpen(allocator, client, jobs_fid, "r");
         const listing = try fsrpcReadAllText(allocator, client, jobs_fid);
@@ -3571,7 +3571,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
         return;
     }
 
-    const result_path = try std.fmt.allocPrint(allocator, "/agents/self/jobs/{s}/result.txt", .{job_name});
+    const result_path = try std.fmt.allocPrint(allocator, "/global/jobs/{s}/result.txt", .{job_name});
     defer allocator.free(result_path);
     const result_fid = try fsrpcWalkPath(allocator, client, result_path);
     defer fsrpcClunkBestEffort(allocator, client, result_fid);
