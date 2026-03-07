@@ -4,7 +4,7 @@ Workspace status shows the currently effective project mounts for the current ag
 
 ## workspace status [project_id]
 
-Show workspace root and mounted node exports.
+Show the current project's effective mount topology and mounted node exports.
 
 **Arguments:**
 - `project_id` (optional) - Resolve status for a specific project

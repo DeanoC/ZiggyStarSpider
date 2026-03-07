@@ -843,13 +843,13 @@ All messages are JSON-encoded and sent over WebSocket.
 
 ---
 
-### Chat Messages (OpenClaw Compatible)
+### Session Messages
 
-#### chat.send
+#### session.send
 
 ```json
 {
-  "type": "chat.send",
+  "type": "session.send",
   "id": "req_019",
   "timestamp": 1707834000000,
   "content": "Implement the worker spawn system",
@@ -857,11 +857,11 @@ All messages are JSON-encoded and sent over WebSocket.
 }
 ```
 
-#### chat.receive
+#### session.receive
 
 ```json
 {
-  "type": "chat.receive",
+  "type": "session.receive",
   "request_id": "req_019",
   "timestamp": 1707834001000,
   "content": "I'll analyze the requirements and create a plan for implementing the worker spawn system. This may take a few minutes.",
@@ -921,7 +921,7 @@ All messages are JSON-encoded and sent over WebSocket.
    PM Agent → goal.update (status: completed when all tasks done)
 
 7. PM reports to user
-   PM Agent → chat.receive ("Goal completed: Implemented feature X")
+   PM Agent → session.receive ("Goal completed: Implemented feature X")
 ```
 
 ### Flow 2: Worker Reports Progress → PM Updates Goal
@@ -943,7 +943,7 @@ All messages are JSON-encoded and sent over WebSocket.
    Spiderweb → goal.update (status: completed)
 
 5. PM notifies user
-   PM Agent → chat.receive ("All tasks for goal 'X' are complete")
+   PM Agent → session.receive ("All tasks for goal 'X' are complete")
 ```
 
 ---

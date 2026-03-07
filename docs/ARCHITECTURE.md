@@ -2,13 +2,13 @@
 
 ## Scope
 
-SpiderApp is the user-facing client (CLI + GUI) for Spiderweb distributed workspace control and FS-RPC access.
+SpiderApp is the user-facing client (CLI + GUI) for Spiderweb project control, topology inspection, and Acheron FS-RPC access.
 
 Primary goals:
 
 1. Connect to Spiderweb using unified-v2.
 2. Manage project context (list/get/create/use/activate).
-3. Surface node topology and workspace mounts.
+3. Surface node topology and effective project mounts.
 4. Route filesystem and capability IO through `acheron.*`.
 
 ## Protocol Model
@@ -21,10 +21,10 @@ No legacy compatibility path is maintained in this client.
 
 - `control`:
   - out-of-band control API and topology/project operations
-  - includes handshake and project/node/workspace control calls
+  - includes handshake and project/node/workspace-status control calls
 - `acheron`:
   - filesystem transport (`t_walk`, `t_open`, `t_read`, `t_write`, etc.)
-  - capability IO (for example chat via `/capabilities/chat/control/input`)
+  - capability IO (for example chat via `/global/chat/control/input`)
 
 ### Required control handshake
 
@@ -84,7 +84,7 @@ Persistent local state:
 
 1. control-plane operations (`project`, `node`, `workspace`)
 2. FS-RPC filesystem operations (`fs`)
-3. FS-RPC chat capability flow (`chat send`)
+3. FS-RPC chat flow via `/global/chat` and `/global/jobs`
 
 Project context handling:
 
@@ -99,14 +99,14 @@ Project context handling:
 - connection state and handshake lifecycle
 - settings panel project selection/token controls
 - onboarding wizard (`connect -> project -> mounts -> activate`)
-- workspace topology cache (projects, nodes, mounts)
+- topology cache (projects, nodes, mounts, drift/status)
 - filesystem browser panel (path navigation + preview)
 - non-blocking filesystem worker thread (dedicated FS-RPC websocket + request/result queues)
 - incremental per-path filesystem cache (lazy load by navigated path, explicit refresh invalidation)
 - async chat worker that applies project context before FS-RPC chat IO
 - reconnect-aware chat job resume handling
 
-The GUI refreshes workspace topology from control-plane APIs and shows selected project + mount state alongside chat.
+The GUI refreshes project topology from control-plane APIs and shows selected project + mount state alongside chat.
 
 ## Filesystem + Capability Flow
 
@@ -122,11 +122,11 @@ Then path-based operations:
 - `t_read` / `t_write`
 - `t_clunk` for fid cleanup
 
-Chat currently uses capability path:
+Chat currently uses canonical namespace paths:
 
-- write prompt to `/capabilities/chat/control/input`
-- read result from `/jobs/<job>/result.txt`
-- resume from `/jobs/<job>/status.json` after reconnect when needed
+- write prompt to `/global/chat/control/input`
+- read result from `/global/jobs/<job>/result.txt`
+- resume from `/global/jobs/<job>/status.json` after reconnect when needed
 
 ## Current Limitations
 

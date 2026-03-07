@@ -201,8 +201,7 @@ pub const DiagnosticAppState = struct {
             const msg_type = msg_obj.get("type");
             if (msg_type) |mt| {
                 if (mt == .string) {
-                    if (std.mem.eql(u8, mt.string, "chat.receive") or 
-                        std.mem.eql(u8, mt.string, "session.receive")) {
+                    if (std.mem.eql(u8, mt.string, "session.receive")) {
                         if (msg_obj.get("content")) |content| {
                             if (content == .string) {
                                 const msg = Message{
