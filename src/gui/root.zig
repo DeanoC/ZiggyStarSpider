@@ -1590,7 +1590,7 @@ const App = struct {
             const terminal_started_ns = std.time.nanoTimestamp();
             self.pollTerminalSession();
             const terminal_elapsed_ns = std.time.nanoTimestamp() - terminal_started_ns;
-            if (self.pending_send_job_id != null and self.ws_client != null) {
+            if (self.pending_send_job_id != null and self.ws_client != null and self.pending_send_resume_notified) {
                 _ = self.tryResumePendingSendJob() catch {};
             }
             const frame_elapsed_ns = std.time.nanoTimestamp() - frame_started_ns;
@@ -3735,6 +3735,7 @@ const App = struct {
         if (!self.debug_stream_enabled) return;
         if (self.connection_state != .connected) return;
         if (self.filesystem_active_request != null) return;
+        if (self.awaiting_reply or self.pending_send_job_id != null) return;
         if (!self.debug_stream_snapshot_pending) return;
 
         const now = std.time.milliTimestamp();
@@ -3754,6 +3755,7 @@ const App = struct {
         if (!self.node_service_watch_enabled) return;
         if (self.connection_state != .connected) return;
         if (self.filesystem_active_request != null) return;
+        if (self.awaiting_reply or self.pending_send_job_id != null) return;
         if (!self.node_service_snapshot_pending) return;
 
         const now = std.time.milliTimestamp();
@@ -4799,6 +4801,9 @@ const App = struct {
         open_after_resolve: bool,
         is_background: bool,
     ) !void {
+        if (is_background and (self.awaiting_reply or self.pending_send_job_id != null)) {
+            return error.Busy;
+        }
         if (self.filesystem_active_request != null) return error.Busy;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         const request_id = self.filesystem_next_request_id;
@@ -8728,6 +8733,7 @@ const App = struct {
         if (!self.terminal_auto_poll) return;
         if (self.terminal_session_id == null) return;
         if (self.ws_client == null) return;
+        if (self.awaiting_reply or self.pending_send_job_id != null) return;
 
         const now_ms = std.time.milliTimestamp();
         if (now_ms < self.terminal_next_poll_at_ms) return;
@@ -12848,12 +12854,25 @@ const App = struct {
         project_id: ?[]const u8,
         project_token: ?[]const u8,
     ) !void {
+        std.log.info(
+            "[GUI] attachSessionBindingWithProject: session={s} project={s} token={} state={s}",
+            .{
+                session_key,
+                project_id orelse "(none)",
+                normalizeProjectToken(project_token) != null,
+                @tagName(self.session_attach_state),
+            },
+        );
         const resolved_agent = try self.resolveAttachAgentForProject(
             client,
             session_key,
             project_id,
         );
         defer self.allocator.free(resolved_agent);
+        std.log.info(
+            "[GUI] attachSessionBindingWithProject: resolved_agent={s} project={s}",
+            .{ resolved_agent, project_id orelse "(none)" },
+        );
 
         const payload_json = try self.buildSessionAttachPayload(
             session_key,
@@ -12901,10 +12920,24 @@ const App = struct {
                     );
                 }
             }
+            std.log.err(
+                "[GUI] attachSessionBindingWithProject failed: session={s} project={s} agent={s} err={s} detail={s}",
+                .{
+                    session_key,
+                    project_id orelse "(none)",
+                    resolved_agent,
+                    @errorName(err),
+                    if (err == error.RemoteError) (control_plane.lastRemoteError() orelse "(none)") else "(none)",
+                },
+            );
             return err;
         };
         defer self.allocator.free(response_payload);
 
+        std.log.info(
+            "[GUI] attachSessionBindingWithProject ok: session={s} project={s} agent={s}",
+            .{ session_key, project_id orelse "(none)", resolved_agent },
+        );
         self.invalidateFsrpcAttachment();
         if (self.debug_stream_enabled) self.requestDebugStreamSnapshot(true);
         if (self.node_service_watch_enabled) self.requestNodeServiceSnapshot(true);
@@ -13187,6 +13220,9 @@ const App = struct {
             }
         }
 
+        if (had_pending_send) {
+            self.pending_send_resume_notified = true;
+        }
         if (had_pending_send and try self.tryResumePendingSendJob()) {
             try self.appendMessage("system", "Reconnected to Spiderweb and resumed pending job.", null);
         } else if (had_pending_send) {
@@ -13627,6 +13663,10 @@ const App = struct {
             return;
         }
         const attach_project_id = self.preferredAttachProjectId();
+        std.log.info(
+            "[GUI] sendChatMessageText: session={s} project={s} attach_state={s}",
+            .{ session_key, attach_project_id orelse "(none)", @tagName(self.session_attach_state) },
+        );
         var attached_during_send = false;
         if (self.session_attach_state == .unknown or self.session_attach_state == .err or self.session_attach_state == .warming) {
             self.attachSessionBinding(client, session_key) catch |err| {
@@ -13668,6 +13708,10 @@ const App = struct {
             };
             attached_during_send = true;
             self.refreshSessionAttachStatusOnce(client, session_key);
+            std.log.info(
+                "[GUI] sendChatMessageText: attach completed session={s} state={s}",
+                .{ session_key, @tagName(self.session_attach_state) },
+            );
         }
         if (self.session_attach_state == .err) {
             const detail = self.workspace_last_error orelse "Sandbox runtime is unavailable for this session.";
@@ -13693,6 +13737,10 @@ const App = struct {
         }
         self.pending_send_request_id = try self.allocator.dupe(u8, request_id);
         self.awaiting_reply = true;
+        std.log.info(
+            "[GUI] sendChatMessageText: submit request_id={s} session={s}",
+            .{ request_id, session_key },
+        );
 
         const job_id = self.submitChatJobViaFsrpc(client, text) catch |err| {
             std.log.err("[GUI] sendChatMessageText: fsrpc submit failed: {s}", .{@errorName(err)});
@@ -13718,6 +13766,10 @@ const App = struct {
             self.clearPendingSend();
             return err;
         };
+        std.log.info(
+            "[GUI] sendChatMessageText: submit ok request_id={s} job_id={s}",
+            .{ request_id, job_id },
+        );
         if (self.pending_send_job_id) |value| {
             self.allocator.free(value);
             self.pending_send_job_id = null;
@@ -13745,6 +13797,21 @@ const App = struct {
         return fid;
     }
 
+    fn fsrpcRequestTypeForLog(request_json: []const u8) []const u8 {
+        inline for ([_][]const u8{
+            "acheron.t_version",
+            "acheron.t_attach",
+            "acheron.t_walk",
+            "acheron.t_open",
+            "acheron.t_read",
+            "acheron.t_write",
+            "acheron.t_clunk",
+        }) |needle| {
+            if (std.mem.indexOf(u8, request_json, needle) != null) return needle;
+        }
+        return "unknown";
+    }
+
     fn sendAndAwaitFsrpc(
         self: *App,
         client: *ws_client_mod.WebSocketClient,
@@ -13752,12 +13819,43 @@ const App = struct {
         tag: u32,
         timeout_ms: u32,
     ) !FsrpcEnvelope {
-        try client.send(request_json);
-        const raw = try client.awaitAcheronFrame(tag, timeout_ms) orelse return error.Timeout;
+        const req_type = fsrpcRequestTypeForLog(request_json);
+        std.log.info(
+            "[GUI][FSRPC] send type={s} tag={d} timeout_ms={d}",
+            .{ req_type, tag, timeout_ms },
+        );
+        client.send(request_json) catch |err| {
+            std.log.err(
+                "[GUI][FSRPC] send failed type={s} tag={d} err={s}",
+                .{ req_type, tag, @errorName(err) },
+            );
+            return err;
+        };
+        const raw = client.awaitAcheronFrame(tag, timeout_ms) catch |err| {
+            std.log.err(
+                "[GUI][FSRPC] await failed type={s} tag={d} err={s} alive={}",
+                .{ req_type, tag, @errorName(err), client.isAlive() },
+            );
+            return err;
+        } orelse {
+            std.log.err(
+                "[GUI][FSRPC] await timeout type={s} tag={d} alive={}",
+                .{ req_type, tag, client.isAlive() },
+            );
+            return error.Timeout;
+        };
         const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, raw, .{}) catch {
+            std.log.err(
+                "[GUI][FSRPC] parse failed type={s} tag={d}",
+                .{ req_type, tag },
+            );
             self.allocator.free(raw);
             return error.InvalidResponse;
         };
+        std.log.info(
+            "[GUI][FSRPC] recv type={s} tag={d} bytes={d} alive={}",
+            .{ req_type, tag, raw.len, client.isAlive() },
+        );
         if (!client.isAlive()) {
             self.fsrpc_ready = false;
         }
@@ -13820,8 +13918,10 @@ const App = struct {
         if (detail) |value| {
             defer self.allocator.free(value);
             self.setFsrpcRemoteError(value);
+            std.log.warn("[GUI][FSRPC] remote error: {s}", .{value});
         } else {
             self.setFsrpcRemoteError("remote fsrpc error");
+            std.log.warn("[GUI][FSRPC] remote error: remote fsrpc error", .{});
         }
         if (runtime_warming) {
             self.session_attach_state = .unknown;
@@ -13842,13 +13942,19 @@ const App = struct {
     }
 
     fn fsrpcBootstrapGui(self: *App, client: *ws_client_mod.WebSocketClient) !void {
-        if (self.fsrpc_ready) return;
+        if (self.fsrpc_ready) {
+            std.log.info("[GUI][FSRPC] bootstrap skipped: already ready", .{});
+            return;
+        }
+
+        std.log.info("[GUI][FSRPC] bootstrap start", .{});
 
         try control_plane.ensureUnifiedV2Connection(
             self.allocator,
             client,
             &self.message_counter,
         );
+        std.log.info("[GUI][FSRPC] unified-v2 ready", .{});
 
         const version_tag = self.nextFsrpcTag();
         const version_req = try std.fmt.allocPrint(
@@ -13860,6 +13966,7 @@ const App = struct {
         var version = try self.sendAndAwaitFsrpc(client, version_req, version_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer version.deinit(self.allocator);
         try self.ensureFsrpcOk(&version);
+        std.log.info("[GUI][FSRPC] version ok tag={d}", .{version_tag});
 
         const attach_tag = self.nextFsrpcTag();
         const attach_req = try std.fmt.allocPrint(
@@ -13872,6 +13979,7 @@ const App = struct {
         defer attach.deinit(self.allocator);
         try self.ensureFsrpcOk(&attach);
         self.fsrpc_ready = true;
+        std.log.info("[GUI][FSRPC] bootstrap ready attach_tag={d}", .{attach_tag});
     }
 
     fn fsrpcClunkBestEffort(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) void {
@@ -13947,6 +14055,10 @@ const App = struct {
         for (path_templates) |template| {
             const path_json = try std.fmt.allocPrint(self.allocator, template, .{escaped_job});
             defer self.allocator.free(path_json);
+            std.log.info(
+                "[GUI][FSRPC] walk job result fid={d} path={s}",
+                .{ fid, path_json },
+            );
             const walk_tag = self.nextFsrpcTag();
             const walk_req = try std.fmt.allocPrint(
                 self.allocator,
@@ -13957,19 +14069,29 @@ const App = struct {
             var walk = try self.sendAndAwaitFsrpc(client, walk_req, walk_tag, FSRPC_DEFAULT_TIMEOUT_MS);
             defer walk.deinit(self.allocator);
             self.ensureFsrpcOk(&walk) catch |err| {
+                std.log.warn(
+                    "[GUI][FSRPC] walk job result failed fid={d} path={s} err={s}",
+                    .{ fid, path_json, @errorName(err) },
+                );
                 last_err = err;
                 continue;
             };
+            std.log.info(
+                "[GUI][FSRPC] walk job result ok fid={d} path={s}",
+                .{ fid, path_json },
+            );
             return;
         }
         return last_err;
     }
 
     fn submitChatJobViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
+        std.log.info("[GUI][FSRPC] submitChatJobViaFsrpc start text_len={d}", .{text.len});
         try self.fsrpcBootstrapGui(client);
 
         const input_fid = self.nextFsrpcFid();
         defer self.fsrpcClunkBestEffort(client, input_fid);
+        std.log.info("[GUI][FSRPC] chat input fid={d}", .{input_fid});
         try self.walkChatInputPath(client, input_fid);
 
         const open_input_tag = self.nextFsrpcTag();
@@ -13982,6 +14104,7 @@ const App = struct {
         var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
         defer open_input.deinit(self.allocator);
         try self.ensureFsrpcOk(&open_input);
+        std.log.info("[GUI][FSRPC] chat input open ok fid={d}", .{input_fid});
 
         const encoded = try encodeDataB64(self.allocator, text);
         defer self.allocator.free(encoded);
@@ -14010,6 +14133,10 @@ const App = struct {
         const write_payload = try self.getFsrpcPayloadObject(write.parsed.value.object);
         const job_value = write_payload.get("job") orelse return error.InvalidResponse;
         if (job_value != .string) return error.InvalidResponse;
+        std.log.info(
+            "[GUI][FSRPC] chat write ok fid={d} request_id={s} job={s}",
+            .{ input_fid, write_request_id, job_value.string },
+        );
         return self.allocator.dupe(u8, job_value.string);
     }
 
@@ -14021,6 +14148,10 @@ const App = struct {
         };
         var last_err: anyerror = error.FileNotFound;
         for (paths) |path_json| {
+            std.log.info(
+                "[GUI][FSRPC] walk chat input fid={d} path={s}",
+                .{ fid, path_json },
+            );
             const walk_tag = self.nextFsrpcTag();
             const walk_req = try std.fmt.allocPrint(
                 self.allocator,
@@ -14031,9 +14162,17 @@ const App = struct {
             var walk = try self.sendAndAwaitFsrpc(client, walk_req, walk_tag, FSRPC_DEFAULT_TIMEOUT_MS);
             defer walk.deinit(self.allocator);
             self.ensureFsrpcOk(&walk) catch |err| {
+                std.log.warn(
+                    "[GUI][FSRPC] walk chat input failed fid={d} path={s} err={s}",
+                    .{ fid, path_json, @errorName(err) },
+                );
                 last_err = err;
                 continue;
             };
+            std.log.info(
+                "[GUI][FSRPC] walk chat input ok fid={d} path={s}",
+                .{ fid, path_json },
+            );
             return;
         }
         return last_err;
@@ -14406,12 +14545,14 @@ const App = struct {
     fn tryResumePendingSendJob(self: *App) !bool {
         const job_id = self.pending_send_job_id orelse return false;
         const client = if (self.ws_client) |*value| value else return false;
+        if (!self.pending_send_resume_notified) return false;
 
         const now_ms = std.time.milliTimestamp();
         if (self.pending_send_last_resume_attempt_ms != 0 and now_ms - self.pending_send_last_resume_attempt_ms < 1_500) {
             return false;
         }
         self.pending_send_last_resume_attempt_ms = now_ms;
+        std.log.info("[GUI] tryResumePendingSendJob: job_id={s}", .{job_id});
 
         try self.fsrpcBootstrapGui(client);
         var status = try self.readJobStatusGui(client, job_id);
