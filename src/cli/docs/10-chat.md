@@ -7,10 +7,15 @@ Send a message to the AI assistant.
 **Arguments:**
 - `message` - The message text to send
 
+**Flags:**
+- `--no-thoughts` - Suppress live thought progress lines while waiting
+- `--quiet-progress` - Suppress live state/thought progress lines while waiting
+
 **Examples:**
 ```bash
 spider chat send "Hello!"
 spider chat send "What's the status of the project?"
+spider chat send --no-thoughts "Summarize the latest changes"
 ```
 
 **Interactive mode:**
@@ -37,8 +42,13 @@ spider chat history --limit 20
 
 Inspect queued/running/done chat jobs and resume by job id.
 
+**Flags:**
+- `--no-thoughts` - Suppress thought progress while waiting on a running job
+- `--quiet-progress` - Suppress live state/thought progress while waiting
+
 **Examples:**
 ```bash
 spider chat resume
 spider chat resume job-12
+spider chat resume --quiet-progress job-12
 ```

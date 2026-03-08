@@ -5,6 +5,7 @@ const ws_client_mod = @import("websocket_client.zig");
 const config_mod = @import("client-config");
 const credential_store_mod = config_mod.credential_store;
 const control_plane = @import("control_plane");
+const venom_bindings = @import("../client/venom_bindings.zig");
 const build_options = @import("build_options");
 const workspace_types = control_plane.workspace_types;
 const panels_bridge = @import("panels_bridge.zig");
@@ -262,6 +263,23 @@ const JobStatusInfo = struct {
     fn deinit(self: *JobStatusInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.state);
         if (self.error_text) |value| allocator.free(value);
+        if (self.correlation_id) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+const ScopedChatBindingPaths = venom_bindings.ChatBindingPaths;
+
+const SubmitChatJobResult = struct {
+    job_id: []u8,
+    jobs_root: []u8,
+    thoughts_root: []u8,
+    correlation_id: ?[]u8 = null,
+
+    fn deinit(self: *SubmitChatJobResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.job_id);
+        allocator.free(self.jobs_root);
+        allocator.free(self.thoughts_root);
         if (self.correlation_id) |value| allocator.free(value);
         self.* = undefined;
     }
@@ -914,7 +932,11 @@ const App = struct {
     pending_send_message_id: ?[]const u8 = null,
     pending_send_session_key: ?[]const u8 = null,
     pending_send_job_id: ?[]u8 = null,
+    pending_send_jobs_root: ?[]u8 = null,
+    pending_send_thoughts_root: ?[]u8 = null,
     pending_send_correlation_id: ?[]u8 = null,
+    pending_send_thought_message_id: ?[]u8 = null,
+    pending_send_last_thought_text: ?[]u8 = null,
     pending_send_resume_notified: bool = false,
     pending_send_last_resume_attempt_ms: i64 = 0,
     pending_send_started_at_ms: i64 = 0,
@@ -1380,7 +1402,11 @@ const App = struct {
         if (self.pending_send_message_id) |message_id| self.allocator.free(message_id);
         if (self.pending_send_session_key) |session_key| self.allocator.free(session_key);
         if (self.pending_send_job_id) |job_id| self.allocator.free(job_id);
+        if (self.pending_send_jobs_root) |jobs_root| self.allocator.free(jobs_root);
+        if (self.pending_send_thoughts_root) |thoughts_root| self.allocator.free(thoughts_root);
         if (self.pending_send_correlation_id) |corr| self.allocator.free(corr);
+        if (self.pending_send_thought_message_id) |message_id| self.allocator.free(message_id);
+        if (self.pending_send_last_thought_text) |thought| self.allocator.free(thought);
         self.clearFilesystemData();
         self.clearFilesystemDirCache();
         self.filesystem_path.deinit(self.allocator);
@@ -12834,7 +12860,7 @@ const App = struct {
         self.pending_send_request_id = try self.allocator.dupe(u8, request_id);
         self.awaiting_reply = true;
 
-        const job_id = self.submitChatJobViaFsrpc(client, text) catch |err| {
+        var submit = self.submitChatJobViaFsrpc(client, text) catch |err| {
             std.log.err("[GUI] sendChatMessageText: fsrpc submit failed: {s}", .{@errorName(err)});
             const remote_detail = if (err == error.RemoteError)
                 (control_plane.lastRemoteError() orelse (self.fsrpc_last_remote_error orelse @errorName(err)))
@@ -12862,7 +12888,18 @@ const App = struct {
             self.allocator.free(value);
             self.pending_send_job_id = null;
         }
-        self.pending_send_job_id = job_id;
+        if (self.pending_send_jobs_root) |value| {
+            self.allocator.free(value);
+            self.pending_send_jobs_root = null;
+        }
+        if (self.pending_send_correlation_id) |value| {
+            self.allocator.free(value);
+            self.pending_send_correlation_id = null;
+        }
+        self.pending_send_job_id = submit.job_id;
+        self.pending_send_jobs_root = submit.jobs_root;
+        self.pending_send_thoughts_root = submit.thoughts_root;
+        self.pending_send_correlation_id = submit.correlation_id;
     }
 
     fn nextFsrpcTag(self: *App) u32 {
@@ -13028,15 +13065,19 @@ const App = struct {
     }
 
     fn sendChatViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
-        const job_name_owned = try self.submitChatJobViaFsrpc(client, text);
-        defer self.allocator.free(job_name_owned);
+        var submit = try self.submitChatJobViaFsrpc(client, text);
+        defer submit.deinit(self.allocator);
 
         const result_fid = self.nextFsrpcFid();
         defer self.fsrpcClunkBestEffort(client, result_fid);
 
-        const escaped_job = try jsonEscape(self.allocator, job_name_owned);
-        defer self.allocator.free(escaped_job);
-        try self.walkJobResultPath(client, result_fid, escaped_job);
+        const result_path = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/{s}/result.txt",
+            .{ submit.jobs_root, submit.job_id },
+        );
+        defer self.allocator.free(result_path);
+        try self.walkPathGui(client, result_fid, result_path);
 
         const open_result_tag = self.nextFsrpcTag();
         const open_result_req = try std.fmt.allocPrint(
@@ -13072,45 +13113,14 @@ const App = struct {
         return decoded;
     }
 
-    fn walkJobResultPath(
-        self: *App,
-        client: *ws_client_mod.WebSocketClient,
-        fid: u32,
-        escaped_job: []const u8,
-    ) !void {
-        const path_templates = [_][]const u8{
-            "[\"jobs\",\"{s}\",\"result.txt\"]",
-            "[\"global\",\"jobs\",\"{s}\",\"result.txt\"]",
-            "[\"agents\",\"self\",\"jobs\",\"{s}\",\"result.txt\"]",
-        };
-        var last_err: anyerror = error.FileNotFound;
-        for (path_templates) |template| {
-            const path_json = try std.fmt.allocPrint(self.allocator, template, .{escaped_job});
-            defer self.allocator.free(path_json);
-            const walk_tag = self.nextFsrpcTag();
-            const walk_req = try std.fmt.allocPrint(
-                self.allocator,
-                "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
-                .{ walk_tag, fid, path_json },
-            );
-            defer self.allocator.free(walk_req);
-            var walk = try self.sendAndAwaitFsrpc(client, walk_req, walk_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-            defer walk.deinit(self.allocator);
-            self.ensureFsrpcOk(&walk) catch |err| {
-                last_err = err;
-                continue;
-            };
-            return;
-        }
-        return last_err;
-    }
-
-    fn submitChatJobViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
+    fn submitChatJobViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) !SubmitChatJobResult {
         try self.fsrpcBootstrapGui(client);
+        var chat_paths = try self.discoverScopedChatBindingPathsGui(client);
+        defer chat_paths.deinit(self.allocator);
 
         const input_fid = self.nextFsrpcFid();
         defer self.fsrpcClunkBestEffort(client, input_fid);
-        try self.walkChatInputPath(client, input_fid);
+        try self.walkPathGui(client, input_fid, chat_paths.input_path);
 
         const open_input_tag = self.nextFsrpcTag();
         const open_input_req = try std.fmt.allocPrint(
@@ -13150,33 +13160,33 @@ const App = struct {
         const write_payload = try self.getFsrpcPayloadObject(write.parsed.value.object);
         const job_value = write_payload.get("job") orelse return error.InvalidResponse;
         if (job_value != .string) return error.InvalidResponse;
-        return self.allocator.dupe(u8, job_value.string);
+        return .{
+            .job_id = try self.allocator.dupe(u8, job_value.string),
+            .jobs_root = try self.allocator.dupe(u8, chat_paths.jobs_root),
+            .thoughts_root = try self.allocator.dupe(u8, chat_paths.thoughts_root),
+            .correlation_id = if (write_payload.get("correlation_id")) |value|
+                if (value == .string and value.string.len > 0) try self.allocator.dupe(u8, value.string) else null
+            else
+                null,
+        };
     }
 
-    fn walkChatInputPath(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) !void {
-        const paths = [_][]const u8{
-            "[\"global\",\"chat\",\"control\",\"input\"]",
-            "[\"capabilities\",\"chat\",\"control\",\"input\"]",
-            "[\"agents\",\"self\",\"chat\",\"control\",\"input\"]",
-        };
-        var last_err: anyerror = error.FileNotFound;
-        for (paths) |path_json| {
-            const walk_tag = self.nextFsrpcTag();
-            const walk_req = try std.fmt.allocPrint(
-                self.allocator,
-                "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
-                .{ walk_tag, fid, path_json },
-            );
-            defer self.allocator.free(walk_req);
-            var walk = try self.sendAndAwaitFsrpc(client, walk_req, walk_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-            defer walk.deinit(self.allocator);
-            self.ensureFsrpcOk(&walk) catch |err| {
-                last_err = err;
-                continue;
-            };
-            return;
-        }
-        return last_err;
+    fn walkPathGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32, path: []const u8) !void {
+        var segments = try self.splitFsPathSegments(path);
+        defer self.freeFsPathSegments(&segments);
+        const path_json = try self.buildPathArrayJsonGui(segments.items);
+        defer self.allocator.free(path_json);
+
+        const walk_tag = self.nextFsrpcTag();
+        const walk_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+            .{ walk_tag, fid, path_json },
+        );
+        defer self.allocator.free(walk_req);
+        var walk = try self.sendAndAwaitFsrpc(client, walk_req, walk_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer walk.deinit(self.allocator);
+        try self.ensureFsrpcOk(&walk);
     }
 
     fn splitFsPathSegments(self: *App, path: []const u8) !std.ArrayListUnmanaged([]u8) {
@@ -13341,6 +13351,26 @@ const App = struct {
         try self.fsrpcWriteTextGui(client, fid, content);
     }
 
+    fn discoverScopedChatBindingPathsGui(self: *App, client: *ws_client_mod.WebSocketClient) !ScopedChatBindingPaths {
+        const GuiFsPathReader = struct {
+            app: *App,
+            client: *ws_client_mod.WebSocketClient,
+
+            pub fn readText(reader: @This(), path: []const u8) ![]u8 {
+                return reader.app.readFsPathTextGui(reader.client, path);
+            }
+        };
+
+        return venom_bindings.discoverChatBindingPaths(
+            self.allocator,
+            GuiFsPathReader{ .app = self, .client = client },
+            .{
+                .agent_id = self.selectedAgentId(),
+                .project_id = self.selectedProjectId(),
+            },
+        );
+    }
+
     fn joinFilesystemPath(self: *App, parent: []const u8, child: []const u8) ![]u8 {
         if (std.mem.eql(u8, parent, "/")) return std.fmt.allocPrint(self.allocator, "/{s}", .{child});
         if (std.mem.endsWith(u8, parent, "/")) return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ parent, child });
@@ -13381,8 +13411,8 @@ const App = struct {
         return out;
     }
 
-    fn readJobStatusGui(self: *App, client: *ws_client_mod.WebSocketClient, job_id: []const u8) !JobStatusInfo {
-        const raw = try self.readJobArtifactTextGui(client, job_id, "status.json");
+    fn readJobStatusGui(self: *App, client: *ws_client_mod.WebSocketClient, jobs_root: []const u8, job_id: []const u8) !JobStatusInfo {
+        const raw = try self.readJobArtifactTextGui(client, jobs_root, job_id, "status.json");
         defer self.allocator.free(raw);
         return self.parseJobStatusInfo(raw);
     }
@@ -13390,9 +13420,16 @@ const App = struct {
     fn readJobArtifactTextGui(
         self: *App,
         client: *ws_client_mod.WebSocketClient,
+        jobs_root: []const u8,
         job_id: []const u8,
         leaf: []const u8,
     ) ![]u8 {
+        const scoped_jobs_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}/{s}", .{ jobs_root, job_id, leaf });
+        defer self.allocator.free(scoped_jobs_path);
+        if (self.readFsPathTextGui(client, scoped_jobs_path) catch null) |raw| {
+            return raw;
+        }
+
         const jobs_path = try std.fmt.allocPrint(self.allocator, "/jobs/{s}/{s}", .{ job_id, leaf });
         defer self.allocator.free(jobs_path);
         if (self.readFsPathTextGui(client, jobs_path) catch null) |raw| {
@@ -13474,9 +13511,70 @@ const App = struct {
         return replayed;
     }
 
+    fn extractLatestThoughtFromJobLog(self: *App, log_text: []const u8) !?[]u8 {
+        var latest: ?[]u8 = null;
+        errdefer if (latest) |value| self.allocator.free(value);
+
+        var lines = std.mem.splitScalar(u8, log_text, '\n');
+        while (lines.next()) |line_raw| {
+            const line = std.mem.trim(u8, line_raw, " \t\r\n");
+            if (line.len == 0 or line[0] != '{') continue;
+
+            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value != .object) continue;
+            const root = parsed.value.object;
+            const type_val = root.get("type") orelse continue;
+            if (type_val != .string or !std.mem.eql(u8, type_val.string, "agent.thought")) continue;
+            const content_val = root.get("content") orelse continue;
+            if (content_val != .string) continue;
+            const thought = std.mem.trim(u8, content_val.string, " \t\r\n");
+            if (thought.len == 0) continue;
+
+            if (latest) |value| self.allocator.free(value);
+            latest = try self.allocator.dupe(u8, thought);
+        }
+
+        return latest;
+    }
+
+    fn syncPendingThoughtFromJobLog(self: *App, session_key: []const u8, log_text: []const u8) !void {
+        const latest_thought = try self.extractLatestThoughtFromJobLog(log_text);
+        defer if (latest_thought) |value| self.allocator.free(value);
+        try self.syncPendingThoughtText(session_key, latest_thought);
+    }
+
+    fn syncPendingThoughtText(self: *App, session_key: []const u8, latest_thought: ?[]const u8) !void {
+        const thought = latest_thought orelse return;
+
+        if (self.pending_send_last_thought_text) |previous| {
+            if (std.mem.eql(u8, previous, thought)) return;
+            self.allocator.free(previous);
+            self.pending_send_last_thought_text = null;
+        }
+        self.pending_send_last_thought_text = try self.allocator.dupe(u8, thought);
+
+        if (self.pending_send_thought_message_id) |message_id| {
+            if (self.findMessageIndex(session_key, message_id)) |idx| {
+                try self.setMessageContentByIndex(session_key, idx, thought);
+                return;
+            }
+            self.allocator.free(message_id);
+            self.pending_send_thought_message_id = null;
+        }
+
+        const appended_id = try self.appendMessageWithIdForSession(session_key, "thought", thought, null, "");
+        self.pending_send_thought_message_id = @constCast(appended_id);
+    }
+
     fn tryResumePendingSendJob(self: *App) !bool {
         const job_id = self.pending_send_job_id orelse return false;
+        const jobs_root = self.pending_send_jobs_root orelse "/global/jobs";
         const client = if (self.ws_client) |*value| value else return false;
+        const session_key = if (self.pending_send_session_key) |value|
+            value
+        else
+            try self.currentSessionOrDefault();
 
         const now_ms = std.time.milliTimestamp();
         if (self.pending_send_last_resume_attempt_ms != 0 and now_ms - self.pending_send_last_resume_attempt_ms < 1_500) {
@@ -13485,20 +13583,40 @@ const App = struct {
         self.pending_send_last_resume_attempt_ms = now_ms;
 
         try self.fsrpcBootstrapGui(client);
-        var status = try self.readJobStatusGui(client, job_id);
+        var status = try self.readJobStatusGui(client, jobs_root, job_id);
         defer status.deinit(self.allocator);
+
+        const maybe_log = self.readJobArtifactTextGui(client, jobs_root, job_id, "log.txt") catch null;
+        defer if (maybe_log) |value| self.allocator.free(value);
+
+        if (self.pending_send_thoughts_root) |thoughts_root| {
+            const latest_path = try std.fmt.allocPrint(self.allocator, "{s}/latest.txt", .{thoughts_root});
+            defer self.allocator.free(latest_path);
+            const latest_thought_text = self.readFsPathTextGui(client, latest_path) catch null;
+            defer if (latest_thought_text) |value| self.allocator.free(value);
+            if (latest_thought_text) |value| {
+                const trimmed = std.mem.trim(u8, value, " \t\r\n");
+                try self.syncPendingThoughtText(session_key, if (trimmed.len > 0) trimmed else null);
+            } else if (maybe_log) |log_text| {
+                try self.syncPendingThoughtFromJobLog(session_key, log_text);
+            }
+        } else if (maybe_log) |log_text| {
+            try self.syncPendingThoughtFromJobLog(session_key, log_text);
+        }
+
+        if (maybe_log) |log_text| {
+            try self.ingestDebugEventsFromJobLog(log_text);
+        }
 
         if (!std.mem.eql(u8, status.state, "done") and !std.mem.eql(u8, status.state, "failed")) {
             return false;
         }
 
-        const result = self.readJobArtifactTextGui(client, job_id, "result.txt") catch |err| blk: {
+        const result = self.readJobArtifactTextGui(client, jobs_root, job_id, "result.txt") catch |err| blk: {
             const msg = try std.fmt.allocPrint(self.allocator, "resume read failed: {s}", .{@errorName(err)});
             break :blk msg;
         };
         defer self.allocator.free(result);
-        const maybe_log = self.readJobArtifactTextGui(client, job_id, "log.txt") catch null;
-        defer if (maybe_log) |value| self.allocator.free(value);
 
         if (std.mem.eql(u8, status.state, "failed")) {
             if (self.pending_send_message_id) |message_id| {
@@ -13520,10 +13638,6 @@ const App = struct {
         if (self.pending_send_message_id) |message_id| {
             try self.setMessageState(message_id, null);
         }
-        const session_key = if (self.pending_send_session_key) |value|
-            value
-        else
-            try self.currentSessionOrDefault();
         if (maybe_log) |log_text| {
             const replayed = try self.replaySessionReceiveFromJobLog(session_key, log_text);
             if (!replayed) {
@@ -13557,9 +13671,22 @@ const App = struct {
             allocator.free(value);
             self.pending_send_job_id = null;
         }
+        if (self.pending_send_jobs_root) |value| {
+            allocator.free(value);
+            self.pending_send_jobs_root = null;
+        }
+        if (self.pending_send_thoughts_root) |value| {
+            allocator.free(value);
+            self.pending_send_thoughts_root = null;
+        }
         if (self.pending_send_correlation_id) |value| {
             allocator.free(value);
             self.pending_send_correlation_id = null;
+        }
+        self.clearPendingThoughtMessage();
+        if (self.pending_send_last_thought_text) |value| {
+            allocator.free(value);
+            self.pending_send_last_thought_text = null;
         }
         self.pending_send_message_id = try allocator.dupe(u8, message_id);
         self.pending_send_session_key = try allocator.dupe(u8, session_key);
@@ -13569,6 +13696,7 @@ const App = struct {
     }
 
     fn clearPendingSend(self: *App) void {
+        self.clearPendingThoughtMessage();
         if (self.pending_send_request_id) |value| {
             self.allocator.free(value);
             for (self.session_messages.items) |*state| {
@@ -13592,9 +13720,22 @@ const App = struct {
             self.allocator.free(value);
             self.pending_send_job_id = null;
         }
+        if (self.pending_send_jobs_root) |value| {
+            self.allocator.free(value);
+            self.pending_send_jobs_root = null;
+        }
+        if (self.pending_send_thoughts_root) |value| {
+            self.allocator.free(value);
+            self.pending_send_thoughts_root = null;
+        }
         if (self.pending_send_correlation_id) |value| {
             self.allocator.free(value);
             self.pending_send_correlation_id = null;
+        }
+        self.clearPendingThoughtMessage();
+        if (self.pending_send_last_thought_text) |value| {
+            self.allocator.free(value);
+            self.pending_send_last_thought_text = null;
         }
         self.pending_send_resume_notified = false;
         self.pending_send_last_resume_attempt_ms = 0;
@@ -14501,6 +14642,23 @@ const App = struct {
         return null;
     }
 
+    fn removeMessageById(self: *App, session_key: []const u8, message_id: []const u8) void {
+        const state = self.findSessionMessageState(session_key) orelse return;
+        const idx = self.findMessageIndex(session_key, message_id) orelse return;
+        var removed = state.messages.orderedRemove(idx);
+        self.freeMessage(&removed);
+    }
+
+    fn clearPendingThoughtMessage(self: *App) void {
+        if (self.pending_send_thought_message_id) |message_id| {
+            if (self.pending_send_session_key) |session_key| {
+                self.removeMessageById(session_key, message_id);
+            }
+            self.allocator.free(message_id);
+            self.pending_send_thought_message_id = null;
+        }
+    }
+
     fn appendMessage(self: *App, role: []const u8, content: []const u8, local_state: ?ChatMessageState) !void {
         const session_key = try self.currentSessionOrDefault();
         const id = try self.appendMessageWithIdForSession(session_key, role, content, local_state, "");
@@ -14690,6 +14848,15 @@ const App = struct {
         while (iter.next()) |raw_line| {
             const line = std.mem.trim(u8, raw_line, " \t\r\n");
             if (line.len == 0) continue;
+            try self.ingestDebugStreamLine(line);
+        }
+    }
+
+    fn ingestDebugEventsFromJobLog(self: *App, log_text: []const u8) !void {
+        var iter = std.mem.splitScalar(u8, log_text, '\n');
+        while (iter.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, " \t\r\n");
+            if (line.len == 0 or line[0] != '{') continue;
             try self.ingestDebugStreamLine(line);
         }
     }
@@ -15528,6 +15695,23 @@ fn extractCorrelationId(root: std.json.ObjectMap, payload: ?std.json.ObjectMap) 
         }
     }
     return App.extractRequestId(root, payload);
+}
+
+test "gui root: extractLatestThoughtFromJobLog returns latest agent thought" {
+    const allocator = std.testing.allocator;
+
+    var app: App = undefined;
+    app.allocator = allocator;
+
+    const latest = try app.extractLatestThoughtFromJobLog(
+        \\{"type":"debug.event","category":"ignored","payload":{"x":1}}
+        \\{"type":"agent.thought","content":"first draft","source":"thinking","round":1}
+        \\{"type":"agent.thought","content":"second draft","source":"thinking","round":2}
+    );
+    defer if (latest) |value| allocator.free(value);
+
+    try std.testing.expect(latest != null);
+    try std.testing.expectEqualStrings("second draft", latest.?);
 }
 
 pub export fn zsc_free_icon(pixels: ?*anyopaque) void {

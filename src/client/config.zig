@@ -54,6 +54,21 @@ pub const ProjectWorkspaceLayoutEntry = struct {
     }
 };
 
+pub const AppLocalNodeEntry = struct {
+    profile_id: []const u8,
+    node_name: []const u8,
+    node_id: []const u8,
+    node_secret: []const u8,
+
+    pub fn deinit(self: *AppLocalNodeEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.profile_id);
+        allocator.free(self.node_name);
+        allocator.free(self.node_id);
+        allocator.free(self.node_secret);
+        self.* = undefined;
+    }
+};
+
 pub const Config = struct {
     pub const TokenRole = enum {
         admin,
@@ -80,6 +95,7 @@ pub const Config = struct {
     selected_profile_id: ?[]const u8 = null,
     recent_projects: ?[]RecentProjectEntry = null,
     project_workspace_layout_index: ?[]ProjectWorkspaceLayoutEntry = null,
+    app_local_nodes: ?[]AppLocalNodeEntry = null,
 
     // Update + theme settings
     update_manifest_url: []const u8,
@@ -157,6 +173,11 @@ pub const Config = struct {
             for (entries) |*entry| entry.deinit(self.allocator);
             self.allocator.free(entries);
             self.project_workspace_layout_index = null;
+        }
+        if (self.app_local_nodes) |entries| {
+            for (entries) |*entry| entry.deinit(self.allocator);
+            self.allocator.free(entries);
+            self.app_local_nodes = null;
         }
         if (self.connect_host_override) |value| {
             self.allocator.free(value);
@@ -405,6 +426,63 @@ pub const Config = struct {
             return entry.layout_path;
         }
         return null;
+    }
+
+    pub fn appLocalNode(self: *const Config, profile_id: []const u8) ?*const AppLocalNodeEntry {
+        const entries = self.app_local_nodes orelse return null;
+        for (entries) |*entry| {
+            if (std.mem.eql(u8, entry.profile_id, profile_id)) return entry;
+        }
+        return null;
+    }
+
+    pub fn setAppLocalNode(
+        self: *Config,
+        profile_id: []const u8,
+        node_name: []const u8,
+        node_id: []const u8,
+        node_secret: []const u8,
+    ) !void {
+        if (profile_id.len == 0 or node_name.len == 0 or node_id.len == 0 or node_secret.len == 0) {
+            return error.InvalidProfile;
+        }
+
+        if (self.app_local_nodes) |entries| {
+            for (entries) |*entry| {
+                if (!std.mem.eql(u8, entry.profile_id, profile_id)) continue;
+                const next_name = try self.allocator.dupe(u8, node_name);
+                const next_id = try self.allocator.dupe(u8, node_id);
+                const next_secret = try self.allocator.dupe(u8, node_secret);
+                self.allocator.free(entry.node_name);
+                self.allocator.free(entry.node_id);
+                self.allocator.free(entry.node_secret);
+                entry.node_name = next_name;
+                entry.node_id = next_id;
+                entry.node_secret = next_secret;
+                return;
+            }
+
+            const expanded = try self.allocator.alloc(AppLocalNodeEntry, entries.len + 1);
+            @memcpy(expanded[0..entries.len], entries);
+            expanded[entries.len] = .{
+                .profile_id = try self.allocator.dupe(u8, profile_id),
+                .node_name = try self.allocator.dupe(u8, node_name),
+                .node_id = try self.allocator.dupe(u8, node_id),
+                .node_secret = try self.allocator.dupe(u8, node_secret),
+            };
+            self.allocator.free(entries);
+            self.app_local_nodes = expanded;
+            return;
+        }
+
+        const entries = try self.allocator.alloc(AppLocalNodeEntry, 1);
+        entries[0] = .{
+            .profile_id = try self.allocator.dupe(u8, profile_id),
+            .node_name = try self.allocator.dupe(u8, node_name),
+            .node_id = try self.allocator.dupe(u8, node_id),
+            .node_secret = try self.allocator.dupe(u8, node_secret),
+        };
+        self.app_local_nodes = entries;
     }
 
     pub fn recordRecentProject(
@@ -809,6 +887,32 @@ pub const Config = struct {
         return out;
     }
 
+    fn duplicateOptionalAppLocalNodes(
+        allocator: std.mem.Allocator,
+        values: ?[]const AppLocalNodeJson,
+    ) !?[]AppLocalNodeEntry {
+        if (values == null) return null;
+        const list = values.?;
+        if (list.len == 0) return try allocator.alloc(AppLocalNodeEntry, 0);
+
+        const out = try allocator.alloc(AppLocalNodeEntry, list.len);
+        var written: usize = 0;
+        errdefer {
+            for (0..written) |i| out[i].deinit(allocator);
+            allocator.free(out);
+        }
+        for (list) |entry| {
+            out[written] = .{
+                .profile_id = try allocator.dupe(u8, entry.profile_id),
+                .node_name = try allocator.dupe(u8, entry.node_name),
+                .node_id = try allocator.dupe(u8, entry.node_id),
+                .node_secret = try allocator.dupe(u8, entry.node_secret),
+            };
+            written += 1;
+        }
+        return out;
+    }
+
     /// Get config directory path
     pub fn getConfigDir(allocator: std.mem.Allocator) ![]const u8 {
         const home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
@@ -909,6 +1013,7 @@ pub const Config = struct {
             allocator,
             json.project_workspace_layout_index,
         );
+        const loaded_app_local_nodes = try duplicateOptionalAppLocalNodes(allocator, json.app_local_nodes);
 
         return .{
             .allocator = allocator,
@@ -927,6 +1032,7 @@ pub const Config = struct {
             .selected_profile_id = loaded_selected_profile_id,
             .recent_projects = loaded_recent_projects,
             .project_workspace_layout_index = loaded_layout_index,
+            .app_local_nodes = loaded_app_local_nodes,
             .update_manifest_url = try duplicateOptionalString(allocator, json.update_manifest_url) orelse
                 try allocator.dupe(u8, "https://github.com/DeanoC/SpiderApp/releases/latest/download/update.json"),
             .ui_theme = try duplicateOptionalString(allocator, json.ui_theme),
@@ -993,6 +1099,7 @@ pub const Config = struct {
             .selected_profile_id = mutable_self.selected_profile_id,
             .recent_projects = try makeRecentProjectJsonSlice(self.allocator, mutable_self.recent_projects),
             .project_workspace_layout_index = try makeProjectWorkspaceLayoutJsonSlice(self.allocator, mutable_self.project_workspace_layout_index),
+            .app_local_nodes = try makeAppLocalNodeJsonSlice(self.allocator, mutable_self.app_local_nodes),
             .update_manifest_url = mutable_self.update_manifest_url,
             .ui_theme = mutable_self.ui_theme,
             .ui_theme_pack = mutable_self.ui_theme_pack,
@@ -1010,6 +1117,7 @@ pub const Config = struct {
             if (payload.connection_profiles) |values| self.allocator.free(values);
             if (payload.recent_projects) |values| self.allocator.free(values);
             if (payload.project_workspace_layout_index) |values| self.allocator.free(values);
+            if (payload.app_local_nodes) |values| self.allocator.free(values);
         }
 
         const bytes = try std.json.Stringify.valueAlloc(self.allocator, payload, .{
@@ -1041,6 +1149,7 @@ const ConfigJson = struct {
     selected_profile_id: ?[]const u8 = null,
     recent_projects: ?[]const RecentProjectJson = null,
     project_workspace_layout_index: ?[]const ProjectWorkspaceLayoutJson = null,
+    app_local_nodes: ?[]const AppLocalNodeJson = null,
     update_manifest_url: ?[]const u8 = null,
     ui_theme: ?[]const u8 = null,
     ui_theme_pack: ?[]const u8 = null,
@@ -1084,6 +1193,13 @@ const ProjectWorkspaceLayoutJson = struct {
     project_id: []const u8,
     layout_path: []const u8,
     updated_at_ms: ?i64 = null,
+};
+
+const AppLocalNodeJson = struct {
+    profile_id: []const u8,
+    node_name: []const u8,
+    node_id: []const u8,
+    node_secret: []const u8,
 };
 
 fn profileIndexByIdList(profiles: []const ConnectionProfile, profile_id: []const u8) ?usize {
@@ -1144,6 +1260,24 @@ fn makeProjectWorkspaceLayoutJsonSlice(
             .project_id = entry.project_id,
             .layout_path = entry.layout_path,
             .updated_at_ms = entry.updated_at_ms,
+        };
+    }
+    return out;
+}
+
+fn makeAppLocalNodeJsonSlice(
+    allocator: std.mem.Allocator,
+    entries: ?[]const AppLocalNodeEntry,
+) !?[]AppLocalNodeJson {
+    const list = entries orelse return null;
+    if (list.len == 0) return try allocator.alloc(AppLocalNodeJson, 0);
+    const out = try allocator.alloc(AppLocalNodeJson, list.len);
+    for (list, 0..) |entry, idx| {
+        out[idx] = .{
+            .profile_id = entry.profile_id,
+            .node_name = entry.node_name,
+            .node_id = entry.node_id,
+            .node_secret = entry.node_secret,
         };
     }
     return out;
@@ -1244,4 +1378,39 @@ test "recent projects are deduplicated per profile and project" {
     try std.testing.expectEqual(@as(usize, 1), config.recent_projects.?.len);
     try std.testing.expectEqualStrings("Project A (Renamed)", config.recent_projects.?[0].project_name.?);
     try std.testing.expect(config.recent_projects.?[0].opened_at_ms > 0);
+}
+
+test "config stores app-local node identity per profile" {
+    var config = try Config.init(std.testing.allocator);
+    defer config.deinit();
+
+    try config.setAppLocalNode("default", "spiderapp-default", "node-42", "secret-xyz");
+    const stored = config.appLocalNode("default") orelse return error.TestExpectedResponse;
+    try std.testing.expectEqualStrings("spiderapp-default", stored.node_name);
+    try std.testing.expectEqualStrings("node-42", stored.node_id);
+    try std.testing.expectEqualStrings("secret-xyz", stored.node_secret);
+}
+
+test "config loads app-local node identities from json" {
+    const json =
+        \\{
+        \\  "server_url": "ws://127.0.0.1:18790",
+        \\  "app_local_nodes": [
+        \\    {
+        \\      "profile_id": "default",
+        \\      "node_name": "spiderapp-default",
+        \\      "node_id": "node-7",
+        \\      "node_secret": "secret-7"
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var config = try Config.loadFromJsonSlice(std.testing.allocator, json);
+    defer config.deinit();
+
+    const stored = config.appLocalNode("default") orelse return error.TestExpectedResponse;
+    try std.testing.expectEqualStrings("spiderapp-default", stored.node_name);
+    try std.testing.expectEqualStrings("node-7", stored.node_id);
+    try std.testing.expectEqualStrings("secret-7", stored.node_secret);
 }
