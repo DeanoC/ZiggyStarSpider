@@ -5,7 +5,7 @@ const ws_client_mod = @import("websocket_client.zig");
 const config_mod = @import("client-config");
 const credential_store_mod = config_mod.credential_store;
 const control_plane = @import("control_plane");
-const venom_bindings = @import("../client/venom_bindings.zig");
+const venom_bindings = @import("venom_bindings");
 const build_options = @import("build_options");
 const workspace_types = control_plane.workspace_types;
 const panels_bridge = @import("panels_bridge.zig");
@@ -13767,7 +13767,7 @@ const App = struct {
             .{ request_id, session_key },
         );
 
-        var submit = self.submitChatJobViaFsrpc(client, text) catch |err| {
+        const submit = self.submitChatJobViaFsrpc(client, text) catch |err| {
             std.log.err("[GUI] sendChatMessageText: fsrpc submit failed: {s}", .{@errorName(err)});
             const remote_detail = if (err == error.RemoteError)
                 (control_plane.lastRemoteError() orelse (self.fsrpc_last_remote_error orelse @errorName(err)))
@@ -14552,6 +14552,62 @@ const App = struct {
         }
 
         return replayed;
+    }
+
+    fn extractLatestThoughtFromJobLog(self: *App, log_text: []const u8) !?[]u8 {
+        var latest: ?[]u8 = null;
+        errdefer if (latest) |value| self.allocator.free(value);
+
+        var lines = std.mem.splitScalar(u8, log_text, '\n');
+        while (lines.next()) |line_raw| {
+            const line = std.mem.trim(u8, line_raw, " \t\r\n");
+            if (line.len == 0 or line[0] != '{') continue;
+
+            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value != .object) continue;
+            const root = parsed.value.object;
+            const type_val = root.get("type") orelse continue;
+            if (type_val != .string or !std.mem.eql(u8, type_val.string, "agent.thought")) continue;
+            const content_val = root.get("content") orelse continue;
+            if (content_val != .string) continue;
+            const thought = std.mem.trim(u8, content_val.string, " \t\r\n");
+            if (thought.len == 0) continue;
+
+            if (latest) |value| self.allocator.free(value);
+            latest = try self.allocator.dupe(u8, thought);
+        }
+
+        return latest;
+    }
+
+    fn syncPendingThoughtFromJobLog(self: *App, session_key: []const u8, log_text: []const u8) !void {
+        const latest_thought = try self.extractLatestThoughtFromJobLog(log_text);
+        defer if (latest_thought) |value| self.allocator.free(value);
+        try self.syncPendingThoughtText(session_key, latest_thought);
+    }
+
+    fn syncPendingThoughtText(self: *App, session_key: []const u8, latest_thought: ?[]const u8) !void {
+        const thought = latest_thought orelse return;
+
+        if (self.pending_send_last_thought_text) |previous| {
+            if (std.mem.eql(u8, previous, thought)) return;
+            self.allocator.free(previous);
+            self.pending_send_last_thought_text = null;
+        }
+        self.pending_send_last_thought_text = try self.allocator.dupe(u8, thought);
+
+        if (self.pending_send_thought_message_id) |message_id| {
+            if (self.findMessageIndex(session_key, message_id)) |idx| {
+                try self.setMessageContentByIndex(session_key, idx, thought);
+                return;
+            }
+            self.allocator.free(message_id);
+            self.pending_send_thought_message_id = null;
+        }
+
+        const appended_id = try self.appendMessageWithIdForSession(session_key, "thought", thought, null, "");
+        self.pending_send_thought_message_id = @constCast(appended_id);
     }
 
     fn tryResumePendingSendJob(self: *App) !bool {

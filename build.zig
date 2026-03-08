@@ -76,6 +76,11 @@ fn addGuiArtifact(
         .target = target,
         .optimize = optimize,
     });
+    const venom_bindings_module = b.createModule(.{
+        .root_source_file = b.path("src/client/venom_bindings.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const ziggy_ui_panels = b.dependency("ziggy_ui_panels", .{
         .target = target,
         .optimize = optimize,
@@ -97,6 +102,7 @@ fn addGuiArtifact(
     gui_module.addImport("ziggy-ui-panels", ziggy_ui_panels_module);
     gui_module.addImport("client-config", client_config_module);
     gui_module.addImport("control_plane", control_plane_module);
+    gui_module.addImport("venom_bindings", venom_bindings_module);
     gui_module.addImport("build_options", build_options_module);
     gui_module.addIncludePath(sdl3.path("include"));
     gui_module.addIncludePath(ziggy_ui_src);
