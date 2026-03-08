@@ -11,14 +11,18 @@ jobs:
     uses: DeanoC/Spiderweb/.github/workflows/ziggy-shared-ci.yml@main
     with:
       build_command: |
-        git submodule update --init --recursive
+        git submodule update --init deps/ziggy-core deps/spider-protocol deps/ziggy-ui deps/ziggy-ui-panels
+        git -C deps/ziggy-ui submodule update --init deps/ziggy-core
+        git -C deps/ziggy-ui-panels submodule update --init deps/ziggy-ui
+        git -C deps/ziggy-ui-panels/deps/ziggy-ui submodule update --init deps/ziggy-core
         zig build
       verify_script: |
-        if grep -qE '\.path = "\.\./Ziggy' build.zig.zon; then
-          echo "Local path Ziggy dependencies are not allowed in CI"
+        if grep -qE '\.path = "\.\./' build.zig.zon; then
+          echo "Local parent-path dependencies are not allowed in CI"
           exit 1
         fi
         grep -q 'spider_protocol' build.zig.zon
+        grep -q 'ziggy_ui_panels' build.zig.zon
         grep -q '\.hash =' build.zig.zon
 
   gui-terminal-smoke:

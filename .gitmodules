@@ -7,3 +7,6 @@
 [submodule "deps/ziggy-ui"]
 	path = deps/ziggy-ui
 	url = https://github.com/DeanoC/ziggy-ui
+[submodule "deps/ziggy-ui-panels"]
+	path = deps/ziggy-ui-panels
+	url = https://github.com/DeanoC/ZiggyUIPanels
