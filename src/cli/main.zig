@@ -2981,6 +2981,24 @@ fn validateJsonObjectPayload(allocator: std.mem.Allocator, payload: []const u8, 
 }
 
 const VenomBindingScope = venom_bindings.BindingScope;
+
+const OwnedVenomBindingScope = struct {
+    agent_id: ?[]u8 = null,
+    project_id: ?[]u8 = null,
+
+    fn deinit(self: *OwnedVenomBindingScope, allocator: std.mem.Allocator) void {
+        if (self.agent_id) |value| allocator.free(value);
+        if (self.project_id) |value| allocator.free(value);
+        self.* = .{};
+    }
+
+    fn asBorrowed(self: OwnedVenomBindingScope) VenomBindingScope {
+        return .{
+            .agent_id = self.agent_id,
+            .project_id = self.project_id,
+        };
+    }
+};
 const ChatBindingPaths = venom_bindings.ChatBindingPaths;
 
 const DefaultFsMount = struct {
@@ -3004,6 +3022,47 @@ fn discoverChatBindingPaths(
         CliFsPathReader{ .allocator = allocator, .client = client },
         .{ .agent_id = scope.agent_id, .project_id = scope.project_id },
     );
+}
+
+fn resolveAttachedVenomBindingScope(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+) !OwnedVenomBindingScope {
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    var scope = OwnedVenomBindingScope{};
+    errdefer scope.deinit(allocator);
+
+    const session_key = resolveSessionKey(&cfg);
+    var status = control_plane.sessionStatusWithTimeout(
+        allocator,
+        client,
+        &g_control_request_counter,
+        session_key,
+        session_status_timeout_ms,
+    ) catch null;
+    defer if (status) |*value| value.deinit(allocator);
+
+    if (status) |*value| {
+        if (value.agent_id.len > 0) {
+            scope.agent_id = try allocator.dupe(u8, value.agent_id);
+        }
+        if (value.project_id) |project_id| {
+            if (project_id.len > 0) {
+                scope.project_id = try allocator.dupe(u8, project_id);
+            }
+        }
+        return scope;
+    }
+
+    if (cfg.selectedAgent()) |agent_id| {
+        scope.agent_id = try allocator.dupe(u8, agent_id);
+    }
+    if (cfg.selectedProject()) |project_id| {
+        scope.project_id = try allocator.dupe(u8, project_id);
+    }
+    return scope;
 }
 
 fn buildJobLeafPath(
@@ -3762,12 +3821,9 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     try maybeApplyProjectContext(allocator, options, client);
     logger.info("Negotiating FS-RPC session...", .{});
     try fsrpcBootstrap(allocator, client);
-    var cfg = try loadCliConfig(allocator);
-    defer cfg.deinit();
-    var chat_paths = try discoverChatBindingPaths(allocator, client, .{
-        .agent_id = cfg.selectedAgent(),
-        .project_id = cfg.selectedProject(),
-    });
+    var binding_scope = try resolveAttachedVenomBindingScope(allocator, client);
+    defer binding_scope.deinit(allocator);
+    var chat_paths = try discoverChatBindingPaths(allocator, client, binding_scope.asBorrowed());
     defer chat_paths.deinit(allocator);
 
     logger.info("Submitting chat job...", .{});
@@ -3932,12 +3988,9 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
-    var cfg = try loadCliConfig(allocator);
-    defer cfg.deinit();
-    var chat_paths = try discoverChatBindingPaths(allocator, client, .{
-        .agent_id = cfg.selectedAgent(),
-        .project_id = cfg.selectedProject(),
-    });
+    var binding_scope = try resolveAttachedVenomBindingScope(allocator, client);
+    defer binding_scope.deinit(allocator);
+    var chat_paths = try discoverChatBindingPaths(allocator, client, binding_scope.asBorrowed());
     defer chat_paths.deinit(allocator);
 
     if (progress.args.len == 0) {

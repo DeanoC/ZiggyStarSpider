@@ -33,10 +33,12 @@ pub fn buildControlRoutedFsUrl(
 ) ![]u8 {
     const parsed = try parseWsUrlWithDefaultPath(allocator, control_url, "/");
     defer parsed.deinit(allocator);
+    const routed_path = try joinControlPath(allocator, parsed.path, "/v2/fs/node");
+    defer allocator.free(routed_path);
     return std.fmt.allocPrint(
         allocator,
-        "{s}://{s}:{d}/v2/fs/node/{s}",
-        .{ if (parsed.tls) "wss" else "ws", parsed.host, parsed.port, node_id },
+        "{s}://{s}:{d}{s}/{s}",
+        .{ if (parsed.tls) "wss" else "ws", parsed.host, parsed.port, routed_path, node_id },
     );
 }
 
@@ -400,6 +402,8 @@ pub const AppVenomHost = struct {
     fn runTunnel(self: *AppVenomHost) !void {
         const parsed = try parseWsUrlWithDefaultPath(self.allocator, self.control_url, "/");
         defer parsed.deinit(self.allocator);
+        const tunnel_path = try joinControlPath(self.allocator, parsed.path, "/v2/node");
+        defer self.allocator.free(tunnel_path);
 
         var client = try ws.Client.init(self.allocator, .{
             .host = parsed.host,
@@ -415,7 +419,7 @@ pub const AppVenomHost = struct {
             try std.fmt.bufPrint(&headers_buf, "Authorization: Bearer {s}\r\n", .{self.auth_token})
         else
             null;
-        try client.handshake("/v2/node", .{
+        try client.handshake(tunnel_path, .{
             .timeout_ms = 10_000,
             .headers = headers,
         });
@@ -668,11 +672,29 @@ fn negotiateNodeTunnelHello(
     }
 }
 
+fn joinControlPath(
+    allocator: std.mem.Allocator,
+    base_path: []const u8,
+    suffix: []const u8,
+) ![]u8 {
+    const trimmed_base = std.mem.trimRight(u8, base_path, "/");
+    const normalized_base = if (trimmed_base.len == 0) "/" else trimmed_base;
+    const trimmed_suffix = std.mem.trimLeft(u8, suffix, "/");
+    if (std.mem.eql(u8, normalized_base, "/")) {
+        return std.fmt.allocPrint(allocator, "/{s}", .{trimmed_suffix});
+    }
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ normalized_base, trimmed_suffix });
+}
+
 test "app venom host builds routed fs url and chat upsert payload" {
     const allocator = std.testing.allocator;
     const routed = try buildControlRoutedFsUrl(allocator, "ws://127.0.0.1:18790/", "node-7");
     defer allocator.free(routed);
     try std.testing.expectEqualStrings("ws://127.0.0.1:18790/v2/fs/node/node-7", routed);
+
+    const routed_with_base = try buildControlRoutedFsUrl(allocator, "wss://example.com/spider/control", "node-8");
+    defer allocator.free(routed_with_base);
+    try std.testing.expectEqualStrings("wss://example.com:443/spider/control/v2/fs/node/node-8", routed_with_base);
 
     var host = try AppVenomHost.init(
         allocator,
