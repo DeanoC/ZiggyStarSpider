@@ -80,6 +80,8 @@ const MIN_MAIN_WINDOW_HEIGHT: c_int = 720;
 const WS_MAX_MESSAGES_PER_FRAME: u32 = 32;
 const WS_MAX_POLL_BUDGET_NS: i128 = 2 * std.time.ns_per_ms;
 const FILESYSTEM_DIR_CACHE_TTL_MS: i64 = 5_000;
+const FILESYSTEM_PREVIEW_MAX_BYTES: usize = 16_384;
+const FILESYSTEM_PREVIEW_TEXT_SCAN_BYTES: usize = 512;
 const DEBUG_STREAM_SNAPSHOT_RETRY_MS: i64 = 2_000;
 const DEBUG_STREAM_PATH = "/debug/stream.log";
 const NODE_SERVICE_EVENTS_PATH = "/global/services/node-service-events.ndjson";
@@ -111,6 +113,7 @@ const ChatSession = zui.protocol.types.Session;
 const ChatWorkspacePanel = zui_panels.chat_workspace_panel;
 const LauncherSettingsPanel = zui_panels.launcher_settings_panel;
 const FilesystemPanel = zui_panels.filesystem_panel;
+const FilesystemToolsPanel = zui_panels.filesystem_tools_panel;
 const ProjectPanel = zui_panels.project_panel;
 const DebugPanel = zui_panels.debug_panel;
 const DebugEventStreamPanel = zui_panels.debug_event_stream;
@@ -175,11 +178,10 @@ const FsrpcEnvelope = struct {
     }
 };
 
-const FilesystemEntryKind = enum {
-    unknown,
-    directory,
-    file,
-};
+const FilesystemEntryKind = panels_bridge.FilesystemEntryKind;
+const FilesystemSortKey = panels_bridge.FilesystemSortKey;
+const FilesystemSortDirection = panels_bridge.FilesystemSortDirection;
+const FilesystemPreviewMode = panels_bridge.FilesystemPreviewMode;
 
 const FilesystemRequestKind = enum {
     list_dir,
@@ -209,12 +211,25 @@ const FilesystemEntry = struct {
     name: []u8,
     path: []u8,
     kind: FilesystemEntryKind = .unknown,
+    type_label: []u8,
+    hidden: bool = false,
+    size_bytes: ?u64 = null,
+    modified_unix_ms: ?i64 = null,
+    previewable: bool = false,
+    runtime_noise: bool = false,
 
     fn deinit(self: *FilesystemEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.path);
+        allocator.free(self.type_label);
         self.* = undefined;
     }
+};
+
+const FilesystemStatInfo = struct {
+    kind: FilesystemEntryKind = .unknown,
+    size_bytes: ?u64 = null,
+    modified_unix_ms: ?i64 = null,
 };
 
 const ContractServiceEntry = struct {
@@ -416,21 +431,21 @@ fn settingsFocusFieldFromExternal(field: LauncherSettingsPanel.FocusField) Setti
     };
 }
 
-fn filesystemFocusFieldToExternal(field: SettingsFocusField) FilesystemPanel.FocusField {
+fn filesystemToolsFocusFieldToExternal(field: SettingsFocusField) FilesystemToolsPanel.FocusField {
     return switch (field) {
         .filesystem_contract_payload => .contract_payload,
         else => .none,
     };
 }
 
-fn filesystemFocusFieldFromExternal(field: FilesystemPanel.FocusField) SettingsFocusField {
+fn filesystemToolsFocusFieldFromExternal(field: FilesystemToolsPanel.FocusField) SettingsFocusField {
     return switch (field) {
         .contract_payload => .filesystem_contract_payload,
         .none => .none,
     };
 }
 
-fn isFilesystemPanelFocusField(field: SettingsFocusField) bool {
+fn isFilesystemToolsPanelFocusField(field: SettingsFocusField) bool {
     return switch (field) {
         .filesystem_contract_payload => true,
         else => false,
@@ -988,15 +1003,41 @@ const App = struct {
     project_panel_id: ?workspace.PanelId = null,
     project_selector_open: bool = false,
     filesystem_panel_id: ?workspace.PanelId = null,
+    filesystem_tools_panel_id: ?workspace.PanelId = null,
     terminal_panel_id: ?workspace.PanelId = null,
     filesystem_path: std.ArrayList(u8) = .empty,
     filesystem_entries: std.ArrayListUnmanaged(FilesystemEntry) = .{},
+    filesystem_sort_key: FilesystemSortKey = .name,
+    filesystem_sort_direction: FilesystemSortDirection = .ascending,
+    filesystem_hide_hidden: bool = false,
+    filesystem_hide_directories: bool = false,
+    filesystem_hide_files: bool = false,
+    filesystem_hide_runtime_noise: bool = false,
+    filesystem_selected_path: ?[]u8 = null,
+    filesystem_entry_page: usize = 0,
+    filesystem_last_clicked_entry_index: ?usize = null,
+    filesystem_last_click_ms: i64 = 0,
+    filesystem_type_column_width: f32 = 96.0,
+    filesystem_modified_column_width: f32 = 122.0,
+    filesystem_size_column_width: f32 = 72.0,
+    filesystem_column_resize_handle: FilesystemPanel.ColumnResizeHandle = .none,
+    filesystem_preview_split_ratio: f32 = 0.28,
+    filesystem_preview_split_dragging: bool = false,
     filesystem_preview_path: ?[]u8 = null,
     filesystem_preview_text: ?[]u8 = null,
+    filesystem_preview_status: ?[]u8 = null,
+    filesystem_preview_mode: FilesystemPreviewMode = .empty,
+    filesystem_preview_kind: FilesystemEntryKind = .unknown,
+    filesystem_preview_size_bytes: ?u64 = null,
+    filesystem_preview_modified_unix_ms: ?i64 = null,
     filesystem_error: ?[]u8 = null,
     filesystem_busy: bool = false,
     filesystem_next_request_id: u64 = 1,
     filesystem_active_request: ?FilesystemActiveRequest = null,
+    filesystem_pending_path: ?[]u8 = null,
+    filesystem_pending_use_cache: bool = false,
+    filesystem_pending_force_refresh: bool = false,
+    filesystem_pending_retry_at_ms: i64 = 0,
     filesystem_last_request_duration_ms: f32 = 0.0,
     filesystem_dir_cache: std.StringHashMapUnmanaged(FilesystemDirCacheEntry) = .{},
     fsrpc_last_remote_error: ?[]u8 = null,
@@ -1368,6 +1409,7 @@ const App = struct {
         }
         self.stopFilesystemWorker();
         self.filesystem_active_request = null;
+        self.clearPendingFilesystemPathLoad();
         self.clearFsrpcRemoteError();
         self.clearDebugStreamSnapshot();
         self.clearDebugEvents();
@@ -3670,7 +3712,23 @@ const App = struct {
     }
 
     fn pollFilesystemWorker(self: *App) void {
-        _ = self;
+        if (self.filesystem_active_request != null) return;
+        if (self.connection_state != .connected) return;
+        const pending_path = self.filesystem_pending_path orelse return;
+
+        const now = std.time.milliTimestamp();
+        if (now < self.filesystem_pending_retry_at_ms) return;
+
+        const path = self.allocator.dupe(u8, pending_path) catch return;
+        defer self.allocator.free(path);
+        const use_cache = self.filesystem_pending_use_cache;
+        const force_refresh = self.filesystem_pending_force_refresh;
+        self.clearPendingFilesystemPathLoad();
+        self.queueFilesystemPathLoad(path, use_cache, force_refresh) catch |err| {
+            if (err != error.Busy and err != error.NotConnected) {
+                std.log.debug("filesystem pending load skipped: {s}", .{@errorName(err)});
+            }
+        };
     }
 
     fn pollDebugStream(self: *App) void {
@@ -3829,7 +3887,18 @@ const App = struct {
                 };
                 const resolved_kind: FilesystemEntryKind = if (is_dir) .directory else .file;
                 self.updateFilesystemEntryKind(result.path, resolved_kind);
-                if (!active.open_after_resolve) return;
+                if (!active.open_after_resolve) {
+                    if (self.filesystem_selected_path) |selected| {
+                        if (std.mem.eql(u8, selected, result.path)) {
+                            self.refreshSelectedFilesystemPreview() catch |err| {
+                                const msg = std.fmt.allocPrint(self.allocator, "Filesystem preview failed: {s}", .{@errorName(err)}) catch null;
+                                defer if (msg) |value| self.allocator.free(value);
+                                if (msg) |value| self.setFilesystemError(value);
+                            };
+                        }
+                    }
+                    return;
+                }
 
                 if (is_dir) {
                     self.queueFilesystemPathLoad(result.path, true, false) catch |err| {
@@ -4470,10 +4539,23 @@ const App = struct {
         self.workspace_last_refresh_ms = 0;
     }
 
-    fn clearFilesystemData(self: *App) void {
+    fn clearFilesystemEntries(self: *App) void {
         for (self.filesystem_entries.items) |*entry| entry.deinit(self.allocator);
         self.filesystem_entries.deinit(self.allocator);
         self.filesystem_entries = .{};
+    }
+
+    fn setFilesystemSelectedPath(self: *App, path: ?[]const u8) void {
+        if (self.filesystem_selected_path) |value| {
+            self.allocator.free(value);
+            self.filesystem_selected_path = null;
+        }
+        if (path) |value| {
+            self.filesystem_selected_path = self.allocator.dupe(u8, value) catch null;
+        }
+    }
+
+    fn clearFilesystemPreviewState(self: *App) void {
         if (self.filesystem_preview_path) |value| {
             self.allocator.free(value);
             self.filesystem_preview_path = null;
@@ -4482,6 +4564,23 @@ const App = struct {
             self.allocator.free(value);
             self.filesystem_preview_text = null;
         }
+        if (self.filesystem_preview_status) |value| {
+            self.allocator.free(value);
+            self.filesystem_preview_status = null;
+        }
+        self.filesystem_preview_mode = .empty;
+        self.filesystem_preview_kind = .unknown;
+        self.filesystem_preview_size_bytes = null;
+        self.filesystem_preview_modified_unix_ms = null;
+    }
+
+    fn clearFilesystemData(self: *App) void {
+        self.clearFilesystemEntries();
+        self.setFilesystemSelectedPath(null);
+        self.clearFilesystemPreviewState();
+        self.filesystem_entry_page = 0;
+        self.filesystem_last_clicked_entry_index = null;
+        self.filesystem_last_click_ms = 0;
         if (self.filesystem_error) |value| {
             self.allocator.free(value);
             self.filesystem_error = null;
@@ -4582,6 +4681,31 @@ const App = struct {
         }
         self.filesystem_dir_cache.deinit(self.allocator);
         self.filesystem_dir_cache = .{};
+    }
+
+    fn clearPendingFilesystemPathLoad(self: *App) void {
+        if (self.filesystem_pending_path) |value| {
+            self.allocator.free(value);
+            self.filesystem_pending_path = null;
+        }
+        self.filesystem_pending_use_cache = false;
+        self.filesystem_pending_force_refresh = false;
+        self.filesystem_pending_retry_at_ms = 0;
+    }
+
+    fn schedulePendingFilesystemPathLoad(self: *App, path: []const u8, use_cache: bool, force_refresh: bool) void {
+        self.clearPendingFilesystemPathLoad();
+        self.filesystem_pending_path = self.allocator.dupe(u8, path) catch null;
+        self.filesystem_pending_use_cache = use_cache;
+        self.filesystem_pending_force_refresh = force_refresh;
+        self.filesystem_pending_retry_at_ms = std.time.milliTimestamp() + 50;
+    }
+
+    fn requestFilesystemBrowserRefresh(self: *App, force_refresh: bool) void {
+        const current_path = if (self.filesystem_path.items.len > 0) self.filesystem_path.items else "/";
+        self.schedulePendingFilesystemPathLoad(current_path, false, force_refresh);
+        self.filesystem_pending_retry_at_ms = 0;
+        self.pollFilesystemWorker();
     }
 
     fn invalidateFilesystemDirCachePath(self: *App, path: []const u8) void {
@@ -4802,13 +4926,206 @@ const App = struct {
         client: *ws_client_mod.WebSocketClient,
         path: []const u8,
     ) !bool {
-        try self.fsrpcBootstrapGui(client);
-        const fid = try self.fsrpcWalkPathGui(client, path);
-        defer self.fsrpcClunkBestEffort(client, fid);
-        return self.fsrpcFidIsDirGui(client, fid);
+        const stat = try self.resolveFilesystemPathStatGui(client, path);
+        return stat.kind == .directory;
+    }
+
+    fn filesystemHiddenName(name: []const u8) bool {
+        return name.len > 0 and name[0] == '.';
+    }
+
+    fn filesystemRuntimeNoiseName(name: []const u8) bool {
+        inline for ([_][]const u8{
+            "control",
+            "status.json",
+            "health.json",
+            "metrics.json",
+            "config.json",
+            "invoke.json",
+            "result.json",
+            "schema.json",
+            "template.json",
+            "help.md",
+        }) |candidate| {
+            if (std.mem.eql(u8, name, candidate)) return true;
+        }
+        return false;
+    }
+
+    fn filesystemPreviewableName(name: []const u8, kind: FilesystemEntryKind) bool {
+        if (kind == .directory) return false;
+        const ext = std.fs.path.extension(name);
+        if (ext.len == 0) return true;
+        inline for ([_][]const u8{
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico",
+            ".pdf", ".zip", ".gz", ".tar", ".7z",
+            ".exe", ".dll", ".so", ".dylib", ".bin",
+            ".mp3", ".wav", ".ogg", ".mp4", ".mov", ".avi",
+            ".woff", ".woff2", ".ttf", ".otf",
+        }) |blocked| {
+            if (std.ascii.eqlIgnoreCase(ext, blocked)) return false;
+        }
+        return true;
+    }
+
+    fn allocFilesystemTypeLabel(self: *App, name: []const u8, kind: FilesystemEntryKind) ![]u8 {
+        if (kind == .directory) return self.allocator.dupe(u8, "Folder");
+
+        const ext = std.fs.path.extension(name);
+        if (ext.len == 0) return self.allocator.dupe(u8, "File");
+
+        const label = blk: {
+            if (std.ascii.eqlIgnoreCase(ext, ".json")) break :blk "JSON";
+            if (std.ascii.eqlIgnoreCase(ext, ".ndjson")) break :blk "NDJSON";
+            if (std.ascii.eqlIgnoreCase(ext, ".jsonl")) break :blk "JSONL";
+            if (std.ascii.eqlIgnoreCase(ext, ".md") or std.ascii.eqlIgnoreCase(ext, ".markdown")) break :blk "Markdown";
+            if (std.ascii.eqlIgnoreCase(ext, ".txt")) break :blk "Text";
+            if (std.ascii.eqlIgnoreCase(ext, ".log")) break :blk "Log";
+            if (std.ascii.eqlIgnoreCase(ext, ".yaml") or std.ascii.eqlIgnoreCase(ext, ".yml")) break :blk "YAML";
+            if (std.ascii.eqlIgnoreCase(ext, ".toml")) break :blk "TOML";
+            if (std.ascii.eqlIgnoreCase(ext, ".cfg") or std.ascii.eqlIgnoreCase(ext, ".conf") or std.ascii.eqlIgnoreCase(ext, ".ini")) break :blk "Config";
+            if (std.ascii.eqlIgnoreCase(ext, ".zig")) break :blk "Zig";
+            if (std.ascii.eqlIgnoreCase(ext, ".ts")) break :blk "TypeScript";
+            if (std.ascii.eqlIgnoreCase(ext, ".js")) break :blk "JavaScript";
+            if (std.ascii.eqlIgnoreCase(ext, ".html")) break :blk "HTML";
+            if (std.ascii.eqlIgnoreCase(ext, ".css")) break :blk "CSS";
+            if (std.ascii.eqlIgnoreCase(ext, ".sh")) break :blk "Shell";
+            if (std.ascii.eqlIgnoreCase(ext, ".ps1")) break :blk "PowerShell";
+            break :blk ext[1..];
+        };
+        return self.allocator.dupe(u8, label);
+    }
+
+    fn findFilesystemEntryByPath(self: *App, path: []const u8) ?*FilesystemEntry {
+        for (self.filesystem_entries.items) |*entry| {
+            if (std.mem.eql(u8, entry.path, path)) return entry;
+        }
+        return null;
+    }
+
+    fn selectedFilesystemEntry(self: *App) ?*FilesystemEntry {
+        const selected = self.filesystem_selected_path orelse return null;
+        return self.findFilesystemEntryByPath(selected);
+    }
+
+    fn truncateFilesystemPreviewText(self: *App, content: []const u8) ![]u8 {
+        if (content.len > FILESYSTEM_PREVIEW_MAX_BYTES) {
+            const suffix = "\n... (truncated)";
+            const limit = FILESYSTEM_PREVIEW_MAX_BYTES;
+            const buf = try self.allocator.alloc(u8, limit + suffix.len);
+            @memcpy(buf[0..limit], content[0..limit]);
+            @memcpy(buf[limit .. limit + suffix.len], suffix);
+            return buf;
+        }
+        return self.allocator.dupe(u8, content);
+    }
+
+    fn filesystemContentLooksText(content: []const u8) bool {
+        const scan_len = @min(content.len, FILESYSTEM_PREVIEW_TEXT_SCAN_BYTES);
+        var idx: usize = 0;
+        var suspicious: usize = 0;
+        while (idx < scan_len) : (idx += 1) {
+            const ch = content[idx];
+            if (ch == 0) return false;
+            if (ch < 0x09) {
+                suspicious += 1;
+                continue;
+            }
+            if (ch > 0x0D and ch < 0x20) suspicious += 1;
+        }
+        return suspicious * 8 < @max(scan_len, 1);
+    }
+
+    fn inferFilesystemPreviewMode(path: []const u8, content: []const u8) FilesystemPreviewMode {
+        if (content.len == 0) return .empty;
+        if (!filesystemContentLooksText(content)) return .unsupported;
+
+        const ext = std.fs.path.extension(path);
+        if (std.ascii.eqlIgnoreCase(ext, ".json") or std.ascii.eqlIgnoreCase(ext, ".ndjson") or std.ascii.eqlIgnoreCase(ext, ".jsonl")) {
+            return .json;
+        }
+
+        const trimmed = std.mem.trim(u8, content, " \t\r\n");
+        if (trimmed.len > 0 and (trimmed[0] == '{' or trimmed[0] == '[')) return .json;
+        return .text;
+    }
+
+    fn setFilesystemPreviewPlaceholder(
+        self: *App,
+        path: []const u8,
+        kind: FilesystemEntryKind,
+        size_bytes: ?u64,
+        modified_unix_ms: ?i64,
+        mode: FilesystemPreviewMode,
+        status: []const u8,
+    ) !void {
+        self.clearFilesystemPreviewState();
+        self.filesystem_preview_path = try self.allocator.dupe(u8, path);
+        self.filesystem_preview_kind = kind;
+        self.filesystem_preview_size_bytes = size_bytes;
+        self.filesystem_preview_modified_unix_ms = modified_unix_ms;
+        self.filesystem_preview_mode = mode;
+        self.filesystem_preview_status = try self.allocator.dupe(u8, status);
+    }
+
+    fn refreshSelectedFilesystemPreview(self: *App) !void {
+        const entry = self.selectedFilesystemEntry() orelse {
+            self.clearFilesystemPreviewState();
+            return;
+        };
+
+        switch (entry.kind) {
+            .directory => try self.setFilesystemPreviewPlaceholder(
+                entry.path,
+                entry.kind,
+                entry.size_bytes,
+                entry.modified_unix_ms,
+                .empty,
+                "Directory selected. Use Open Selected or double-click to browse.",
+            ),
+            .file => {
+                if (!entry.previewable) {
+                    try self.setFilesystemPreviewPlaceholder(
+                        entry.path,
+                        entry.kind,
+                        entry.size_bytes,
+                        entry.modified_unix_ms,
+                        .unsupported,
+                        "Preview unavailable for this file type.",
+                    );
+                    return;
+                }
+                try self.setFilesystemPreviewPlaceholder(
+                    entry.path,
+                    entry.kind,
+                    entry.size_bytes,
+                    entry.modified_unix_ms,
+                    .loading,
+                    "Loading preview…",
+                );
+                try self.submitFilesystemRequest(.read_file, entry.path, false);
+            },
+            .unknown => {
+                try self.setFilesystemPreviewPlaceholder(
+                    entry.path,
+                    entry.kind,
+                    entry.size_bytes,
+                    entry.modified_unix_ms,
+                    .loading,
+                    "Resolving filesystem entry…",
+                );
+                try self.submitFilesystemRequest(.resolve_kind, entry.path, false);
+            },
+        }
     }
 
     fn applyFilesystemListing(self: *App, path: []const u8, listing: []const u8) !void {
+        const previous_selected_path = if (self.filesystem_selected_path) |value|
+            self.allocator.dupe(u8, value) catch null
+        else
+            null;
+        defer if (previous_selected_path) |value| self.allocator.free(value);
+
         self.clearFilesystemData();
         try self.setFilesystemPath(path);
         var iter = std.mem.splitScalar(u8, listing, '\n');
@@ -4820,28 +5137,71 @@ const App = struct {
             const child_path = try self.joinFilesystemPath(path, entry_name);
             errdefer self.allocator.free(child_path);
 
-            try self.filesystem_entries.append(self.allocator, .{
+            var entry = FilesystemEntry{
                 .name = try self.allocator.dupe(u8, entry_name),
                 .path = child_path,
                 .kind = .unknown,
-            });
+                .type_label = try self.allocFilesystemTypeLabel(entry_name, .unknown),
+                .hidden = filesystemHiddenName(entry_name),
+                .previewable = filesystemPreviewableName(entry_name, .unknown),
+                .runtime_noise = filesystemRuntimeNoiseName(entry_name),
+            };
+            errdefer entry.deinit(self.allocator);
+
+            if (self.ws_client) |*client| {
+                const stat = self.resolveFilesystemPathStatGui(client, entry.path) catch null;
+                if (stat) |value| {
+                    entry.kind = value.kind;
+                    entry.size_bytes = value.size_bytes;
+                    entry.modified_unix_ms = value.modified_unix_ms;
+                    self.allocator.free(entry.type_label);
+                    entry.type_label = try self.allocFilesystemTypeLabel(entry.name, value.kind);
+                    entry.previewable = filesystemPreviewableName(entry.name, value.kind);
+                }
+            }
+
+            try self.filesystem_entries.append(self.allocator, entry);
+        }
+
+        if (previous_selected_path) |selected_path| {
+            if (self.findFilesystemEntryByPath(selected_path) != null) {
+                self.setFilesystemSelectedPath(selected_path);
+                self.refreshSelectedFilesystemPreview() catch {};
+            }
         }
     }
 
     fn applyFilesystemPreview(self: *App, path: []const u8, content: []const u8) !void {
-        if (self.filesystem_preview_path) |value| self.allocator.free(value);
+        self.clearFilesystemPreviewState();
         self.filesystem_preview_path = try self.allocator.dupe(u8, path);
 
-        if (self.filesystem_preview_text) |value| self.allocator.free(value);
-        if (content.len > 16_384) {
-            const suffix = "\n... (truncated)";
-            const limit = 16_384;
-            const buf = try self.allocator.alloc(u8, limit + suffix.len);
-            @memcpy(buf[0..limit], content[0..limit]);
-            @memcpy(buf[limit .. limit + suffix.len], suffix);
-            self.filesystem_preview_text = buf;
+        if (self.findFilesystemEntryByPath(path)) |entry| {
+            self.filesystem_preview_kind = entry.kind;
+            self.filesystem_preview_size_bytes = entry.size_bytes orelse content.len;
+            self.filesystem_preview_modified_unix_ms = entry.modified_unix_ms;
         } else {
-            self.filesystem_preview_text = try self.allocator.dupe(u8, content);
+            self.filesystem_preview_kind = .file;
+            self.filesystem_preview_size_bytes = content.len;
+        }
+
+        const preview_mode = inferFilesystemPreviewMode(path, content);
+        self.filesystem_preview_mode = preview_mode;
+        switch (preview_mode) {
+            .text => {
+                self.filesystem_preview_status = try self.allocator.dupe(u8, "Text preview");
+                self.filesystem_preview_text = try self.truncateFilesystemPreviewText(content);
+            },
+            .json => {
+                self.filesystem_preview_status = try self.allocator.dupe(u8, "JSON preview");
+                self.filesystem_preview_text = try self.truncateFilesystemPreviewText(content);
+            },
+            .empty => {
+                self.filesystem_preview_status = try self.allocator.dupe(u8, "Empty file");
+            },
+            .unsupported => {
+                self.filesystem_preview_status = try self.allocator.dupe(u8, "Preview unavailable for binary or unsupported content.");
+            },
+            .loading => {},
         }
     }
 
@@ -6428,6 +6788,15 @@ const App = struct {
                     row_y += row_h + row_gap;
                     if (self.drawButtonWidget(
                         Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.filesystem_tools_panel_id != null) "Explorer Tools (Focus)" else "Explorer Tools (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureFilesystemToolsPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
                         "Terminal",
                         .{ .variant = .secondary },
                     )) {
@@ -6950,6 +7319,14 @@ const App = struct {
                 self.filesystem_panel_id = panel.id;
                 self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
             },
+            .FilesystemTools => {
+                const started_ns = std.time.nanoTimestamp();
+                if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
+                    self.drawFilesystemToolsPanel(manager, rect);
+                }
+                self.filesystem_tools_panel_id = panel.id;
+                self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
+            },
             .DebugStream => {
                 const started_ns = std.time.nanoTimestamp();
                 if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
@@ -6965,7 +7342,8 @@ const App = struct {
                     self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
                 } else if (std.mem.eql(u8, panel.title, "Debug Stream") or
                     std.mem.eql(u8, panel.title, "Projects") or
-                    std.mem.eql(u8, panel.title, "Filesystem Browser"))
+                    std.mem.eql(u8, panel.title, "Filesystem Browser") or
+                    std.mem.eql(u8, panel.title, "Filesystem Tools"))
                 {
                     // Upgrade legacy ToolOutput-backed host panels in-place.
                     self.promoteLegacyHostPanel(manager, panel);
@@ -7005,7 +7383,7 @@ const App = struct {
     };
 
     fn drawHostPanelWithRuntime(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) bool {
-        if (panel.kind != .ProjectWorkspace and panel.kind != .FilesystemBrowser and panel.kind != .DebugStream) {
+        if (panel.kind != .ProjectWorkspace and panel.kind != .FilesystemBrowser and panel.kind != .FilesystemTools and panel.kind != .DebugStream) {
             return false;
         }
 
@@ -7015,6 +7393,7 @@ const App = struct {
         const host_registry = panels_bridge.runtime.HostPanelRegistry{
             .project_workspace = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawProjectWorkspaceHostPanel },
             .filesystem_browser = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawFilesystemBrowserHostPanel },
+            .filesystem_tools = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawFilesystemToolsHostPanel },
             .debug_stream = .{ .ctx = @ptrCast(&runtime_ctx), .draw_fn = drawDebugStreamHostPanel },
         };
         _ = panels_bridge.runtime.drawHostPanel(
@@ -7066,6 +7445,23 @@ const App = struct {
         runtime_ctx.app.drawFilesystemPanel(manager, panel_rect orelse return);
     }
 
+    fn drawFilesystemToolsHostPanel(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        panel: *workspace.Panel,
+        panel_rect: ?UiRect,
+        manager: *panel_manager.PanelManager,
+        action: *panels_bridge.UiAction,
+        pending_attachment: *?panels_bridge.AttachmentOpen,
+    ) void {
+        _ = allocator;
+        _ = panel;
+        _ = action;
+        _ = pending_attachment;
+        const runtime_ctx: *HostPanelRuntimeCtx = @ptrCast(@alignCast(ctx));
+        runtime_ctx.app.drawFilesystemToolsPanel(manager, panel_rect orelse return);
+    }
+
     fn drawDebugStreamHostPanel(
         ctx: *anyopaque,
         allocator: std.mem.Allocator,
@@ -7089,6 +7485,7 @@ const App = struct {
         const target_kind: ?workspace.PanelKind = blk: {
             if (std.mem.eql(u8, panel.title, "Projects")) break :blk .ProjectWorkspace;
             if (std.mem.eql(u8, panel.title, "Filesystem Browser")) break :blk .FilesystemBrowser;
+            if (std.mem.eql(u8, panel.title, "Filesystem Tools")) break :blk .FilesystemTools;
             if (std.mem.eql(u8, panel.title, "Debug Stream")) break :blk .DebugStream;
             break :blk null;
         };
@@ -7099,12 +7496,14 @@ const App = struct {
         panel.data = switch (kind) {
             .ProjectWorkspace => .{ .ProjectWorkspace = {} },
             .FilesystemBrowser => .{ .FilesystemBrowser = {} },
+            .FilesystemTools => .{ .FilesystemTools = {} },
             .DebugStream => .{ .DebugStream = {} },
             else => unreachable,
         };
         switch (kind) {
             .ProjectWorkspace => self.project_panel_id = panel.id,
             .FilesystemBrowser => self.filesystem_panel_id = panel.id,
+            .FilesystemTools => self.filesystem_tools_panel_id = panel.id,
             .DebugStream => self.debug_panel_id = panel.id,
             else => {},
         }
@@ -7220,6 +7619,16 @@ const App = struct {
     fn filesystemDrawSurfacePanel(ctx: *anyopaque, rect: Rect) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.drawSurfacePanel(rect);
+    }
+
+    fn filesystemDrawFilledRect(ctx: *anyopaque, rect: Rect, color: [4]f32) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawFilledRect(rect, color);
+    }
+
+    fn filesystemDrawRect(ctx: *anyopaque, rect: Rect, color: [4]f32) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        self.drawRect(rect, color);
     }
 
     fn filesystemDrawTextWrapped(
@@ -7738,6 +8147,12 @@ const App = struct {
         return self.allocator.dupe(u8, trimmed);
     }
 
+    fn normalizeFilesystemPath(self: *App, path: []const u8) ![]u8 {
+        const trimmed = std.mem.trim(u8, path, " \t\r\n");
+        if (trimmed.len == 0) return self.allocator.dupe(u8, "/");
+        return self.allocator.dupe(u8, trimmed);
+    }
+
     fn applyCachedFilesystemListing(self: *App, path: []const u8) bool {
         const listing = self.cachedFilesystemListing(path) orelse return false;
         self.applyFilesystemListing(path, listing) catch return false;
@@ -7750,40 +8165,86 @@ const App = struct {
         use_cache: bool,
         force_refresh: bool,
     ) !void {
-        try self.setFilesystemPath(path);
+        const normalized_path = try self.normalizeFilesystemPath(path);
+        defer self.allocator.free(normalized_path);
+
+        try self.setFilesystemPath(normalized_path);
         self.clearFsrpcRemoteError();
         self.clearFilesystemError();
 
         if (force_refresh) {
-            self.invalidateFilesystemDirCachePath(path);
+            self.invalidateFilesystemDirCachePath(normalized_path);
         } else if (use_cache) {
-            _ = self.applyCachedFilesystemListing(path);
+            _ = self.applyCachedFilesystemListing(normalized_path);
         }
 
-        try self.submitFilesystemRequest(.list_dir, path, false);
+        self.submitFilesystemRequest(.list_dir, normalized_path, false) catch |err| {
+            if (err == error.Busy) {
+                self.schedulePendingFilesystemPathLoad(normalized_path, use_cache, force_refresh);
+                return;
+            }
+            return err;
+        };
     }
 
     fn refreshFilesystemBrowser(self: *App) !void {
         if (self.filesystem_path.items.len == 0) {
             try self.filesystem_path.appendSlice(self.allocator, "/");
         }
-        const current_path = self.filesystem_path.items;
-        try self.queueFilesystemPathLoad(current_path, false, true);
+        self.requestFilesystemBrowserRefresh(true);
     }
 
     fn openFilesystemEntry(self: *App, entry: *const FilesystemEntry) !void {
         self.clearFsrpcRemoteError();
+        self.setFilesystemSelectedPath(entry.path);
         switch (entry.kind) {
             .directory => try self.queueFilesystemPathLoad(entry.path, true, false),
-            .file => try self.submitFilesystemRequest(.read_file, entry.path, false),
-            .unknown => try self.submitFilesystemRequest(.resolve_kind, entry.path, true),
+            .file => {
+                if (entry.previewable) {
+                    try self.setFilesystemPreviewPlaceholder(
+                        entry.path,
+                        entry.kind,
+                        entry.size_bytes,
+                        entry.modified_unix_ms,
+                        .loading,
+                        "Loading preview…",
+                    );
+                    try self.submitFilesystemRequest(.read_file, entry.path, false);
+                } else {
+                    try self.setFilesystemPreviewPlaceholder(
+                        entry.path,
+                        entry.kind,
+                        entry.size_bytes,
+                        entry.modified_unix_ms,
+                        .unsupported,
+                        "Preview unavailable for this file type.",
+                    );
+                }
+            },
+            .unknown => {
+                try self.setFilesystemPreviewPlaceholder(
+                    entry.path,
+                    entry.kind,
+                    entry.size_bytes,
+                    entry.modified_unix_ms,
+                    .loading,
+                    "Resolving filesystem entry…",
+                );
+                try self.submitFilesystemRequest(.resolve_kind, entry.path, true);
+            },
         }
     }
 
     fn updateFilesystemEntryKind(self: *App, path: []const u8, kind: FilesystemEntryKind) void {
         for (self.filesystem_entries.items) |*item| {
             if (!std.mem.eql(u8, item.path, path)) continue;
+            const next_label = self.allocFilesystemTypeLabel(item.name, kind) catch null;
             item.kind = kind;
+            if (next_label) |value| {
+                self.allocator.free(item.type_label);
+                item.type_label = value;
+            }
+            item.previewable = filesystemPreviewableName(item.name, kind);
             return;
         }
     }
@@ -8796,13 +9257,172 @@ const App = struct {
         }
     }
 
+    const VisibleFilesystemEntry = struct {
+        index: usize,
+        entry: *const FilesystemEntry,
+    };
+
+    fn filesystemEntryPassesFilters(self: *App, entry: *const FilesystemEntry) bool {
+        if (self.filesystem_hide_hidden and entry.hidden) return false;
+        if (self.filesystem_hide_runtime_noise and entry.runtime_noise) return false;
+        if (self.filesystem_hide_directories and entry.kind == .directory) return false;
+        if (self.filesystem_hide_files and entry.kind != .directory) return false;
+        return true;
+    }
+
+    fn filesystemVisibleEntryCount(self: *App) usize {
+        var count: usize = 0;
+        for (self.filesystem_entries.items) |*entry| {
+            if (self.filesystemEntryPassesFilters(entry)) count += 1;
+        }
+        return count;
+    }
+
+    fn filesystemTextOrder(lhs: []const u8, rhs: []const u8) std.math.Order {
+        var idx: usize = 0;
+        const common = @min(lhs.len, rhs.len);
+        while (idx < common) : (idx += 1) {
+            const a = std.ascii.toLower(lhs[idx]);
+            const b = std.ascii.toLower(rhs[idx]);
+            if (a < b) return .lt;
+            if (a > b) return .gt;
+        }
+        if (lhs.len < rhs.len) return .lt;
+        if (lhs.len > rhs.len) return .gt;
+        return .eq;
+    }
+
+    fn filesystemNumericOrderU64(lhs: ?u64, rhs: ?u64, direction: FilesystemSortDirection) std.math.Order {
+        if (lhs == null and rhs == null) return .eq;
+        if (lhs == null) return .gt;
+        if (rhs == null) return .lt;
+        const base: std.math.Order = if (lhs.? < rhs.?) .lt else if (lhs.? > rhs.?) .gt else .eq;
+        return switch (direction) {
+            .ascending => base,
+            .descending => switch (base) {
+                .lt => .gt,
+                .gt => .lt,
+                .eq => .eq,
+            },
+        };
+    }
+
+    fn filesystemNumericOrderI64(lhs: ?i64, rhs: ?i64, direction: FilesystemSortDirection) std.math.Order {
+        if (lhs == null and rhs == null) return .eq;
+        if (lhs == null) return .gt;
+        if (rhs == null) return .lt;
+        const base: std.math.Order = if (lhs.? < rhs.?) .lt else if (lhs.? > rhs.?) .gt else .eq;
+        return applyFilesystemSortDirection(base, direction);
+    }
+
+    fn applyFilesystemSortDirection(order: std.math.Order, direction: FilesystemSortDirection) std.math.Order {
+        return switch (direction) {
+            .ascending => order,
+            .descending => switch (order) {
+                .lt => .gt,
+                .gt => .lt,
+                .eq => .eq,
+            },
+        };
+    }
+
+    fn filesystemEntryLessThan(self: *App, lhs: VisibleFilesystemEntry, rhs: VisibleFilesystemEntry) bool {
+        if (lhs.entry.kind != rhs.entry.kind) {
+            if (lhs.entry.kind == .directory) return true;
+            if (rhs.entry.kind == .directory) return false;
+        }
+
+        const direction = self.filesystem_sort_direction;
+        const order = switch (self.filesystem_sort_key) {
+            .name => blk: {
+                const base = filesystemTextOrder(lhs.entry.name, rhs.entry.name);
+                break :blk applyFilesystemSortDirection(base, direction);
+            },
+            .type => blk: {
+                const primary = filesystemTextOrder(lhs.entry.type_label, rhs.entry.type_label);
+                if (primary != .eq) {
+                    break :blk applyFilesystemSortDirection(primary, direction);
+                }
+                const fallback = filesystemTextOrder(lhs.entry.name, rhs.entry.name);
+                break :blk applyFilesystemSortDirection(fallback, direction);
+            },
+            .modified => blk: {
+                const primary = filesystemNumericOrderI64(lhs.entry.modified_unix_ms, rhs.entry.modified_unix_ms, direction);
+                if (primary != .eq) break :blk primary;
+                const fallback = filesystemTextOrder(lhs.entry.name, rhs.entry.name);
+                break :blk fallback;
+            },
+            .size => blk: {
+                const primary = filesystemNumericOrderU64(lhs.entry.size_bytes, rhs.entry.size_bytes, direction);
+                if (primary != .eq) break :blk primary;
+                const fallback = filesystemTextOrder(lhs.entry.name, rhs.entry.name);
+                break :blk fallback;
+            },
+        };
+        return order == .lt;
+    }
+
+    fn sortVisibleFilesystemEntries(self: *App, items: []VisibleFilesystemEntry) void {
+        var i: usize = 1;
+        while (i < items.len) : (i += 1) {
+            const value = items[i];
+            var j = i;
+            while (j > 0 and self.filesystemEntryLessThan(value, items[j - 1])) : (j -= 1) {
+                items[j] = items[j - 1];
+            }
+            items[j] = value;
+        }
+    }
+
+    fn formatFilesystemSizeLabel(self: *App, size_bytes: ?u64) ?[]u8 {
+        const size = size_bytes orelse return null;
+        if (size < 1024) return std.fmt.allocPrint(self.allocator, "{d} B", .{size}) catch null;
+
+        const size_f = @as(f64, @floatFromInt(size));
+        if (size < 1024 * 1024) return std.fmt.allocPrint(self.allocator, "{d:.1} KB", .{size_f / 1024.0}) catch null;
+        if (size < 1024 * 1024 * 1024) return std.fmt.allocPrint(self.allocator, "{d:.1} MB", .{size_f / (1024.0 * 1024.0)}) catch null;
+        return std.fmt.allocPrint(self.allocator, "{d:.1} GB", .{size_f / (1024.0 * 1024.0 * 1024.0)}) catch null;
+    }
+
+    fn formatFilesystemModifiedLabel(self: *App, modified_unix_ms: ?i64) ?[]u8 {
+        const modified = modified_unix_ms orelse return null;
+        if (modified < 0) return null;
+
+        const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@divTrunc(modified, std.time.ms_per_s)) };
+        const day = epoch.getEpochDay();
+        const year_day = day.calculateYearDay();
+        const month_day = year_day.calculateMonthDay();
+        const day_seconds = epoch.getDaySeconds();
+        return std.fmt.allocPrint(
+            self.allocator,
+            "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2} UTC",
+            .{
+                year_day.year,
+                month_day.month.numeric(),
+                month_day.day_index + 1,
+                day_seconds.getHoursIntoDay(),
+                day_seconds.getMinutesIntoHour(),
+            },
+        ) catch null;
+    }
+
+    fn filesystemPreviewTypeLabel(self: *App, path: []const u8, kind: FilesystemEntryKind) ?[]u8 {
+        return self.allocFilesystemTypeLabel(std.fs.path.basename(path), kind) catch null;
+    }
+
     fn filesystemPanelModel(self: *App) panels_bridge.FilesystemPanelModel {
         return .{
             .connected = self.connection_state == .connected,
             .busy = self.filesystem_busy,
-            .has_service_runtime_root = self.filesystemHasServiceRuntimeRoot(),
-            .has_selected_contract_service = self.selectedContractService() != null,
-            .contract_service_count = self.contract_services.items.len,
+            .sort_key = self.filesystem_sort_key,
+            .sort_direction = self.filesystem_sort_direction,
+            .hide_hidden = self.filesystem_hide_hidden,
+            .hide_directories = self.filesystem_hide_directories,
+            .hide_files = self.filesystem_hide_files,
+            .hide_runtime_noise = self.filesystem_hide_runtime_noise,
+            .total_entry_count = self.filesystem_entries.items.len,
+            .visible_entry_count = self.filesystemVisibleEntryCount(),
+            .has_selected_entry = self.selectedFilesystemEntry() != null,
         };
     }
 
@@ -8812,6 +9432,16 @@ const App = struct {
             defer self.allocator.free(text);
             self.setFilesystemError(text);
         }
+    }
+
+    fn filesystemToolsPanelModel(self: *App) panels_bridge.FilesystemToolsPanelModel {
+        return .{
+            .connected = self.connection_state == .connected,
+            .busy = self.filesystem_busy,
+            .has_service_runtime_root = self.filesystemHasServiceRuntimeRoot(),
+            .has_selected_contract_service = self.selectedContractService() != null,
+            .contract_service_count = self.contract_services.items.len,
+        };
     }
 
     fn performFilesystemPanelAction(self: *App, action: panels_bridge.FilesystemPanelAction, path_label: []const u8) void {
@@ -8853,6 +9483,14 @@ const App = struct {
                     self.handleFilesystemPanelError("Filesystem refresh failed", err);
                 };
             },
+            .select_entry_index => |entry_index| {
+                if (entry_index >= self.filesystem_entries.items.len) return;
+                const entry = self.filesystem_entries.items[entry_index];
+                self.setFilesystemSelectedPath(entry.path);
+                self.refreshSelectedFilesystemPreview() catch |err| {
+                    self.handleFilesystemPanelError("Filesystem preview failed", err);
+                };
+            },
             .open_entry_index => |entry_index| {
                 if (entry_index >= self.filesystem_entries.items.len) return;
                 const entry = self.filesystem_entries.items[entry_index];
@@ -8860,6 +9498,58 @@ const App = struct {
                     self.handleFilesystemPanelError("Filesystem open failed", err);
                 };
             },
+            .open_selected_entry => {
+                const entry = self.selectedFilesystemEntry() orelse return;
+                self.openFilesystemEntry(entry) catch |err| {
+                    self.handleFilesystemPanelError("Filesystem open failed", err);
+                };
+            },
+            .set_sort_key => |sort_key| {
+                self.filesystem_sort_key = sort_key;
+                self.filesystem_entry_page = 0;
+            },
+            .toggle_sort_direction => {
+                self.filesystem_sort_direction = switch (self.filesystem_sort_direction) {
+                    .ascending => .descending,
+                    .descending => .ascending,
+                };
+                self.filesystem_entry_page = 0;
+            },
+            .toggle_hide_hidden => {
+                self.filesystem_hide_hidden = !self.filesystem_hide_hidden;
+                self.filesystem_entry_page = 0;
+            },
+            .toggle_hide_directories => {
+                self.filesystem_hide_directories = !self.filesystem_hide_directories;
+                self.filesystem_entry_page = 0;
+            },
+            .toggle_hide_files => {
+                self.filesystem_hide_files = !self.filesystem_hide_files;
+                self.filesystem_entry_page = 0;
+            },
+            .toggle_hide_runtime_noise => {
+                self.filesystem_hide_runtime_noise = !self.filesystem_hide_runtime_noise;
+                self.filesystem_entry_page = 0;
+            },
+            .reset_explorer_view => {
+                self.filesystem_sort_key = .name;
+                self.filesystem_sort_direction = .ascending;
+                self.filesystem_hide_hidden = false;
+                self.filesystem_hide_directories = false;
+                self.filesystem_hide_files = false;
+                self.filesystem_hide_runtime_noise = false;
+                self.filesystem_entry_page = 0;
+            },
+            .refresh_preview => {
+                self.refreshSelectedFilesystemPreview() catch |err| {
+                    self.handleFilesystemPanelError("Filesystem preview failed", err);
+                };
+            },
+        }
+    }
+
+    fn performFilesystemToolsPanelAction(self: *App, action: panels_bridge.FilesystemToolsPanelAction) void {
+        switch (action) {
             .runtime_read => |target| {
                 const file_name: []const u8 = switch (target) {
                     .status => "status.json",
@@ -8955,17 +9645,22 @@ const App = struct {
 
     const OwnedFilesystemPanelView = struct {
         entries: std.ArrayListUnmanaged(panels_bridge.FilesystemEntryView) = .{},
-        owned_labels: std.ArrayListUnmanaged([]u8) = .{},
-        owned_badges: std.ArrayListUnmanaged([]u8) = .{},
-        selected_contract_label: ?[]u8 = null,
+        owned_strings: std.ArrayListUnmanaged([]u8) = .{},
         view: panels_bridge.FilesystemPanelView = .{},
 
         fn deinit(self: *OwnedFilesystemPanelView, allocator: std.mem.Allocator) void {
-            for (self.owned_labels.items) |value| allocator.free(value);
-            for (self.owned_badges.items) |value| allocator.free(value);
-            self.owned_labels.deinit(allocator);
-            self.owned_badges.deinit(allocator);
+            for (self.owned_strings.items) |value| allocator.free(value);
+            self.owned_strings.deinit(allocator);
             self.entries.deinit(allocator);
+            self.* = undefined;
+        }
+    };
+
+    const OwnedFilesystemToolsPanelView = struct {
+        selected_contract_label: ?[]u8 = null,
+        view: panels_bridge.FilesystemToolsPanelView = .{},
+
+        fn deinit(self: *OwnedFilesystemToolsPanelView, allocator: std.mem.Allocator) void {
             if (self.selected_contract_label) |value| allocator.free(value);
             self.* = undefined;
         }
@@ -8975,7 +9670,140 @@ const App = struct {
         var owned: OwnedFilesystemPanelView = .{};
         const path_label = if (self.filesystem_path.items.len > 0) self.filesystem_path.items else "/";
 
-        const selected_contract_label = if (self.selectedContractService()) |entry|
+        var visible = std.ArrayListUnmanaged(VisibleFilesystemEntry){};
+        defer visible.deinit(self.allocator);
+        for (self.filesystem_entries.items, 0..) |*entry, idx| {
+            if (!self.filesystemEntryPassesFilters(entry)) continue;
+            visible.append(self.allocator, .{
+                .index = idx,
+                .entry = entry,
+            }) catch {};
+        }
+        self.sortVisibleFilesystemEntries(visible.items);
+
+        for (visible.items) |visible_entry| {
+            const entry = visible_entry.entry;
+            var badge: ?[]u8 = null;
+            if (self.findMountForPath(entry.path)) |mount| {
+                badge = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ mount.node_id, mount.export_name }) catch null;
+                if (badge) |value| {
+                    owned.owned_strings.append(self.allocator, value) catch {
+                        self.allocator.free(value);
+                        badge = null;
+                    };
+                }
+            }
+
+            var size_label: ?[]const u8 = null;
+            if (self.formatFilesystemSizeLabel(entry.size_bytes)) |value| {
+                if (owned.owned_strings.append(self.allocator, value)) |_| {
+                    size_label = value;
+                } else |_| {
+                    self.allocator.free(value);
+                }
+            }
+
+            var modified_label: ?[]const u8 = null;
+            if (self.formatFilesystemModifiedLabel(entry.modified_unix_ms)) |value| {
+                if (owned.owned_strings.append(self.allocator, value)) |_| {
+                    modified_label = value;
+                } else |_| {
+                    self.allocator.free(value);
+                }
+            }
+
+            owned.entries.append(self.allocator, .{
+                .index = visible_entry.index,
+                .name = entry.name,
+                .path = entry.path,
+                .kind = entry.kind,
+                .type_label = entry.type_label,
+                .hidden = entry.hidden,
+                .size_bytes = entry.size_bytes,
+                .size_label = size_label,
+                .modified_unix_ms = entry.modified_unix_ms,
+                .modified_label = modified_label,
+                .badge = badge,
+                .previewable = entry.previewable,
+                .selected = self.filesystem_selected_path != null and std.mem.eql(u8, self.filesystem_selected_path.?, entry.path),
+            }) catch {};
+        }
+
+        var preview_title: []const u8 = "(select a file to preview)";
+        var preview_path = self.filesystem_preview_path;
+        var preview_kind = self.filesystem_preview_kind;
+        var preview_size_bytes = self.filesystem_preview_size_bytes;
+        var preview_modified_unix_ms = self.filesystem_preview_modified_unix_ms;
+        var preview_type_label: []const u8 = "unknown";
+
+        if (self.selectedFilesystemEntry()) |entry| {
+            if (preview_path == null or (preview_path != null and std.mem.eql(u8, preview_path.?, entry.path))) {
+                preview_title = entry.name;
+                preview_path = entry.path;
+                preview_kind = entry.kind;
+                preview_size_bytes = entry.size_bytes orelse preview_size_bytes;
+                preview_modified_unix_ms = entry.modified_unix_ms orelse preview_modified_unix_ms;
+                preview_type_label = entry.type_label;
+            }
+        }
+
+        if (preview_path) |value| {
+            if (preview_title.len == 0 or std.mem.eql(u8, preview_title, "(select a file to preview)")) {
+                preview_title = std.fs.path.basename(value);
+            }
+            if (preview_type_label.len == 0 or std.mem.eql(u8, preview_type_label, "unknown")) {
+                if (self.filesystemPreviewTypeLabel(value, preview_kind)) |label| {
+                    if (owned.owned_strings.append(self.allocator, label)) |_| {
+                        preview_type_label = label;
+                    } else |_| {
+                        self.allocator.free(label);
+                    }
+                }
+            }
+        }
+
+        var preview_size_label: ?[]const u8 = null;
+        if (self.formatFilesystemSizeLabel(preview_size_bytes)) |value| {
+            if (owned.owned_strings.append(self.allocator, value)) |_| {
+                preview_size_label = value;
+            } else |_| {
+                self.allocator.free(value);
+            }
+        }
+
+        var preview_modified_label: ?[]const u8 = null;
+        if (self.formatFilesystemModifiedLabel(preview_modified_unix_ms)) |value| {
+            if (owned.owned_strings.append(self.allocator, value)) |_| {
+                preview_modified_label = value;
+            } else |_| {
+                self.allocator.free(value);
+            }
+        }
+
+        owned.view = .{
+            .path_label = path_label,
+            .error_text = self.filesystem_error,
+            .entries = owned.entries.items,
+            .total_entry_count = self.filesystem_entries.items.len,
+            .visible_entry_count = visible.items.len,
+            .preview_title = preview_title,
+            .preview_path = preview_path,
+            .preview_kind = preview_kind,
+            .preview_type_label = preview_type_label,
+            .preview_size_bytes = preview_size_bytes,
+            .preview_size_label = preview_size_label,
+            .preview_modified_unix_ms = preview_modified_unix_ms,
+            .preview_modified_label = preview_modified_label,
+            .preview_mode = self.filesystem_preview_mode,
+            .preview_status = self.filesystem_preview_status,
+            .preview_text = self.filesystem_preview_text,
+        };
+        return owned;
+    }
+
+    fn buildFilesystemToolsPanelView(self: *App) OwnedFilesystemToolsPanelView {
+        var owned: OwnedFilesystemToolsPanelView = .{};
+        owned.selected_contract_label = if (self.selectedContractService()) |entry|
             std.fmt.allocPrint(
                 self.allocator,
                 "Selected: {s} ({d}/{d})",
@@ -8983,49 +9811,10 @@ const App = struct {
             ) catch null
         else
             self.allocator.dupe(u8, "Selected: (none loaded)") catch null;
-        owned.selected_contract_label = selected_contract_label;
-
-        const max_rows: usize = @min(self.filesystem_entries.items.len, 14);
-        var idx: usize = 0;
-        while (idx < max_rows and idx < self.filesystem_entries.items.len) : (idx += 1) {
-            const entry = self.filesystem_entries.items[idx];
-            const prefix = switch (entry.kind) {
-                .unknown => "[?]",
-                .directory => "[dir]",
-                .file => "[file]",
-            };
-            const label = std.fmt.allocPrint(self.allocator, "{s} {s}", .{ prefix, entry.name }) catch continue;
-            owned.owned_labels.append(self.allocator, label) catch {
-                self.allocator.free(label);
-                continue;
-            };
-
-            var badge: ?[]u8 = null;
-            if (self.findMountForPath(entry.path)) |mount| {
-                badge = std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ mount.node_id, mount.export_name }) catch null;
-                if (badge) |value| {
-                    owned.owned_badges.append(self.allocator, value) catch {
-                        self.allocator.free(value);
-                        badge = null;
-                    };
-                }
-            }
-
-            owned.entries.append(self.allocator, .{
-                .index = idx,
-                .label = label,
-                .badge = badge,
-            }) catch {};
-        }
 
         owned.view = .{
-            .path_label = path_label,
-            .error_text = self.filesystem_error,
-            .selected_contract_label = if (selected_contract_label) |value| value else "Selected: (none loaded)",
+            .selected_contract_label = if (owned.selected_contract_label) |value| value else "Selected: (none loaded)",
             .contract_payload = self.contract_invoke_payload.items,
-            .entries = owned.entries.items,
-            .preview_title = if (self.filesystem_preview_path) |value| value else "(select a file to preview)",
-            .preview_text = self.filesystem_preview_text,
         };
         return owned;
     }
@@ -9677,6 +10466,14 @@ const App = struct {
 
     fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         _ = manager;
+        if (self.connection_state == .connected and
+            self.filesystem_entries.items.len == 0 and
+            self.filesystem_active_request == null and
+            self.filesystem_pending_path == null)
+        {
+            self.requestFilesystemBrowserRefresh(true);
+        }
+
         const model = self.filesystemPanelModel();
         const host = FilesystemPanel.Host{
             .ctx = @ptrCast(self),
@@ -9686,12 +10483,22 @@ const App = struct {
             .draw_button = launcherSettingsDrawButton,
             .draw_surface_panel = filesystemDrawSurfacePanel,
             .draw_text_wrapped = filesystemDrawTextWrapped,
+            .draw_filled_rect = filesystemDrawFilledRect,
+            .draw_rect = filesystemDrawRect,
         };
         const path_label = if (self.filesystem_path.items.len > 0) self.filesystem_path.items else "/";
         var view = self.buildFilesystemPanelView();
         defer view.deinit(self.allocator);
         var panel_state = FilesystemPanel.State{
-            .focused_field = filesystemFocusFieldToExternal(self.settings_panel.focused_field),
+            .entry_page = self.filesystem_entry_page,
+            .last_clicked_entry_index = self.filesystem_last_clicked_entry_index,
+            .last_click_ms = self.filesystem_last_click_ms,
+            .type_column_width = self.filesystem_type_column_width,
+            .modified_column_width = self.filesystem_modified_column_width,
+            .size_column_width = self.filesystem_size_column_width,
+            .column_resize = self.filesystem_column_resize_handle,
+            .preview_split_ratio = self.filesystem_preview_split_ratio,
+            .preview_split_dragging = self.filesystem_preview_split_dragging,
         };
         const action = FilesystemPanel.draw(
             host,
@@ -9703,22 +10510,70 @@ const App = struct {
                 .text_primary = self.theme.colors.text_primary,
                 .text_secondary = self.theme.colors.text_secondary,
                 .primary = self.theme.colors.primary,
+                .border = self.theme.colors.border,
+                .surface = self.theme.colors.surface,
                 .error_text = zcolors.rgba(220, 80, 80, 255),
             },
             .{
                 .mouse_x = self.mouse_x,
                 .mouse_y = self.mouse_y,
+                .mouse_down = self.mouse_down,
+                .mouse_clicked = self.mouse_clicked,
                 .mouse_released = self.mouse_released,
             },
             &panel_state,
         );
-        const mapped_focus = filesystemFocusFieldFromExternal(panel_state.focused_field);
-        if (mapped_focus != .none or isFilesystemPanelFocusField(self.settings_panel.focused_field)) {
-            self.settings_panel.focused_field = mapped_focus;
-        }
+        self.filesystem_entry_page = panel_state.entry_page;
+        self.filesystem_last_clicked_entry_index = panel_state.last_clicked_entry_index;
+        self.filesystem_last_click_ms = panel_state.last_click_ms;
+        self.filesystem_type_column_width = panel_state.type_column_width;
+        self.filesystem_modified_column_width = panel_state.modified_column_width;
+        self.filesystem_size_column_width = panel_state.size_column_width;
+        self.filesystem_column_resize_handle = panel_state.column_resize;
+        self.filesystem_preview_split_ratio = panel_state.preview_split_ratio;
+        self.filesystem_preview_split_dragging = panel_state.preview_split_dragging;
         if (action) |value| {
             self.performFilesystemPanelAction(value, path_label);
         }
+    }
+
+    fn drawFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        _ = manager;
+        const model = self.filesystemToolsPanelModel();
+        const host = FilesystemToolsPanel.Host{
+            .ctx = @ptrCast(self),
+            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
+            .draw_text_input = launcherSettingsDrawTextInput,
+            .draw_button = launcherSettingsDrawButton,
+            .draw_surface_panel = filesystemDrawSurfacePanel,
+            .draw_text_wrapped = filesystemDrawTextWrapped,
+            .draw_rect = filesystemDrawRect,
+        };
+        var view = self.buildFilesystemToolsPanelView();
+        defer view.deinit(self.allocator);
+        var panel_state = FilesystemToolsPanel.State{
+            .focused_field = filesystemToolsFocusFieldToExternal(self.settings_panel.focused_field),
+        };
+        const action = FilesystemToolsPanel.draw(
+            host,
+            Rect{ .min = rect.min, .max = rect.max },
+            self.panelLayoutMetrics(),
+            model,
+            view.view,
+            .{
+                .text_primary = self.theme.colors.text_primary,
+                .text_secondary = self.theme.colors.text_secondary,
+                .primary = self.theme.colors.primary,
+                .border = self.theme.colors.border,
+                .surface = self.theme.colors.surface,
+            },
+            &panel_state,
+        );
+        const mapped_focus = filesystemToolsFocusFieldFromExternal(panel_state.focused_field);
+        if (mapped_focus != .none or isFilesystemToolsPanelFocusField(self.settings_panel.focused_field)) {
+            self.settings_panel.focused_field = mapped_focus;
+        }
+        if (action) |value| self.performFilesystemToolsPanelAction(value);
     }
 
     fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
@@ -13292,7 +14147,54 @@ const App = struct {
         return out.toOwnedSlice(self.allocator);
     }
 
-    fn fsrpcFidIsDirGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) !bool {
+    fn jsonValueAsU64(value: std.json.Value) ?u64 {
+        return switch (value) {
+            .integer => if (value.integer >= 0) @intCast(value.integer) else null,
+            .float => if (value.float >= 0) @intFromFloat(value.float) else null,
+            .string => std.fmt.parseInt(u64, value.string, 10) catch null,
+            else => null,
+        };
+    }
+
+    fn jsonValueAsI64(value: std.json.Value) ?i64 {
+        return switch (value) {
+            .integer => value.integer,
+            .float => @intFromFloat(value.float),
+            .string => std.fmt.parseInt(i64, value.string, 10) catch null,
+            else => null,
+        };
+    }
+
+    fn jsonObjectFirstU64(obj: std.json.ObjectMap, keys: []const []const u8) ?u64 {
+        for (keys) |key| {
+            const value = obj.get(key) orelse continue;
+            if (jsonValueAsU64(value)) |parsed| return parsed;
+        }
+        return null;
+    }
+
+    fn jsonObjectFirstI64(obj: std.json.ObjectMap, keys: []const []const u8) ?i64 {
+        for (keys) |key| {
+            const value = obj.get(key) orelse continue;
+            if (jsonValueAsI64(value)) |parsed| return parsed;
+        }
+        return null;
+    }
+
+    fn normalizeFilesystemTimestampMs(value: ?i64) ?i64 {
+        const raw = value orelse return null;
+        if (raw > -100_000_000_000 and raw < 100_000_000_000) return raw * std.time.ms_per_s;
+        return raw;
+    }
+
+    fn filesystemKindFromStatLabel(kind_label: []const u8) FilesystemEntryKind {
+        if (std.mem.eql(u8, kind_label, "dir")) return .directory;
+        if (std.mem.eql(u8, kind_label, "file")) return .file;
+        if (std.mem.eql(u8, kind_label, "reg")) return .file;
+        return .unknown;
+    }
+
+    fn fsrpcStatInfoGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) !FilesystemStatInfo {
         const tag = self.nextFsrpcTag();
         const req = try std.fmt.allocPrint(
             self.allocator,
@@ -13306,9 +14208,31 @@ const App = struct {
         try self.ensureFsrpcOk(&response);
 
         const payload = try self.getFsrpcPayloadObject(response.parsed.value.object);
+        var info = FilesystemStatInfo{};
         const kind = payload.get("kind") orelse return error.InvalidResponse;
         if (kind != .string) return error.InvalidResponse;
-        return std.mem.eql(u8, kind.string, "dir");
+        info.kind = filesystemKindFromStatLabel(kind.string);
+        info.size_bytes = jsonObjectFirstU64(payload, &.{ "size", "size_bytes", "bytes", "length", "len" });
+        info.modified_unix_ms = normalizeFilesystemTimestampMs(
+            jsonObjectFirstI64(payload, &.{ "modified_ms", "mtime_ms", "mtime", "modified", "updated_at_ms", "modified_at", "updated_at" }),
+        );
+        return info;
+    }
+
+    fn fsrpcFidIsDirGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) !bool {
+        const info = try self.fsrpcStatInfoGui(client, fid);
+        return info.kind == .directory;
+    }
+
+    fn resolveFilesystemPathStatGui(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        path: []const u8,
+    ) !FilesystemStatInfo {
+        try self.fsrpcBootstrapGui(client);
+        const fid = try self.fsrpcWalkPathGui(client, path);
+        defer self.fsrpcClunkBestEffort(client, fid);
+        return self.fsrpcStatInfoGui(client, fid);
     }
 
     fn readFsPathTextGui(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8) ![]u8 {
@@ -15003,6 +15927,9 @@ const App = struct {
         if (self.filesystem_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
+                if (self.filesystem_entries.items.len == 0 and self.filesystem_active_request == null and self.filesystem_pending_path == null) {
+                    self.requestFilesystemBrowserRefresh(true);
+                }
                 return panel_id;
             }
             self.filesystem_panel_id = null;
@@ -15028,8 +15955,43 @@ const App = struct {
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
         }
+        _ = self.ensureFilesystemToolsPanel(manager) catch null;
         manager.focusPanel(panel_id);
-        self.refreshFilesystemBrowser() catch {};
+        self.requestFilesystemBrowserRefresh(true);
+        self.refreshContractServices() catch {};
+        return panel_id;
+    }
+
+    fn ensureFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        if (self.filesystem_tools_panel_id) |panel_id| {
+            if (self.findPanelById(manager, panel_id) != null) {
+                manager.focusPanel(panel_id);
+                return panel_id;
+            }
+            self.filesystem_tools_panel_id = null;
+        }
+
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .FilesystemTools) {
+                self.filesystem_tools_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Filesystem Tools")) {
+                self.promoteLegacyHostPanel(manager, panel);
+                self.filesystem_tools_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
+        }
+
+        const panel_data = workspace.PanelData{ .FilesystemTools = {} };
+        const panel_id = try manager.openPanel(.FilesystemTools, "Filesystem Tools", panel_data);
+        self.filesystem_tools_panel_id = panel_id;
+        if (manager.workspace.syncDockLayout() catch false) {
+            manager.workspace.markDirty();
+        }
+        manager.focusPanel(panel_id);
         self.refreshContractServices() catch {};
         return panel_id;
     }

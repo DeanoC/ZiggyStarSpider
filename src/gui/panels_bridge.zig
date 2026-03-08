@@ -32,10 +32,17 @@ pub const AttachmentOpen = if (has_panel_interfaces) zui.ui.panel_interfaces.Att
 };
 
 // Filesystem panel contracts.
+pub const FilesystemEntryKind = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemEntryKind else enum { unknown };
+pub const FilesystemSortKey = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemSortKey else enum { name };
+pub const FilesystemSortDirection = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemSortDirection else enum { ascending };
+pub const FilesystemPreviewMode = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemPreviewMode else enum { empty };
 pub const FilesystemPanelModel = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemPanelModel else struct {};
 pub const FilesystemPanelView = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemPanelView else struct {};
 pub const FilesystemEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemEntryView else struct {};
 pub const FilesystemPanelAction = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemPanelAction else enum { refresh };
+pub const FilesystemToolsPanelModel = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemToolsPanelModel else struct {};
+pub const FilesystemToolsPanelView = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemToolsPanelView else struct {};
+pub const FilesystemToolsPanelAction = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemToolsPanelAction else enum { contract_refresh };
 pub const FilesystemRuntimeReadTarget = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemRuntimeReadTarget else enum { status };
 pub const FilesystemRuntimeControlTarget = if (has_panel_interfaces) zui.ui.panel_interfaces.FilesystemRuntimeControlTarget else enum { enable };
 
@@ -73,10 +80,17 @@ pub fn assertAvailable() void {
     _ = DrawResult;
     _ = ChatPanelAction;
     _ = AttachmentOpen;
+    _ = FilesystemEntryKind;
+    _ = FilesystemSortKey;
+    _ = FilesystemSortDirection;
+    _ = FilesystemPreviewMode;
     _ = FilesystemPanelModel;
     _ = FilesystemPanelView;
     _ = FilesystemEntryView;
     _ = FilesystemPanelAction;
+    _ = FilesystemToolsPanelModel;
+    _ = FilesystemToolsPanelView;
+    _ = FilesystemToolsPanelAction;
     _ = FilesystemRuntimeReadTarget;
     _ = FilesystemRuntimeControlTarget;
     _ = DebugPanelModel;
