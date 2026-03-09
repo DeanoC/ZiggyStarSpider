@@ -257,6 +257,10 @@ const MissionRecordView = struct {
     run_id: ?[]u8 = null,
     workspace_root: ?[]u8 = null,
     worktree_name: ?[]u8 = null,
+    contract_id: ?[]u8 = null,
+    contract_context_path: ?[]u8 = null,
+    contract_state_path: ?[]u8 = null,
+    contract_artifact_root: ?[]u8 = null,
     created_by: MissionActorView,
     created_at_ms: i64 = 0,
     updated_at_ms: i64 = 0,
@@ -282,6 +286,10 @@ const MissionRecordView = struct {
         if (self.run_id) |value| allocator.free(value);
         if (self.workspace_root) |value| allocator.free(value);
         if (self.worktree_name) |value| allocator.free(value);
+        if (self.contract_id) |value| allocator.free(value);
+        if (self.contract_context_path) |value| allocator.free(value);
+        if (self.contract_state_path) |value| allocator.free(value);
+        if (self.contract_artifact_root) |value| allocator.free(value);
         self.created_by.deinit(allocator);
         if (self.recovery_reason) |value| allocator.free(value);
         if (self.blocked_reason) |value| allocator.free(value);
@@ -5959,6 +5967,14 @@ const App = struct {
         };
         errdefer mission.deinit(self.allocator);
 
+        if (obj.get("contract")) |value| {
+            if (value != .object) return error.InvalidResponse;
+            mission.contract_id = try dupOptionalStringField(self.allocator, value.object, "contract_id");
+            mission.contract_context_path = try dupOptionalStringField(self.allocator, value.object, "context_path");
+            mission.contract_state_path = try dupOptionalStringField(self.allocator, value.object, "state_path");
+            mission.contract_artifact_root = try dupOptionalStringField(self.allocator, value.object, "artifact_root");
+        }
+
         if (mission.agent_id) |agent_id| {
             if (lookupMissionPersonaPack(agent_packs, agent_id)) |persona_pack| {
                 mission.persona_pack = try self.allocator.dupe(u8, persona_pack);
@@ -8874,6 +8890,37 @@ const App = struct {
         if (mission.workspace_root) |workspace_root| {
             y = self.drawMissionDetailLine(rect, pad, y, "Workspace", workspace_root);
         }
+        if (mission.contract_context_path != null or mission.contract_state_path != null or mission.contract_artifact_root != null) {
+            y += pad * 0.35;
+            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Contract", self.theme.colors.text_primary);
+            y += line_h;
+            y = self.drawOptionalMissionDetailLine(rect, pad, y, "Context", mission.contract_context_path);
+            y = self.drawOptionalMissionDetailLine(rect, pad, y, "State File", mission.contract_state_path);
+            y = self.drawOptionalMissionDetailLine(rect, pad, y, "Artifacts Root", mission.contract_artifact_root);
+        }
+
+        if (std.mem.eql(u8, mission.use_case, "pr_review")) {
+            const provider_sync = latestMissionArtifactByKind(mission, "provider_sync");
+            const checkout_sync = latestMissionArtifactByKind(mission, "checkout_sync");
+            const repo_status = latestMissionArtifactByKind(mission, "repo_status");
+            const diff_range = latestMissionArtifactByKind(mission, "diff_range");
+            const validation = latestMissionArtifactByKind(mission, "validation");
+            const recommendation = latestMissionArtifactByKind(mission, "recommendation");
+            const publish_review = latestMissionArtifactByKind(mission, "publish_review");
+
+            if (provider_sync != null or checkout_sync != null or repo_status != null or diff_range != null or validation != null or recommendation != null or publish_review != null) {
+                y += pad * 0.35;
+                self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "PR Review", self.theme.colors.text_primary);
+                y += line_h;
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Provider Sync", provider_sync);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Checkout", checkout_sync);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Repo Status", repo_status);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Diff Range", diff_range);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Validation", validation);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Recommendation", recommendation);
+                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Published Review", publish_review);
+            }
+        }
 
         var recovery_buf: [96]u8 = undefined;
         const recovery_text = if (mission.recovery_count > 0)
@@ -8956,6 +9003,26 @@ const App = struct {
         self.drawTextTrimmed(rect.min[0] + pad, y, label_w, label, self.theme.colors.text_secondary);
         self.drawTextTrimmed(rect.min[0] + pad + label_w + pad * 0.6, y, rect.width() - label_w - pad * 3.0, value, self.theme.colors.text_primary);
         return y + line_h;
+    }
+
+    fn drawOptionalMissionDetailLine(self: *App, rect: Rect, pad: f32, y: f32, label: []const u8, value: ?[]const u8) f32 {
+        if (value) |text| return self.drawMissionDetailLine(rect, pad, y, label, text);
+        return y;
+    }
+
+    fn drawMissionArtifactDetailLine(
+        self: *App,
+        rect: Rect,
+        pad: f32,
+        y: f32,
+        label: []const u8,
+        artifact: ?*const MissionArtifactView,
+    ) f32 {
+        const value = if (artifact) |entry|
+            entry.path orelse entry.summary orelse entry.kind
+        else
+            null;
+        return self.drawOptionalMissionDetailLine(rect, pad, y, label, value);
     }
 
     fn drawMissionStateBadge(self: *App, rect: Rect, label: []const u8, color: [4]f32) void {
@@ -17915,6 +17982,16 @@ fn normalizedMissionStateLabel(state: []const u8, buf: []u8) []const u8 {
     if (std.ascii.eqlIgnoreCase(state, "cancelled")) return "cancelled";
     if (std.ascii.eqlIgnoreCase(state, "recovering")) return "recovering";
     return std.fmt.bufPrint(buf, "{s}", .{state}) catch state;
+}
+
+fn latestMissionArtifactByKind(mission: *const MissionRecordView, kind: []const u8) ?*const MissionArtifactView {
+    var index = mission.artifacts.items.len;
+    while (index > 0) {
+        index -= 1;
+        const artifact = &mission.artifacts.items[index];
+        if (std.mem.eql(u8, artifact.kind, kind)) return artifact;
+    }
+    return null;
 }
 
 fn missionStateColor(app: *App, state: []const u8) [4]f32 {
