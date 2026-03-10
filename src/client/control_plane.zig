@@ -4,6 +4,19 @@ pub const workspace_types = @import("workspace_types.zig");
 
 pub const default_timeout_ms: i64 = unified_v2.default_control_timeout_ms;
 
+pub const EnsuredNodeIdentity = struct {
+    node_id: []u8,
+    node_name: []u8,
+    node_secret: []u8,
+
+    pub fn deinit(self: *EnsuredNodeIdentity, allocator: std.mem.Allocator) void {
+        allocator.free(self.node_id);
+        allocator.free(self.node_name);
+        allocator.free(self.node_secret);
+        self.* = undefined;
+    }
+};
+
 fn normalizeProjectToken(project_token: ?[]const u8) ?[]const u8 {
     const token = project_token orelse return null;
     const trimmed = std.mem.trim(u8, token, " \t\r\n");
@@ -471,6 +484,98 @@ pub fn listNodes(
         try nodes.append(allocator, try parseNodeInfo(allocator, item.object));
     }
     return nodes;
+}
+
+pub fn ensureNode(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    node_name: []const u8,
+    fs_url: ?[]const u8,
+    lease_ttl_ms: ?u64,
+) !EnsuredNodeIdentity {
+    const escaped_node_name = try unified_v2.jsonEscape(allocator, node_name);
+    defer allocator.free(escaped_node_name);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.writer(allocator).print("{{\"node_name\":\"{s}\"", .{escaped_node_name});
+
+    if (fs_url) |value| {
+        const escaped_fs_url = try unified_v2.jsonEscape(allocator, value);
+        defer allocator.free(escaped_fs_url);
+        try payload.writer(allocator).print(",\"fs_url\":\"{s}\"", .{escaped_fs_url});
+    }
+    if (lease_ttl_ms) |value| {
+        try payload.writer(allocator).print(",\"lease_ttl_ms\":{d}", .{value});
+    }
+    try payload.append(allocator, '}');
+
+    const payload_json = try requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.node_ensure",
+        payload.items,
+    );
+    defer allocator.free(payload_json);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidResponse;
+
+    return .{
+        .node_id = try dupRequiredString(allocator, parsed.value.object, "node_id"),
+        .node_name = try dupRequiredString(allocator, parsed.value.object, "node_name"),
+        .node_secret = try dupRequiredString(allocator, parsed.value.object, "node_secret"),
+    };
+}
+
+pub fn bindVenomProvider(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    message_counter: *u64,
+    venom_id: []const u8,
+    node_id: ?[]const u8,
+    scope: ?[]const u8,
+    project_id: ?[]const u8,
+    agent_id: ?[]const u8,
+) ![]u8 {
+    const escaped_venom = try unified_v2.jsonEscape(allocator, venom_id);
+    defer allocator.free(escaped_venom);
+
+    var payload = std.ArrayListUnmanaged(u8){};
+    defer payload.deinit(allocator);
+    try payload.writer(allocator).print("{{\"venom_id\":\"{s}\"", .{escaped_venom});
+    if (node_id) |value| {
+        const escaped_node = try unified_v2.jsonEscape(allocator, value);
+        defer allocator.free(escaped_node);
+        try payload.writer(allocator).print(",\"node_id\":\"{s}\"", .{escaped_node});
+    }
+    if (scope) |value| {
+        const escaped_scope = try unified_v2.jsonEscape(allocator, value);
+        defer allocator.free(escaped_scope);
+        try payload.writer(allocator).print(",\"scope\":\"{s}\"", .{escaped_scope});
+    }
+    if (project_id) |value| {
+        const escaped_project = try unified_v2.jsonEscape(allocator, value);
+        defer allocator.free(escaped_project);
+        try payload.writer(allocator).print(",\"project_id\":\"{s}\"", .{escaped_project});
+    }
+    if (agent_id) |value| {
+        const escaped_agent = try unified_v2.jsonEscape(allocator, value);
+        defer allocator.free(escaped_agent);
+        try payload.writer(allocator).print(",\"agent_id\":\"{s}\"", .{escaped_agent});
+    }
+    try payload.append(allocator, '}');
+
+    return requestControlPayloadJson(
+        allocator,
+        client,
+        message_counter,
+        "control.venom_bind",
+        payload.items,
+    );
 }
 
 pub fn getNode(

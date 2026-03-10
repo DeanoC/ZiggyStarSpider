@@ -76,6 +76,11 @@ fn addGuiArtifact(
         .target = target,
         .optimize = optimize,
     });
+    const venom_bindings_module = b.createModule(.{
+        .root_source_file = b.path("src/client/venom_bindings.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const ziggy_ui_panels = b.dependency("ziggy_ui_panels", .{
         .target = target,
         .optimize = optimize,
@@ -97,6 +102,7 @@ fn addGuiArtifact(
     gui_module.addImport("ziggy-ui-panels", ziggy_ui_panels_module);
     gui_module.addImport("client-config", client_config_module);
     gui_module.addImport("control_plane", control_plane_module);
+    gui_module.addImport("venom_bindings", venom_bindings_module);
     gui_module.addImport("build_options", build_options_module);
     gui_module.addIncludePath(sdl3.path("include"));
     gui_module.addIncludePath(ziggy_ui_src);
@@ -197,6 +203,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const spider_protocol_module = spider_protocol.module("spider-protocol");
+    const spiderweb_node_module = spider_protocol.module("spiderweb_node");
+    const spiderweb_fs_module = spider_protocol.module("spiderweb_fs");
 
     const ziggy_ui = b.dependency("ziggy_ui", .{
         .target = target,
@@ -237,6 +245,8 @@ pub fn build(b: *std.Build) void {
     cli_module.addImport("websocket", websocket.module("websocket"));
     cli_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     cli_module.addImport("spider-protocol", spider_protocol_module);
+    cli_module.addImport("spiderweb_node", spiderweb_node_module);
+    cli_module.addImport("spiderweb_fs", spiderweb_fs_module);
     cli_module.addImport("build_options", build_options_module);
 
     const cli_exe = b.addExecutable(.{
@@ -349,6 +359,8 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("websocket", websocket.module("websocket"));
     test_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     test_module.addImport("spider-protocol", spider_protocol_module);
+    test_module.addImport("spiderweb_node", spiderweb_node_module);
+    test_module.addImport("spiderweb_fs", spiderweb_fs_module);
     test_module.addImport("build_options", build_options_module);
 
     const unit_tests = b.addTest(.{

@@ -4,6 +4,8 @@ const logger = @import("ziggy-core").utils.logger;
 const WebSocketClient = @import("../client/websocket.zig").WebSocketClient;
 const Config = @import("../client/config.zig").Config;
 const control_plane = @import("../client/control_plane.zig");
+const venom_bindings = @import("../client/venom_bindings.zig");
+const app_venom_host = @import("../client/app_venom_host.zig");
 const workspace_types = @import("../client/workspace_types.zig");
 const unified = @import("spider-protocol").unified;
 
@@ -18,13 +20,77 @@ var g_client_token_owned: ?[]u8 = null;
 var g_control_request_counter: u64 = 0;
 var g_fsrpc_tag: u32 = 1;
 var g_fsrpc_fid: u32 = 2;
+var g_app_local_node_bootstrap_done: bool = false;
+var g_app_local_venom_host: ?app_venom_host.AppVenomHost = null;
 const fsrpc_default_timeout_ms: i64 = 15_000;
 const fsrpc_chat_write_timeout_ms: i64 = 180_000;
+const chat_job_poll_interval_ms: u64 = 500;
 const session_status_timeout_ms: i64 = 5_000;
 const session_warming_wait_timeout_ms: i64 = 30_000;
 const session_warming_poll_interval_ms: u64 = 250;
+const app_local_node_lease_ttl_ms: u64 = 15 * 60 * 1000;
 const system_project_id = "system";
 const system_agent_id = "mother";
+
+const ChatProgressOptions = struct {
+    args: []const []const u8,
+    show_thoughts: bool = true,
+    quiet_progress: bool = false,
+
+    fn deinit(self: *ChatProgressOptions, allocator: std.mem.Allocator) void {
+        allocator.free(self.args);
+        self.* = undefined;
+    }
+};
+
+const CliFsPathReader = struct {
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+
+    pub fn readText(self: @This(), path: []const u8) ![]u8 {
+        return fsrpcReadPathText(self.allocator, self.client, path);
+    }
+};
+
+fn parseChatProgressOptions(
+    allocator: std.mem.Allocator,
+    raw_args: []const []const u8,
+) !ChatProgressOptions {
+    var filtered = std.ArrayListUnmanaged([]const u8){};
+    errdefer filtered.deinit(allocator);
+
+    var show_thoughts = true;
+    var quiet_progress = false;
+    for (raw_args) |arg| {
+        if (std.mem.eql(u8, arg, "--no-thoughts")) {
+            show_thoughts = false;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--quiet-progress")) {
+            quiet_progress = true;
+            continue;
+        }
+        try filtered.append(allocator, arg);
+    }
+
+    return .{
+        .args = try filtered.toOwnedSlice(allocator),
+        .show_thoughts = show_thoughts,
+        .quiet_progress = quiet_progress,
+    };
+}
+
+fn stdoutSupportsAnsi() bool {
+    return std.fs.File.stdout().isTty();
+}
+
+fn printThoughtProgress(stdout: anytype, thought: []const u8) !void {
+    if (stdoutSupportsAnsi()) {
+        try stdout.print("\x1b[2mThought: {s}\x1b[0m\n", .{thought});
+    } else {
+        try stdout.print("Thought: {s}\n", .{thought});
+    }
+}
 
 pub fn run(allocator: std.mem.Allocator) !void {
     defer cleanupGlobalClient();
@@ -132,6 +198,11 @@ fn getOrCreateClient(allocator: std.mem.Allocator, options: args.Options) !*WebS
 
 fn cleanupGlobalClient() void {
     var maybe_allocator: ?std.mem.Allocator = g_client_allocator;
+    if (g_app_local_venom_host) |*host| {
+        maybe_allocator = host.allocator;
+        host.deinit();
+    }
+    g_app_local_venom_host = null;
     if (g_client) |*client| {
         maybe_allocator = client.allocator;
         client.deinit();
@@ -147,6 +218,7 @@ fn cleanupGlobalClient() void {
     }
     g_connected = false;
     g_control_ready = false;
+    g_app_local_node_bootstrap_done = false;
     g_client_allocator = null;
 }
 
@@ -154,6 +226,132 @@ fn ensureUnifiedV2Control(allocator: std.mem.Allocator, client: *WebSocketClient
     if (g_control_ready) return;
     try control_plane.ensureUnifiedV2Connection(allocator, client, &g_control_request_counter);
     g_control_ready = true;
+    if (!g_app_local_node_bootstrap_done) {
+        ensureAppLocalNodeBootstrap(allocator, client) catch |err| {
+            std.log.warn("SpiderApp local node bootstrap skipped: {s}", .{@errorName(err)});
+        };
+        g_app_local_node_bootstrap_done = true;
+    }
+}
+
+fn ensureAppLocalNodeBootstrap(allocator: std.mem.Allocator, client: *WebSocketClient) !void {
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    const profile_id = cfg.selectedProfileId();
+    const node_name = try app_venom_host.buildAppLocalNodeName(allocator, profile_id);
+    defer allocator.free(node_name);
+    const active_token = g_client_token_owned orelse "";
+    var bootstrap_token = active_token;
+    var bootstrap_client = client;
+    var used_admin_fallback = false;
+    var admin_client_storage: ?WebSocketClient = null;
+    defer {
+        if (admin_client_storage) |*admin_client| {
+            admin_client.deinit();
+        }
+    }
+
+    var ensured = control_plane.ensureNode(
+        allocator,
+        client,
+        &g_control_request_counter,
+        node_name,
+        null,
+        app_local_node_lease_ttl_ms,
+    ) catch |primary_err| blk: {
+        const admin_token = cfg.getRoleToken(.admin);
+        if (admin_token.len == 0) return primary_err;
+        if (std.mem.eql(u8, active_token, admin_token)) return primary_err;
+        const ws_url = g_client_url_owned orelse return primary_err;
+        admin_client_storage = WebSocketClient.init(allocator, ws_url, admin_token);
+        try admin_client_storage.?.connect();
+        try control_plane.ensureUnifiedV2Connection(allocator, &admin_client_storage.?, &g_control_request_counter);
+        bootstrap_token = admin_token;
+        bootstrap_client = &admin_client_storage.?;
+        used_admin_fallback = true;
+        break :blk try control_plane.ensureNode(
+            allocator,
+            &admin_client_storage.?,
+            &g_control_request_counter,
+            node_name,
+            null,
+            app_local_node_lease_ttl_ms,
+        );
+    };
+    defer ensured.deinit(allocator);
+
+    startAppLocalVenomHost(
+        allocator,
+        bootstrap_client,
+        bootstrap_token,
+        ensured,
+        app_local_node_lease_ttl_ms,
+    ) catch |start_err| {
+        const admin_token = cfg.getRoleToken(.admin);
+        if (admin_token.len == 0) return start_err;
+        if (used_admin_fallback or std.mem.eql(u8, bootstrap_token, admin_token)) return start_err;
+        const ws_url = g_client_url_owned orelse return start_err;
+        admin_client_storage = WebSocketClient.init(allocator, ws_url, admin_token);
+        try admin_client_storage.?.connect();
+        try control_plane.ensureUnifiedV2Connection(allocator, &admin_client_storage.?, &g_control_request_counter);
+        try startAppLocalVenomHost(
+            allocator,
+            &admin_client_storage.?,
+            admin_token,
+            ensured,
+            app_local_node_lease_ttl_ms,
+        );
+        bootstrap_token = admin_token;
+        bootstrap_client = &admin_client_storage.?;
+        used_admin_fallback = true;
+    };
+
+    if (cfg.appLocalNode(profile_id)) |existing| {
+        if (std.mem.eql(u8, existing.node_name, ensured.node_name) and
+            std.mem.eql(u8, existing.node_id, ensured.node_id) and
+            std.mem.eql(u8, existing.node_secret, ensured.node_secret))
+        {
+            return;
+        }
+    }
+
+    try cfg.setAppLocalNode(profile_id, ensured.node_name, ensured.node_id, ensured.node_secret);
+    try cfg.save();
+}
+
+fn startAppLocalVenomHost(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    control_token: []const u8,
+    ensured: control_plane.EnsuredNodeIdentity,
+    lease_ttl_ms: u64,
+) !void {
+    const control_url = g_client_url_owned orelse return error.ClientUrlUnavailable;
+    if (g_app_local_venom_host) |*existing| {
+        if (existing.matches(control_url, control_token, ensured)) return;
+        existing.deinit();
+        g_app_local_venom_host = null;
+    }
+
+    var wasm_chat_backend = try app_venom_host.loadChatWasmBackendFromEnv(allocator);
+    defer if (wasm_chat_backend) |*cfg| cfg.deinit(allocator);
+
+    g_app_local_venom_host = try app_venom_host.AppVenomHost.initWithOptions(
+        allocator,
+        control_url,
+        control_token,
+        ensured,
+        .{
+            .chat_wasm_backend = wasm_chat_backend,
+        },
+    );
+    errdefer {
+        if (g_app_local_venom_host) |*host| host.deinit();
+        g_app_local_venom_host = null;
+    }
+    g_app_local_venom_host.?.bindSelf();
+    try g_app_local_venom_host.?.bootstrap(client, &g_control_request_counter, lease_ttl_ms);
 }
 
 fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
@@ -1036,15 +1234,24 @@ fn executeProjectUp(allocator: std.mem.Allocator, options: args.Options, cmd: ar
     }
 
     if (mounts.items.len == 0) {
-        var nodes = try control_plane.listNodes(allocator, client, &g_control_request_counter);
-        defer workspace_types.deinitNodeList(allocator, &nodes);
-        if (nodes.items.len == 0) {
+        var default_fs_mount = discoverDefaultFsMount(allocator, client, .{
+            .agent_id = cfg.selectedAgent(),
+            .project_id = explicit_project_id orelse cfg.selectedProject(),
+        }) catch |err| {
+            if (err == error.ServiceNotFound) {
+                logger.err("project up requires at least one registered fs Venom (or explicit --mount)", .{});
+                return error.InvalidArguments;
+            }
+            return err;
+        };
+        defer default_fs_mount.deinit(allocator);
+        if (default_fs_mount.mount_path.len == 0) {
             logger.err("project up requires at least one registered node (or explicit --mount)", .{});
             return error.InvalidArguments;
         }
         try mounts.append(allocator, .{
-            .mount_path = "/nodes/local/fs",
-            .node_id = nodes.items[0].node_id,
+            .mount_path = default_fs_mount.mount_path,
+            .node_id = default_fs_mount.node_id,
             .export_name = "work",
         });
     }
@@ -1712,7 +1919,7 @@ fn printNodeServiceCatalogPayload(
 
     const root = parsed.value.object;
     try stdout.print(
-        "Node services for {s} ({s})\n",
+        "Node venoms for {s} ({s})\n",
         .{
             jsonObjectStringOr(root, "node_id", "(unknown)"),
             jsonObjectStringOr(root, "node_name", "(unknown)"),
@@ -1742,22 +1949,22 @@ fn printNodeServiceCatalogPayload(
         try stdout.print("  Labels: (none)\n", .{});
     }
 
-    if (root.get("services")) |services_val| {
-        if (services_val == .array and services_val.array.items.len > 0) {
-            try stdout.print("  Services ({d}):\n", .{services_val.array.items.len});
-            for (services_val.array.items) |service_val| {
-                if (service_val != .object) continue;
-                const service = service_val.object;
+    if (root.get("venoms")) |venoms_val| {
+        if (venoms_val == .array and venoms_val.array.items.len > 0) {
+            try stdout.print("  Venoms ({d}):\n", .{venoms_val.array.items.len});
+            for (venoms_val.array.items) |venom_val| {
+                if (venom_val != .object) continue;
+                const venom = venom_val.object;
                 try stdout.print(
                     "    - {s} kind={s} version={s} state={s}\n",
                     .{
-                        jsonObjectStringOr(service, "service_id", "(unknown)"),
-                        jsonObjectStringOr(service, "kind", "(unknown)"),
-                        jsonObjectStringOr(service, "version", "1"),
-                        jsonObjectStringOr(service, "state", "(unknown)"),
+                        jsonObjectStringOr(venom, "venom_id", "(unknown)"),
+                        jsonObjectStringOr(venom, "kind", "(unknown)"),
+                        jsonObjectStringOr(venom, "version", "1"),
+                        jsonObjectStringOr(venom, "state", "(unknown)"),
                     },
                 );
-                if (service.get("endpoints")) |endpoints_val| {
+                if (venom.get("endpoints")) |endpoints_val| {
                     if (endpoints_val == .array and endpoints_val.array.items.len > 0) {
                         for (endpoints_val.array.items) |endpoint| {
                             if (endpoint != .string) continue;
@@ -1765,15 +1972,15 @@ fn printNodeServiceCatalogPayload(
                         }
                     }
                 }
-                if (service.get("capabilities")) |caps| {
+                if (venom.get("capabilities")) |caps| {
                     try stdout.print("      capabilities: {f}\n", .{std.json.fmt(caps, .{})});
                 }
             }
         } else {
-            try stdout.print("  Services: (none)\n", .{});
+            try stdout.print("  Venoms: (none)\n", .{});
         }
     } else {
-        try stdout.print("  Services: (none)\n", .{});
+        try stdout.print("  Venoms: (none)\n", .{});
     }
 }
 
@@ -2715,7 +2922,7 @@ fn executeNodeServiceGet(allocator: std.mem.Allocator, options: args.Options, cm
         allocator,
         client,
         &g_control_request_counter,
-        "control.node_service_get",
+        "control.venom_get",
         payload_req,
     );
     defer allocator.free(payload_json);
@@ -2773,7 +2980,123 @@ fn validateJsonObjectPayload(allocator: std.mem.Allocator, payload: []const u8, 
     }
 }
 
-fn requestNodeServiceCatalogPayload(
+const VenomBindingScope = venom_bindings.BindingScope;
+
+const OwnedVenomBindingScope = struct {
+    agent_id: ?[]u8 = null,
+    project_id: ?[]u8 = null,
+
+    fn deinit(self: *OwnedVenomBindingScope, allocator: std.mem.Allocator) void {
+        if (self.agent_id) |value| allocator.free(value);
+        if (self.project_id) |value| allocator.free(value);
+        self.* = .{};
+    }
+
+    fn asBorrowed(self: OwnedVenomBindingScope) VenomBindingScope {
+        return .{
+            .agent_id = self.agent_id,
+            .project_id = self.project_id,
+        };
+    }
+};
+const ChatBindingPaths = venom_bindings.ChatBindingPaths;
+
+const DefaultFsMount = struct {
+    node_id: []u8,
+    mount_path: []u8,
+
+    fn deinit(self: *DefaultFsMount, allocator: std.mem.Allocator) void {
+        allocator.free(self.node_id);
+        allocator.free(self.mount_path);
+        self.* = undefined;
+    }
+};
+
+fn discoverChatBindingPaths(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    scope: VenomBindingScope,
+) !venom_bindings.ChatBindingPaths {
+    return venom_bindings.discoverChatBindingPaths(
+        allocator,
+        CliFsPathReader{ .allocator = allocator, .client = client },
+        .{ .agent_id = scope.agent_id, .project_id = scope.project_id },
+    );
+}
+
+fn resolveAttachedVenomBindingScope(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+) !OwnedVenomBindingScope {
+    var cfg = try loadCliConfig(allocator);
+    defer cfg.deinit();
+
+    var scope = OwnedVenomBindingScope{};
+    errdefer scope.deinit(allocator);
+
+    const session_key = resolveSessionKey(&cfg);
+    var status = control_plane.sessionStatusWithTimeout(
+        allocator,
+        client,
+        &g_control_request_counter,
+        session_key,
+        session_status_timeout_ms,
+    ) catch null;
+    defer if (status) |*value| value.deinit(allocator);
+
+    if (status) |*value| {
+        if (value.agent_id.len > 0) {
+            scope.agent_id = try allocator.dupe(u8, value.agent_id);
+        }
+        if (value.project_id) |project_id| {
+            if (project_id.len > 0) {
+                scope.project_id = try allocator.dupe(u8, project_id);
+            }
+        }
+        return scope;
+    }
+
+    if (cfg.selectedAgent()) |agent_id| {
+        scope.agent_id = try allocator.dupe(u8, agent_id);
+    }
+    if (cfg.selectedProject()) |project_id| {
+        scope.project_id = try allocator.dupe(u8, project_id);
+    }
+    return scope;
+}
+
+fn buildJobLeafPath(
+    allocator: std.mem.Allocator,
+    jobs_root: []const u8,
+    job_name: []const u8,
+    leaf: []const u8,
+) ![]u8 {
+    const job_root = try joinFsPath(allocator, jobs_root, job_name);
+    defer allocator.free(job_root);
+    return joinFsPath(allocator, job_root, leaf);
+}
+
+fn readLatestThoughtText(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    thoughts_root: []const u8,
+) !?[]u8 {
+    const latest_path = try joinFsPath(allocator, thoughts_root, "latest.txt");
+    defer allocator.free(latest_path);
+    const raw = fsrpcReadPathText(allocator, client, latest_path) catch return null;
+    errdefer allocator.free(raw);
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) {
+        allocator.free(raw);
+        return null;
+    }
+    if (trimmed.ptr == raw.ptr and trimmed.len == raw.len) return raw;
+    const out = try allocator.dupe(u8, trimmed);
+    allocator.free(raw);
+    return out;
+}
+
+fn requestNodeVenomCatalogPayload(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
     node_id: []const u8,
@@ -2787,16 +3110,16 @@ fn requestNodeServiceCatalogPayload(
         allocator,
         client,
         &g_control_request_counter,
-        "control.node_service_get",
+        "control.venom_get",
         payload_req,
     );
 }
 
-fn findNodeServiceRuntimeRootPath(
+fn findNodeVenomRuntimeRootPath(
     allocator: std.mem.Allocator,
     catalog_payload_json: []const u8,
     expected_node_id: []const u8,
-    service_id: []const u8,
+    venom_id: []const u8,
 ) ![]u8 {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, catalog_payload_json, .{});
     defer parsed.deinit();
@@ -2807,15 +3130,15 @@ fn findNodeServiceRuntimeRootPath(
     if (node_id.len == 0) return error.InvalidResponse;
     if (!std.mem.eql(u8, node_id, expected_node_id)) return error.InvalidResponse;
 
-    const services_val = root.get("services") orelse return error.ServiceNotFound;
-    if (services_val != .array) return error.InvalidResponse;
+    const venoms_val = root.get("venoms") orelse return error.ServiceNotFound;
+    if (venoms_val != .array) return error.InvalidResponse;
 
-    for (services_val.array.items) |service_val| {
-        if (service_val != .object) continue;
-        const service_obj = service_val.object;
-        if (!std.mem.eql(u8, jsonObjectStringOr(service_obj, "service_id", ""), service_id)) continue;
+    for (venoms_val.array.items) |venom_val| {
+        if (venom_val != .object) continue;
+        const venom_obj = venom_val.object;
+        if (!std.mem.eql(u8, jsonObjectStringOr(venom_obj, "venom_id", ""), venom_id)) continue;
 
-        if (service_obj.get("mounts")) |mounts_val| {
+        if (venom_obj.get("mounts")) |mounts_val| {
             if (mounts_val == .array) {
                 for (mounts_val.array.items) |mount_val| {
                     if (mount_val != .object) continue;
@@ -2826,7 +3149,7 @@ fn findNodeServiceRuntimeRootPath(
             }
         }
 
-        if (service_obj.get("endpoints")) |endpoints_val| {
+        if (venom_obj.get("endpoints")) |endpoints_val| {
             if (endpoints_val == .array) {
                 for (endpoints_val.array.items) |endpoint| {
                     if (endpoint != .string) continue;
@@ -2842,7 +3165,70 @@ fn findNodeServiceRuntimeRootPath(
     return error.ServiceNotFound;
 }
 
-fn readNodeServiceRuntimeFile(
+fn discoverDefaultFsMount(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    scope: VenomBindingScope,
+) !DefaultFsMount {
+    var global_binding = venom_bindings.readPreferredVenomBinding(
+        allocator,
+        CliFsPathReader{ .allocator = allocator, .client = client },
+        .{ .agent_id = scope.agent_id, .project_id = scope.project_id },
+        "fs",
+    ) catch null;
+    defer if (global_binding) |*binding| binding.deinit(allocator);
+
+    if (global_binding) |binding| {
+        if (binding.endpoint_path) |mount_path| {
+            return .{
+                .node_id = if (binding.provider_node_id) |value|
+                    try allocator.dupe(u8, value)
+                else
+                    try allocator.dupe(u8, "local"),
+                .mount_path = try allocator.dupe(u8, mount_path),
+            };
+        }
+    }
+
+    var nodes = try control_plane.listNodes(allocator, client, &g_control_request_counter);
+    defer workspace_types.deinitNodeList(allocator, &nodes);
+
+    if (nodes.items.len == 0) return error.ServiceNotFound;
+
+    var local_index: ?usize = null;
+    for (nodes.items, 0..) |node, idx| {
+        if (std.mem.eql(u8, node.node_id, "local") or
+            std.mem.eql(u8, node.node_name, "local") or
+            std.mem.eql(u8, node.node_name, "spiderweb-local"))
+        {
+            local_index = idx;
+            break;
+        }
+    }
+
+    var order = std.ArrayListUnmanaged(usize){};
+    defer order.deinit(allocator);
+    if (local_index) |idx| try order.append(allocator, idx);
+    for (nodes.items, 0..) |_, idx| {
+        if (local_index != null and idx == local_index.?) continue;
+        try order.append(allocator, idx);
+    }
+
+    for (order.items) |idx| {
+        const node = nodes.items[idx];
+        const catalog_payload = requestNodeVenomCatalogPayload(allocator, client, node.node_id) catch continue;
+        defer allocator.free(catalog_payload);
+        const mount_path = findNodeVenomRuntimeRootPath(allocator, catalog_payload, node.node_id, "fs") catch continue;
+        return .{
+            .node_id = try allocator.dupe(u8, node.node_id),
+            .mount_path = mount_path,
+        };
+    }
+
+    return error.ServiceNotFound;
+}
+
+fn readNodeVenomRuntimeFile(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
     runtime_root: []const u8,
@@ -2853,19 +3239,19 @@ fn readNodeServiceRuntimeFile(
     return fsrpcReadPathText(allocator, client, path);
 }
 
-fn readNodeServiceRuntimeFileFallback(
+fn readNodeVenomRuntimeFileFallback(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
     runtime_root: []const u8,
     primary_name: []const u8,
     fallback_name: []const u8,
 ) ![]u8 {
-    return readNodeServiceRuntimeFile(allocator, client, runtime_root, primary_name) catch {
-        return readNodeServiceRuntimeFile(allocator, client, runtime_root, fallback_name);
+    return readNodeVenomRuntimeFile(allocator, client, runtime_root, primary_name) catch {
+        return readNodeVenomRuntimeFile(allocator, client, runtime_root, fallback_name);
     };
 }
 
-fn resolveNodeServiceRuntimeInvokePayload(
+fn resolveNodeVenomRuntimeInvokePayload(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
     runtime_root: []const u8,
@@ -2877,7 +3263,7 @@ fn resolveNodeServiceRuntimeInvokePayload(
         return allocator.dupe(u8, trimmed);
     }
 
-    const template_text = readNodeServiceRuntimeFileFallback(
+    const template_text = readNodeVenomRuntimeFileFallback(
         allocator,
         client,
         runtime_root,
@@ -2897,7 +3283,7 @@ fn resolveNodeServiceRuntimeInvokePayload(
     return allocator.dupe(u8, trimmed);
 }
 
-fn writeNodeServiceRuntimeControl(
+fn writeNodeVenomRuntimeControl(
     allocator: std.mem.Allocator,
     client: *WebSocketClient,
     runtime_root: []const u8,
@@ -2913,12 +3299,12 @@ fn writeNodeServiceRuntimeControl(
 
 fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
     if (cmd.args.len < 3) {
-        logger.err("node service-runtime requires <node_id> <service_id> <action> [payload]", .{});
+        logger.err("node service-runtime requires <node_id> <venom_id> <action> [payload]", .{});
         return error.InvalidArguments;
     }
 
     const node_id = cmd.args[0];
-    const service_id = cmd.args[1];
+    const venom_id = cmd.args[1];
     const action = parseNodeServiceRuntimeAction(cmd.args[2]) orelse {
         logger.err("node service-runtime action must be help|schema|template|status|metrics|health|config-get|config-set|invoke|enable|disable|restart|reset", .{});
         return error.InvalidArguments;
@@ -2949,20 +3335,20 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
     const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
 
-    const catalog_payload = try requestNodeServiceCatalogPayload(allocator, client, node_id);
+    const catalog_payload = try requestNodeVenomCatalogPayload(allocator, client, node_id);
     defer allocator.free(catalog_payload);
-    const runtime_root = findNodeServiceRuntimeRootPath(
+    const runtime_root = findNodeVenomRuntimeRootPath(
         allocator,
         catalog_payload,
         node_id,
-        service_id,
+        venom_id,
     ) catch |err| {
         if (err == error.ServiceNotFound) {
-            logger.err("service {s} not found for node {s}", .{ service_id, node_id });
+            logger.err("venom {s} not found for node {s}", .{ venom_id, node_id });
             return err;
         }
         if (err == error.ServiceMountNotFound) {
-            logger.err("service {s} does not expose a runtime mount path", .{service_id});
+            logger.err("venom {s} does not expose a runtime mount path", .{venom_id});
             return err;
         }
         return err;
@@ -2973,12 +3359,12 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
 
     switch (action) {
         .help => {
-            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "README.md");
+            const text = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "README.md");
             defer allocator.free(text);
             try stdout.print("{s}\n", .{text});
         },
         .schema => {
-            const text = try readNodeServiceRuntimeFileFallback(
+            const text = try readNodeVenomRuntimeFileFallback(
                 allocator,
                 client,
                 runtime_root,
@@ -2989,7 +3375,7 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
             try stdout.print("{s}\n", .{text});
         },
         .template => {
-            const text = try readNodeServiceRuntimeFileFallback(
+            const text = try readNodeVenomRuntimeFileFallback(
                 allocator,
                 client,
                 runtime_root,
@@ -3000,22 +3386,22 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
             try stdout.print("{s}\n", .{text});
         },
         .status => {
-            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
+            const text = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "status.json");
             defer allocator.free(text);
             try stdout.print("{s}\n", .{text});
         },
         .metrics => {
-            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "metrics.json");
+            const text = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "metrics.json");
             defer allocator.free(text);
             try stdout.print("{s}\n", .{text});
         },
         .health => {
-            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "health.json");
+            const text = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "health.json");
             defer allocator.free(text);
             try stdout.print("{s}\n", .{text});
         },
         .config_get => {
-            const text = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "config.json");
+            const text = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "config.json");
             defer allocator.free(text);
             try stdout.print("{s}\n", .{text});
         },
@@ -3023,24 +3409,24 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
             const path = try joinFsPath(allocator, runtime_root, "config.json");
             defer allocator.free(path);
             try fsrpcWritePathText(allocator, client, path, std.mem.trim(u8, payload_arg.?, " \t\r\n"));
-            const health = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "health.json");
+            const health = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "health.json");
             defer allocator.free(health);
-            try stdout.print("updated config for {s}/{s}\n{s}\n", .{ node_id, service_id, health });
+            try stdout.print("updated config for {s}/{s}\n{s}\n", .{ node_id, venom_id, health });
         },
         .invoke => {
-            const invoke_payload = try resolveNodeServiceRuntimeInvokePayload(
+            const invoke_payload = try resolveNodeVenomRuntimeInvokePayload(
                 allocator,
                 client,
                 runtime_root,
                 payload_arg,
             );
             defer allocator.free(invoke_payload);
-            try writeNodeServiceRuntimeControl(allocator, client, runtime_root, "invoke.json", invoke_payload);
-            const status = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
+            try writeNodeVenomRuntimeControl(allocator, client, runtime_root, "invoke.json", invoke_payload);
+            const status = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "status.json");
             defer allocator.free(status);
-            const result = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "result.json");
+            const result = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "result.json");
             defer allocator.free(result);
-            const last_error = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "last_error.txt");
+            const last_error = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "last_error.txt");
             defer allocator.free(last_error);
             try stdout.print("status:\n{s}\n", .{status});
             if (std.mem.trim(u8, last_error, " \t\r\n").len > 0) {
@@ -3056,12 +3442,12 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
                 .reset => "reset",
                 else => unreachable,
             };
-            try writeNodeServiceRuntimeControl(allocator, client, runtime_root, control_name, "{}");
-            const health = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "health.json");
+            try writeNodeVenomRuntimeControl(allocator, client, runtime_root, control_name, "{}");
+            const health = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "health.json");
             defer allocator.free(health);
-            const status = try readNodeServiceRuntimeFile(allocator, client, runtime_root, "status.json");
+            const status = try readNodeVenomRuntimeFile(allocator, client, runtime_root, "status.json");
             defer allocator.free(status);
-            try stdout.print("{s} applied for {s}/{s}\n", .{ control_name, node_id, service_id });
+            try stdout.print("{s} applied for {s}/{s}\n", .{ control_name, node_id, venom_id });
             try stdout.print("health:\n{s}\n", .{health});
             try stdout.print("status:\n{s}\n", .{status});
         },
@@ -3081,9 +3467,9 @@ fn executeNodeServiceUpsert(allocator: std.mem.Allocator, options: args.Options,
     var platform_runtime_kind: ?[]const u8 = null;
     var labels = std.ArrayListUnmanaged(NodeLabelArg){};
     defer labels.deinit(allocator);
-    var services_json: ?[]const u8 = null;
-    var services_file_raw: ?[]u8 = null;
-    defer if (services_file_raw) |raw| allocator.free(raw);
+    var venoms_json: ?[]const u8 = null;
+    var venoms_file_raw: ?[]u8 = null;
+    defer if (venoms_file_raw) |raw| allocator.free(raw);
 
     var i: usize = 2;
     while (i < cmd.args.len) : (i += 1) {
@@ -3112,28 +3498,28 @@ fn executeNodeServiceUpsert(allocator: std.mem.Allocator, options: args.Options,
             try labels.append(allocator, try parseNodeLabelArg(cmd.args[i]));
             continue;
         }
-        if (std.mem.eql(u8, arg, "--services-json")) {
+        if (std.mem.eql(u8, arg, "--services-json") or std.mem.eql(u8, arg, "--venoms-json")) {
             i += 1;
-            if (i >= cmd.args.len or services_json != null or services_file_raw != null) return error.InvalidArguments;
-            services_json = std.mem.trim(u8, cmd.args[i], " \t\r\n");
+            if (i >= cmd.args.len or venoms_json != null or venoms_file_raw != null) return error.InvalidArguments;
+            venoms_json = std.mem.trim(u8, cmd.args[i], " \t\r\n");
             continue;
         }
-        if (std.mem.eql(u8, arg, "--services-file")) {
+        if (std.mem.eql(u8, arg, "--services-file") or std.mem.eql(u8, arg, "--venoms-file")) {
             i += 1;
-            if (i >= cmd.args.len or services_json != null or services_file_raw != null) return error.InvalidArguments;
-            services_file_raw = try std.fs.cwd().readFileAlloc(allocator, cmd.args[i], 2 * 1024 * 1024);
-            services_json = std.mem.trim(u8, services_file_raw.?, " \t\r\n");
+            if (i >= cmd.args.len or venoms_json != null or venoms_file_raw != null) return error.InvalidArguments;
+            venoms_file_raw = try std.fs.cwd().readFileAlloc(allocator, cmd.args[i], 2 * 1024 * 1024);
+            venoms_json = std.mem.trim(u8, venoms_file_raw.?, " \t\r\n");
             continue;
         }
         return error.InvalidArguments;
     }
 
-    if (services_json) |raw| {
+    if (venoms_json) |raw| {
         if (raw.len == 0) return error.InvalidArguments;
-        var parsed_services = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
-        defer parsed_services.deinit();
-        if (parsed_services.value != .array) {
-            logger.err("services payload must be a JSON array", .{});
+        var parsed_venoms = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+        defer parsed_venoms.deinit();
+        if (parsed_venoms.value != .array) {
+            logger.err("venoms payload must be a JSON array", .{});
             return error.InvalidArguments;
         }
     }
@@ -3193,8 +3579,8 @@ fn executeNodeServiceUpsert(allocator: std.mem.Allocator, options: args.Options,
         try payload.append(allocator, '}');
     }
 
-    if (services_json) |raw| {
-        try payload.writer(allocator).print(",\"services\":{s}", .{raw});
+    if (venoms_json) |raw| {
+        try payload.writer(allocator).print(",\"venoms\":{s}", .{raw});
     }
 
     try payload.append(allocator, '}');
@@ -3203,7 +3589,7 @@ fn executeNodeServiceUpsert(allocator: std.mem.Allocator, options: args.Options,
         allocator,
         client,
         &g_control_request_counter,
-        "control.node_service_upsert",
+        "control.venom_upsert",
         payload.items,
     );
     defer allocator.free(payload_json);
@@ -3419,22 +3805,29 @@ fn executeAuthRotate(allocator: std.mem.Allocator, options: args.Options, cmd: a
 }
 
 fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
-    if (cmd.args.len == 0) {
+    var progress = try parseChatProgressOptions(allocator, cmd.args);
+    defer progress.deinit(allocator);
+
+    if (progress.args.len == 0) {
         logger.err("chat send requires a message", .{});
         return error.InvalidArguments;
     }
 
     const stdout = std.fs.File.stdout().deprecatedWriter();
-    const message = try std.mem.join(allocator, " ", cmd.args);
+    const message = try std.mem.join(allocator, " ", progress.args);
     defer allocator.free(message);
 
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyProjectContext(allocator, options, client);
     logger.info("Negotiating FS-RPC session...", .{});
     try fsrpcBootstrap(allocator, client);
+    var binding_scope = try resolveAttachedVenomBindingScope(allocator, client);
+    defer binding_scope.deinit(allocator);
+    var chat_paths = try discoverChatBindingPaths(allocator, client, binding_scope.asBorrowed());
+    defer chat_paths.deinit(allocator);
 
     logger.info("Submitting chat job...", .{});
-    const chat_input_fid = try fsrpcWalkPath(allocator, client, "/global/chat/control/input");
+    const chat_input_fid = try fsrpcWalkPath(allocator, client, chat_paths.input_path);
     defer fsrpcClunkBestEffort(allocator, client, chat_input_fid);
     try fsrpcOpen(allocator, client, chat_input_fid, "rw");
 
@@ -3448,28 +3841,43 @@ fn executeChatSend(allocator: std.mem.Allocator, options: args.Options, cmd: arg
         return error.InvalidResponse;
     };
 
-    const result_path = try std.fmt.allocPrint(allocator, "/global/jobs/{s}/result.txt", .{job_name});
+    const result_path = try buildJobLeafPath(allocator, chat_paths.jobs_root, job_name, chat_paths.result_leaf);
     defer allocator.free(result_path);
 
     const result_fid = try fsrpcWalkPath(allocator, client, result_path);
     defer fsrpcClunkBestEffort(allocator, client, result_fid);
     try fsrpcOpen(allocator, client, result_fid, "r");
 
-    logger.info("Waiting for chat result...", .{});
-    const content = fsrpcReadAllText(allocator, client, result_fid) catch |err| {
-        try stdout.print("Sent: \"{s}\"\n", .{message});
-        try stdout.print("Chat job queued: {s}\n", .{job_name});
-        if (write.correlation_id) |value| {
-            try stdout.print("Correlation ID: {s}\n", .{value});
-        }
-        try stdout.print("Result is not ready yet ({s}). Resume with: spider chat resume {s}\n", .{ @errorName(err), job_name });
-        return;
-    };
-    defer allocator.free(content);
-
     try stdout.print("Sent: \"{s}\"\n", .{message});
+    try stdout.print("Chat job queued: {s}\n", .{job_name});
     if (write.correlation_id) |value| {
         try stdout.print("Correlation ID: {s}\n", .{value});
+    }
+
+    logger.info("Waiting for chat result...", .{});
+    var status = try waitForChatJobCompletion(
+        allocator,
+        client,
+        stdout,
+        &chat_paths,
+        job_name,
+        progress.show_thoughts,
+        progress.quiet_progress,
+    );
+    defer status.deinit(allocator);
+
+    const content = try fsrpcReadAllText(allocator, client, result_fid);
+    defer allocator.free(content);
+
+    if (std.mem.eql(u8, status.state, "failed")) {
+        if (status.error_text) |value| {
+            try stdout.print("AI failed: {s}\n", .{value});
+        } else if (content.len > 0) {
+            try stdout.print("AI failed: {s}\n", .{content});
+        } else {
+            try stdout.print("AI failed\n", .{});
+        }
+        return;
     }
     if (content.len == 0) {
         try stdout.print("AI: (no content)\n", .{});
@@ -3510,8 +3918,14 @@ fn parseJobStatusInfo(allocator: std.mem.Allocator, status_json: []const u8) !Jo
     };
 }
 
-fn readJobStatus(allocator: std.mem.Allocator, client: *WebSocketClient, job_name: []const u8) !JobStatusInfo {
-    const status_path = try std.fmt.allocPrint(allocator, "/global/jobs/{s}/status.json", .{job_name});
+fn readJobStatus(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    jobs_root: []const u8,
+    status_leaf: []const u8,
+    job_name: []const u8,
+) !JobStatusInfo {
+    const status_path = try buildJobLeafPath(allocator, jobs_root, job_name, status_leaf);
     defer allocator.free(status_path);
     const status_fid = try fsrpcWalkPath(allocator, client, status_path);
     defer fsrpcClunkBestEffort(allocator, client, status_fid);
@@ -3521,14 +3935,66 @@ fn readJobStatus(allocator: std.mem.Allocator, client: *WebSocketClient, job_nam
     return parseJobStatusInfo(allocator, status_json);
 }
 
+fn waitForChatJobCompletion(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    stdout: anytype,
+    chat_paths: *const ChatBindingPaths,
+    job_name: []const u8,
+    show_thoughts: bool,
+    quiet_progress: bool,
+) !JobStatusInfo {
+    var last_state: ?[]u8 = null;
+    defer if (last_state) |value| allocator.free(value);
+    var last_thought: ?[]u8 = null;
+    defer if (last_thought) |value| allocator.free(value);
+
+    while (true) {
+        var status = try readJobStatus(allocator, client, chat_paths.jobs_root, chat_paths.status_leaf, job_name);
+        errdefer status.deinit(allocator);
+
+        if (!quiet_progress and (last_state == null or !std.mem.eql(u8, last_state.?, status.state))) {
+            try stdout.print("State: {s}\n", .{status.state});
+            if (last_state) |value| allocator.free(value);
+            last_state = try allocator.dupe(u8, status.state);
+        } else if (last_state == null or !std.mem.eql(u8, last_state.?, status.state)) {
+            if (last_state) |value| allocator.free(value);
+            last_state = try allocator.dupe(u8, status.state);
+        }
+
+        if (show_thoughts) if (try readLatestThoughtText(allocator, client, chat_paths.thoughts_root)) |thought| {
+            defer allocator.free(thought);
+            if (last_thought == null or !std.mem.eql(u8, last_thought.?, thought)) {
+                if (!quiet_progress) try printThoughtProgress(stdout, thought);
+                if (last_thought) |value| allocator.free(value);
+                last_thought = try allocator.dupe(u8, thought);
+            }
+        };
+
+        if (std.mem.eql(u8, status.state, "done") or std.mem.eql(u8, status.state, "failed")) {
+            return status;
+        }
+
+        status.deinit(allocator);
+        std.Thread.sleep(chat_job_poll_interval_ms * std.time.ns_per_ms);
+    }
+}
+
 fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
+    var progress = try parseChatProgressOptions(allocator, cmd.args);
+    defer progress.deinit(allocator);
+
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyProjectContext(allocator, options, client);
     try fsrpcBootstrap(allocator, client);
+    var binding_scope = try resolveAttachedVenomBindingScope(allocator, client);
+    defer binding_scope.deinit(allocator);
+    var chat_paths = try discoverChatBindingPaths(allocator, client, binding_scope.asBorrowed());
+    defer chat_paths.deinit(allocator);
 
-    if (cmd.args.len == 0) {
-        const jobs_fid = try fsrpcWalkPath(allocator, client, "/global/jobs");
+    if (progress.args.len == 0) {
+        const jobs_fid = try fsrpcWalkPath(allocator, client, chat_paths.jobs_root);
         defer fsrpcClunkBestEffort(allocator, client, jobs_fid);
         try fsrpcOpen(allocator, client, jobs_fid, "r");
         const listing = try fsrpcReadAllText(allocator, client, jobs_fid);
@@ -3542,7 +4008,7 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
         while (iter.next()) |raw| {
             const job = std.mem.trim(u8, raw, " \t\r\n");
             if (job.len == 0) continue;
-            var status = readJobStatus(allocator, client, job) catch |err| {
+            var status = readJobStatus(allocator, client, chat_paths.jobs_root, chat_paths.status_leaf, job) catch |err| {
                 try stdout.print("{s}: status unavailable ({s})\n", .{ job, @errorName(err) });
                 continue;
             };
@@ -3559,19 +4025,22 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
         return;
     }
 
-    const job_name = cmd.args[0];
-    var status = try readJobStatus(allocator, client, job_name);
+    const job_name = progress.args[0];
+    var status = try waitForChatJobCompletion(
+        allocator,
+        client,
+        stdout,
+        &chat_paths,
+        job_name,
+        progress.show_thoughts,
+        progress.quiet_progress,
+    );
     defer status.deinit(allocator);
-    try stdout.print("Job {s} state: {s}\n", .{ job_name, status.state });
     if (status.correlation_id) |value| {
         try stdout.print("Correlation ID: {s}\n", .{value});
     }
-    if (!std.mem.eql(u8, status.state, "done") and !std.mem.eql(u8, status.state, "failed")) {
-        try stdout.print("Result not ready yet\n", .{});
-        return;
-    }
 
-    const result_path = try std.fmt.allocPrint(allocator, "/global/jobs/{s}/result.txt", .{job_name});
+    const result_path = try buildJobLeafPath(allocator, chat_paths.jobs_root, job_name, chat_paths.result_leaf);
     defer allocator.free(result_path);
     const result_fid = try fsrpcWalkPath(allocator, client, result_path);
     defer fsrpcClunkBestEffort(allocator, client, result_fid);
@@ -3579,6 +4048,16 @@ fn executeChatResume(allocator: std.mem.Allocator, options: args.Options, cmd: a
     const content = try fsrpcReadAllText(allocator, client, result_fid);
     defer allocator.free(content);
 
+    if (std.mem.eql(u8, status.state, "failed")) {
+        if (status.error_text) |value| {
+            try stdout.print("AI failed: {s}\n", .{value});
+        } else if (content.len > 0) {
+            try stdout.print("AI failed: {s}\n", .{content});
+        } else {
+            try stdout.print("AI failed\n", .{});
+        }
+        return;
+    }
     if (content.len == 0) {
         try stdout.print("AI: (no content)\n", .{});
     } else {

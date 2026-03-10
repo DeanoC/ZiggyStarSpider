@@ -24,7 +24,7 @@ No legacy compatibility path is maintained in this client.
   - includes handshake and project/node/workspace-status control calls
 - `acheron`:
   - filesystem transport (`t_walk`, `t_open`, `t_read`, `t_write`, etc.)
-  - capability IO (for example chat via `/global/chat/control/input`)
+  - capability IO discovered from Venom contracts (for example `chat` via `/global/venoms/VENOMS.json` + `OPS.json`)
 
 ### Required control handshake
 
@@ -84,7 +84,7 @@ Persistent local state:
 
 1. control-plane operations (`project`, `node`, `workspace`)
 2. FS-RPC filesystem operations (`fs`)
-3. FS-RPC chat flow via `/global/chat` and `/global/jobs`
+3. FS-RPC chat flow discovered from the bound `chat` Venom plus its companion jobs root
 
 Project context handling:
 
@@ -122,11 +122,12 @@ Then path-based operations:
 - `t_read` / `t_write`
 - `t_clunk` for fid cleanup
 
-Chat currently uses canonical namespace paths:
+Chat now discovers its canonical paths from the bound `chat` Venom contract:
 
-- write prompt to `/global/chat/control/input`
-- read result from `/global/jobs/<job>/result.txt`
-- resume from `/global/jobs/<job>/status.json` after reconnect when needed
+- read `/global/venoms/VENOMS.json`
+- resolve the bound `chat` Venom root and `invoke_path`
+- read `OPS.json` for `jobs_root`, `status_leaf`, and `result_leaf`
+- use those paths for send/resume instead of assuming fixed builtin locations
 
 ## Current Limitations
 
