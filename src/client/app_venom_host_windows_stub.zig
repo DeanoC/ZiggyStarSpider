@@ -62,7 +62,7 @@ pub const AppVenomHost = struct {
         options: InitOptions,
     ) !AppVenomHost {
         _ = options;
-        return .{
+        const out = AppVenomHost{
             .allocator = allocator,
             .control_url = try allocator.dupe(u8, control_url),
             .auth_token = try allocator.dupe(u8, auth_token),
@@ -70,6 +70,14 @@ pub const AppVenomHost = struct {
             .node_id = try allocator.dupe(u8, identity.node_id),
             .node_secret = try allocator.dupe(u8, identity.node_secret),
         };
+        errdefer {
+            allocator.free(out.control_url);
+            allocator.free(out.auth_token);
+            allocator.free(out.node_name);
+            allocator.free(out.node_id);
+            allocator.free(out.node_secret);
+        }
+        return out;
     }
 
     pub fn deinit(self: *AppVenomHost) void {
