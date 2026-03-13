@@ -177,6 +177,7 @@ fn addGuiArtifact(
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const os_tag = target.result.os.tag;
     const git_revision = detectGitRevision(b);
     const terminal_backend_option = b.option(
         []const u8,
@@ -245,8 +246,10 @@ pub fn build(b: *std.Build) void {
     cli_module.addImport("websocket", websocket.module("websocket"));
     cli_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     cli_module.addImport("spider-protocol", spider_protocol_module);
-    cli_module.addImport("spiderweb_node", spiderweb_node_module);
-    cli_module.addImport("spiderweb_fs", spiderweb_fs_module);
+    if (os_tag != .windows) {
+        cli_module.addImport("spiderweb_node", spiderweb_node_module);
+        cli_module.addImport("spiderweb_fs", spiderweb_fs_module);
+    }
     cli_module.addImport("build_options", build_options_module);
 
     const cli_exe = b.addExecutable(.{
@@ -294,8 +297,10 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("websocket", websocket.module("websocket"));
     test_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     test_module.addImport("spider-protocol", spider_protocol_module);
-    test_module.addImport("spiderweb_node", spiderweb_node_module);
-    test_module.addImport("spiderweb_fs", spiderweb_fs_module);
+    if (os_tag != .windows) {
+        test_module.addImport("spiderweb_node", spiderweb_node_module);
+        test_module.addImport("spiderweb_fs", spiderweb_fs_module);
+    }
     test_module.addImport("build_options", build_options_module);
 
     const unit_tests = b.addTest(.{

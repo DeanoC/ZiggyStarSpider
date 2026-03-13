@@ -1,11 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const args = @import("args.zig");
 const logger = @import("ziggy-core").utils.logger;
 const WebSocketClient = @import("../client/websocket.zig").WebSocketClient;
 const Config = @import("../client/config.zig").Config;
 const control_plane = @import("../client/control_plane.zig");
 const venom_bindings = @import("../client/venom_bindings.zig");
-const app_venom_host = @import("../client/app_venom_host.zig");
+const app_venom_host = if (builtin.os.tag == .windows)
+    @import("../client/app_venom_host_windows_stub.zig")
+else
+    @import("../client/app_venom_host.zig");
 const workspace_types = @import("../client/workspace_types.zig");
 const unified = @import("spider-protocol").unified;
 
