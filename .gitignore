@@ -2,6 +2,7 @@
 zig-out/
 zig-cache/
 .zig-cache/
+libs/
 
 # Common IDE/Editor folders
 .vscode/

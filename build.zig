@@ -277,6 +277,7 @@ fn addGuiArtifact(
             gui_exe.root_module.linkFramework("Cocoa", .{});
             gui_exe.root_module.linkFramework("IOKit", .{});
             gui_exe.root_module.linkFramework("Foundation", .{});
+            gui_exe.root_module.linkFramework("IOSurface", .{});
             gui_exe.root_module.linkFramework("QuartzCore", .{});
         },
         .linux => {

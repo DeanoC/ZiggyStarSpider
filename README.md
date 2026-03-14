@@ -38,6 +38,16 @@ zig build gui -Dterminal-backend=ghostty-vt
 
 GUI binary: `zig-out/bin/spider-gui`
 
+### macOS App Bundle
+
+```bash
+./scripts/package-macos-app.sh
+```
+
+This creates:
+- `zig-out/SpiderApp.app`
+- `zig-out/SpiderApp-macos-arm64.zip`
+
 Terminal backend notes:
 - build option sets the default (`plain` or `ghostty-vt`)
 - runtime selection is available in **Settings -> Terminal renderer**
