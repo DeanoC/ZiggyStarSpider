@@ -581,12 +581,14 @@ pub fn build(b: *std.Build) void {
             android_lib.root_module.linkSystemLibrary("c++_shared", .{});
             android_lib.root_module.addSystemIncludePath(.{ .cwd_relative = apk.ndk.include_path });
             android_lib.linkLibrary(freetype_android.artifact("freetype"));
+            android_lib.root_module.addIncludePath(b.path("libs/dawn/out/Debug/gen/include"));
+            android_lib.root_module.addIncludePath(b.path("libs/dawn/include"));
             android_lib.addCSourceFile(.{
                 .file = zgpu_android.path("src/dawn.cpp"),
                 .flags = &.{"-std=c++17"},
             });
             android_lib.addCSourceFile(.{
-                .file = zgpu_android.path("src/dawn_proc.c"),
+                .file = b.path("libs/dawn/out/Debug/gen/src/dawn/dawn_proc.c"),
                 .flags = &.{},
             });
             mach_gpu_dawn.link(b, android_lib, android_lib.root_module, .{
