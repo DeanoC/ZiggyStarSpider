@@ -1,0 +1,7 @@
+.{
+    .name = .xcode_frameworks,
+    .version = "0.0.0",
+    .paths = .{
+        "build.zig",
+    },
+}

@@ -1,0 +1,29 @@
+.{
+    .name = .mach_gpu_dawn,
+    .version = "0.2.0",
+    .paths = .{
+        "deps",
+        "dev",
+        "src",
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+        "README.md",
+    },
+    .dependencies = .{
+        .xcode_frameworks = .{
+            .path = "deps/xcode_frameworks",
+        },
+        .direct3d_headers = .{
+            .path = "deps/direct3d_headers",
+        },
+        .vulkan_headers = .{
+            .path = "deps/vulkan_headers",
+        },
+        .x11_headers = .{
+            .path = "deps/x11_headers",
+        },
+    },
+}

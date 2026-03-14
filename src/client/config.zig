@@ -1,4 +1,5 @@
 const std = @import("std");
+const storage = @import("platform_storage");
 
 // Client configuration for SpiderApp
 
@@ -166,6 +167,7 @@ pub const Config = struct {
             .update_manifest_url = update_manifest_url,
             .connection_profiles = profiles,
             .selected_profile_id = selected_profile_id,
+            .watch_theme_pack = storage.supportsThemePackWatch(),
         };
     }
 
@@ -708,7 +710,7 @@ pub const Config = struct {
     }
 
     pub fn setWatchThemePack(self: *Config, enabled: bool) void {
-        self.watch_theme_pack = enabled;
+        self.watch_theme_pack = enabled and storage.supportsThemePackWatch();
     }
 
     pub fn setTerminalBackend(self: *Config, value: ?[]const u8) !void {
@@ -962,6 +964,10 @@ pub const Config = struct {
 
     /// Get config directory path
     pub fn getConfigDir(allocator: std.mem.Allocator) ![]const u8 {
+        if (storage.isAndroid()) {
+            return allocator.dupe(u8, storage.android_config_dir_name);
+        }
+
         const home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
             error.EnvironmentVariableNotFound => {
                 // Windows fallback
@@ -983,11 +989,11 @@ pub const Config = struct {
         const backup_path = try unsupportedConfigBackupPath(allocator, config_path);
         defer allocator.free(backup_path);
 
-        std.fs.deleteFileAbsolute(backup_path) catch |err| switch (err) {
+        deletePath(backup_path) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
         };
-        try std.fs.renameAbsolute(config_path, backup_path);
+        try renamePath(config_path, backup_path);
         std.log.warn(
             "unsupported SpiderApp config schema at {s}; moved previous config to {s} and starting with defaults",
             .{ config_path, backup_path },
@@ -1069,7 +1075,7 @@ pub const Config = struct {
                 try allocator.dupe(u8, "https://github.com/DeanoC/SpiderApp/releases/latest/download/update.json"),
             .theme_mode = parseThemeMode(json.theme_mode),
             .theme_pack = try duplicateOptionalString(allocator, json.theme_pack),
-            .watch_theme_pack = json.watch_theme_pack orelse false,
+            .watch_theme_pack = (json.watch_theme_pack orelse false) and storage.supportsThemePackWatch(),
             .theme_pack_recent = try duplicateOptionalList(allocator, json.theme_pack_recent),
             .theme_profile = parseThemeProfile(json.theme_profile),
             .terminal_backend = try duplicateOptionalString(allocator, json.terminal_backend),
@@ -1379,6 +1385,20 @@ fn themeProfileName(profile: Config.ThemeProfile) []const u8 {
         .tablet => "tablet",
         .fullscreen => "fullscreen",
     };
+}
+
+fn deletePath(path: []const u8) !void {
+    if (std.fs.path.isAbsolute(path)) {
+        return std.fs.deleteFileAbsolute(path);
+    }
+    return std.fs.cwd().deleteFile(path);
+}
+
+fn renamePath(old_path: []const u8, new_path: []const u8) !void {
+    if (std.fs.path.isAbsolute(old_path) and std.fs.path.isAbsolute(new_path)) {
+        return std.fs.renameAbsolute(old_path, new_path);
+    }
+    return std.fs.cwd().rename(old_path, new_path);
 }
 
 test "theme config uses modern keys and round-trips" {

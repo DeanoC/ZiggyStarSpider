@@ -1,0 +1,7 @@
+.{
+    .name = .vulkan_headers,
+    .version = "0.0.0",
+    .paths = .{
+        "build.zig",
+    },
+}

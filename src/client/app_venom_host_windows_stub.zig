@@ -1,5 +1,5 @@
 const std = @import("std");
-const control_plane = @import("control_plane.zig");
+const control_plane = @import("control_plane");
 
 pub const WasmChatOwnedConfig = struct {
     module_path: []u8,

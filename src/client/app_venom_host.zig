@@ -1,6 +1,6 @@
 const std = @import("std");
 const ws = @import("websocket");
-const control_plane = @import("control_plane.zig");
+const control_plane = @import("control_plane");
 const shared_node = @import("spiderweb_node");
 const fs_protocol = @import("spiderweb_fs").fs_protocol;
 const unified = @import("spider-protocol").unified;

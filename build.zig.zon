@@ -19,6 +19,19 @@
         .ziggy_ui_panels = .{
             .path = "deps/ziggy-ui-panels",
         },
+        .freetype = .{
+            .path = "deps/ziggy-ui/deps/freetype",
+        },
+        .android = .{
+            .path = "deps/android",
+        },
+        .mach_gpu_dawn = .{
+            .path = "deps/mach-gpu-dawn",
+        },
+        .sdl3_android_zip = .{
+            .url = "https://github.com/libsdl-org/SDL/releases/download/release-3.2.28/SDL3-devel-3.2.28-android.zip",
+            .hash = "N-V-__8AABsi6gAQwmFrn4CeuPIOfI95LP9XH1T0dyqc1F12",
+        },
         .sdl3 = .{
             .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",
             .hash = "sdl-0.3.3+3.2.28-7uIn9MiRfwFhqxnwBi_vCQlKr82YpwkQBVwdz2uy46S1",
@@ -51,9 +64,12 @@
     },
     .paths = .{
         ".gitmodules",
+        "android",
         "build.zig",
         "build.zig.zon",
         "deps",
+        "docs",
+        "scripts",
         "src",
         "README.md",
     },

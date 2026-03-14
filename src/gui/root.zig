@@ -3,11 +3,13 @@ const builtin = @import("builtin");
 const zui = @import("ziggy-ui");
 const zui_panels = @import("ziggy-ui-panels");
 const ws_client_mod = @import("websocket_client.zig");
+const app_venom_host = @import("app_venom_host");
 const config_mod = @import("client-config");
 const credential_store_mod = config_mod.credential_store;
 const control_plane = @import("control_plane");
 const venom_bindings = @import("venom_bindings");
 const build_options = @import("build_options");
+const storage = @import("platform_storage");
 const workspace_types = control_plane.workspace_types;
 const panels_bridge = @import("panels_bridge.zig");
 const stage_machine = @import("stage_machine.zig");
@@ -78,6 +80,7 @@ const FSRPC_READ_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 const CONTROL_CONNECT_TIMEOUT_MS: i64 = 2_500;
 const CONTROL_SESSION_ATTACH_TIMEOUT_MS: i64 = 8_000;
 const CONTROL_SESSION_STATUS_TIMEOUT_MS: i64 = 2_000;
+const APP_LOCAL_NODE_LEASE_TTL_MS: u64 = 15 * 60 * 1000;
 const DEFAULT_MAIN_WINDOW_WIDTH: c_int = 1440;
 const DEFAULT_MAIN_WINDOW_HEIGHT: c_int = 900;
 const MIN_MAIN_WINDOW_WIDTH: c_int = 1100;
@@ -307,6 +310,11 @@ const MissionRecordView = struct {
     }
 };
 
+fn platformWindowTitle(title: [:0]const u8) [:0]const u8 {
+    if (storage.isAndroid()) return "";
+    return title;
+}
+
 const FsrpcEnvelope = struct {
     raw: []u8,
     parsed: std.json.Parsed(std.json.Value),
@@ -509,6 +517,30 @@ fn normalizeProjectToken(project_token: ?[]const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, token, " \t\r\n");
     if (trimmed.len == 0) return null;
     return trimmed;
+}
+
+fn platformSupportsMultiWindow() bool {
+    return storage.supportsMultiWindow();
+}
+
+fn themePackWatchSupported() bool {
+    return storage.supportsThemePackWatch();
+}
+
+fn themePackBrowseSupported() bool {
+    return storage.supportsThemePackBrowse();
+}
+
+fn themePackRefreshSupported() bool {
+    return storage.supportsThemePackRefresh();
+}
+
+fn platformSupportsWindowGeometryPersistence() bool {
+    return storage.supportsWindowGeometryPersistence();
+}
+
+fn platformSupportsWorkspaceSnapshots() bool {
+    return storage.supportsWorkspaceSnapshots();
 }
 
 fn containsCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
@@ -1317,6 +1349,7 @@ const App = struct {
     connect_setup_hint: ?ConnectSetupHint = null,
 
     ws_client: ?ws_client_mod.WebSocketClient = null,
+    app_local_venom_host: ?app_venom_host.AppVenomHost = null,
 
     connection_state: ConnectionState = .disconnected,
     status_text: []u8,
@@ -1447,7 +1480,7 @@ const App = struct {
     theme_pack_watch_next_scan_ms: i64 = 0,
     theme_pack_watch_stamp_ns: i128 = 0,
 
-    pub fn init(allocator: std.mem.Allocator) !App {
+    pub fn init(allocator: std.mem.Allocator) !*App {
         panels_bridge.assertAvailable();
         // Load config before creating window so saved geometry can be restored.
         var config = config_mod.Config.load(allocator) catch |err| blk: {
@@ -1464,14 +1497,16 @@ const App = struct {
         try zapp.sdl_app.init(.{ .video = true, .events = true, .gamepad = false });
         zapp.clipboard.init();
 
-        const window = zapp.sdl_app.createWindow("SpiderApp GUI", initial_width, initial_height, c.SDL_WINDOW_RESIZABLE) catch {
+        const window = zapp.sdl_app.createWindow(platformWindowTitle("SpiderApp GUI"), initial_width, initial_height, c.SDL_WINDOW_RESIZABLE) catch {
             return error.SdlWindowCreateFailed;
         };
         errdefer c.SDL_DestroyWindow(window);
         _ = c.SDL_SetWindowMinimumSize(window, MIN_MAIN_WINDOW_WIDTH, MIN_MAIN_WINDOW_HEIGHT);
-        if (config.window_x) |window_x| {
-            if (config.window_y) |window_y| {
-                _ = c.SDL_SetWindowPosition(window, window_x, window_y);
+        if (platformSupportsWindowGeometryPersistence()) {
+            if (config.window_x) |window_x| {
+                if (config.window_y) |window_y| {
+                    _ = c.SDL_SetWindowPosition(window, window_x, window_y);
+                }
             }
         }
 
@@ -1553,40 +1588,67 @@ const App = struct {
             settings_panel.theme_pack.clearRetainingCapacity();
             settings_panel.theme_pack.appendSlice(allocator, value) catch {};
         }
-        settings_panel.watch_theme_pack = config.watch_theme_pack;
+        settings_panel.watch_theme_pack = config.watch_theme_pack and themePackWatchSupported();
         settings_panel.ws_verbose_logs = config.gui_verbose_ws_logs;
         settings_panel.auto_connect_on_launch = config.auto_connect_on_launch;
         settings_panel.terminal_backend_kind = terminal_render_backend.Backend.parseKind(
             config.selectedTerminalBackend() orelse TERMINAL_BACKEND_KIND,
         );
 
-        var app = App{
-            .allocator = allocator,
-            .window = window,
-            .gpu = gpu,
-            .swapchain = swapchain,
-            .settings_panel = settings_panel,
-            .client_context = undefined,
-            .agent_registry = undefined,
-            .status_text = try allocator.dupe(u8, "Not connected"),
-            .theme = zui.theme.current(),
-            .host_theme_engine = zui.theme_engine.ThemeEngine.init(allocator, zui.theme_engine.PlatformCaps.defaultForTarget()),
-            .shared_theme_engine = zui.ui.theme_engine.theme_engine.ThemeEngine.init(
-                allocator,
-                zui.ui.theme_engine.profile.PlatformCaps.defaultForTarget(),
-            ),
-            .ui_scale = 1.0,
-            .metrics_context = undefined,
-            .config = config,
-            .ui_commands = zui.ui.render.command_list.CommandList.init(allocator),
-            .ui_inbox = ui_command_inbox.UiCommandInbox.init(allocator),
-            .frame_clock = zapp.frame_clock.FrameClock.init(60),
-            .debug_folded_blocks = std.AutoHashMap(DebugFoldKey, void).init(allocator),
-            .terminal_backend_kind = settings_panel.terminal_backend_kind,
-            .terminal_backend = initTerminalBackend(settings_panel.terminal_backend_kind),
-            .manager = undefined,
-            .credential_store = credential_store,
-        };
+        var app = try allocator.create(App);
+        errdefer allocator.destroy(app);
+        @memset(std.mem.asBytes(app), 0);
+        app.allocator = allocator;
+        app.window = window;
+        app.gpu = gpu;
+        app.swapchain = swapchain;
+        app.settings_panel = settings_panel;
+        app.next_panel_id = 1;
+        app.debug_stream_enabled = true;
+        app.debug_next_event_id = 1;
+        app.debug_events_revision = 1;
+        app.debug_folded_blocks = std.AutoHashMap(DebugFoldKey, void).init(allocator);
+        app.debug_fold_revision = 1;
+        app.perf_automation_duration_ms = PERF_AUTOMATION_DEFAULT_DURATION_MS;
+        app.filesystem_sort_key = .name;
+        app.filesystem_sort_direction = .ascending;
+        app.filesystem_type_column_width = 96.0;
+        app.filesystem_modified_column_width = 122.0;
+        app.filesystem_size_column_width = 72.0;
+        app.filesystem_column_resize_handle = .none;
+        app.filesystem_preview_split_ratio = 0.28;
+        app.filesystem_preview_mode = .empty;
+        app.filesystem_preview_kind = .unknown;
+        app.filesystem_next_request_id = 1;
+        app.terminal_backend_kind = settings_panel.terminal_backend_kind;
+        app.terminal_backend = initTerminalBackend(settings_panel.terminal_backend_kind);
+        app.terminal_auto_poll = true;
+        app.session_attach_state = .unknown;
+        app.connection_state = .disconnected;
+        app.status_text = try allocator.dupe(u8, "Not connected");
+        app.ui_stage = .launcher;
+        app.theme = zui.theme.current();
+        app.host_theme_engine = zui.theme_engine.ThemeEngine.init(
+            allocator,
+            zui.theme_engine.PlatformCaps.defaultForTarget(),
+        );
+        app.shared_theme_engine = zui.ui.theme_engine.theme_engine.ThemeEngine.init(
+            allocator,
+            zui.ui.theme_engine.profile.PlatformCaps.defaultForTarget(),
+        );
+        app.ui_scale = 1.0;
+        app.config = config;
+        app.ui_commands = zui.ui.render.command_list.CommandList.init(allocator);
+        app.ui_inbox = ui_command_inbox.UiCommandInbox.init(allocator);
+        app.frame_clock = zapp.frame_clock.FrameClock.init(60);
+        app.ascii_glyph_width_cache = [_]f32{-1.0} ** 128;
+        app.running = true;
+        app.text_edit_history_field = .none;
+        app.active_pointer_layer = .base;
+        app.frame_dt_seconds = 1.0 / 60.0;
+        app.next_fsrpc_tag = 1;
+        app.next_fsrpc_fid = 2;
+        app.credential_store = credential_store;
         app.configurePerfAutomationFromEnv();
         app.launcher_project_filter.appendSlice(allocator, "") catch {};
         app.launcher_profile_name.appendSlice(allocator, "") catch {};
@@ -1641,10 +1703,10 @@ const App = struct {
         );
         try app.ui_windows.append(allocator, main_window);
         app.main_window_id = main_window.id;
-        _ = c.SDL_SetWindowTitle(window, "SpiderApp - Launcher");
+        _ = c.SDL_SetWindowTitle(window, platformWindowTitle("SpiderApp - Launcher"));
 
-        errdefer app.settings_panel.deinit(allocator);
         errdefer allocator.free(app.status_text);
+        errdefer app.settings_panel.deinit(allocator);
 
         ui_sdl_input_backend.init(allocator);
         ui_input_router.setBackend(ui_input_backend.sdl3);
@@ -1663,6 +1725,10 @@ const App = struct {
 
     pub fn deinit(self: *App) void {
         self.persistMainWindowGeometry();
+        if (self.app_local_venom_host) |*host| {
+            host.deinit();
+            self.app_local_venom_host = null;
+        }
         self.disconnect();
         self.clearSessions();
         self.chat_sessions.deinit(self.allocator);
@@ -2159,6 +2225,7 @@ const App = struct {
     }
 
     fn spawnUiWindow(self: *App) !void {
+        if (!platformSupportsMultiWindow()) return error.UnsupportedPlatform;
         const width: c_int = 960;
         const height: c_int = 720;
         const title = try std.fmt.allocPrint(self.allocator, "SpiderApp GUI ({d})", .{self.ui_windows.items.len});
@@ -2496,7 +2563,7 @@ const App = struct {
                         out.changed_layout = true;
                         out.focus_panel_id = drag_panel_id;
                     }
-                } else if (!dock_rect.contains(release_pos)) {
+                } else if (platformSupportsMultiWindow() and !dock_rect.contains(release_pos)) {
                     out.detach_panel_id = drag_panel_id;
                     out.focus_panel_id = drag_panel_id;
                 } else {
@@ -2525,13 +2592,13 @@ const App = struct {
                     if (committed) {
                         out.changed_layout = true;
                         out.focus_panel_id = drag_panel_id;
-                    } else if (!dock_rect.contains(release_pos)) {
+                    } else if (platformSupportsMultiWindow() and !dock_rect.contains(release_pos)) {
                         out.detach_panel_id = drag_panel_id;
                         out.focus_panel_id = drag_panel_id;
                     } else {
                         out.focus_panel_id = drag_panel_id;
                     }
-                } else if (!dock_rect.contains(release_pos)) {
+                } else if (platformSupportsMultiWindow() and !dock_rect.contains(release_pos)) {
                     out.detach_panel_id = drag_panel_id;
                     out.focus_panel_id = drag_panel_id;
                 } else {
@@ -2549,6 +2616,7 @@ const App = struct {
         source_window: *UiWindow,
         panel_id: workspace.PanelId,
     ) void {
+        if (!platformSupportsMultiWindow()) return;
         const source_manager = self.managerForWindow(source_window);
         const moved = source_manager.takePanel(panel_id) orelse return;
         if (source_manager.workspace.syncDockLayout() catch false) {
@@ -2715,6 +2783,7 @@ const App = struct {
     }
 
     fn windowUnderGlobalMouse(self: *App, exclude_window_id: u32) ?WindowMouseHit {
+        if (!platformSupportsMultiWindow()) return null;
         var mouse_global_x: f32 = 0.0;
         var mouse_global_y: f32 = 0.0;
         _ = c.SDL_GetGlobalMouseState(&mouse_global_x, &mouse_global_y);
@@ -2760,6 +2829,7 @@ const App = struct {
     }
 
     fn focusedWindowMouseHit(self: *App, exclude_window_id: u32) ?WindowMouseHit {
+        if (!platformSupportsMultiWindow()) return null;
         const mouse_focus = c.SDL_GetMouseFocus();
         const hover_window_id: u32 = if (mouse_focus) |window| c.SDL_GetWindowID(window) else 0;
         if (hover_window_id == 0 or hover_window_id == exclude_window_id) return null;
@@ -3197,6 +3267,7 @@ const App = struct {
     }
 
     fn captureWorkspaceSnapshot(self: *App, manager: *panel_manager.PanelManager) void {
+        if (!platformSupportsWorkspaceSnapshots()) return;
         if (!self.isWorkspaceStateReasonable(manager)) return;
         const snapshot = manager.workspace.toSnapshot(self.allocator) catch {
             if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
@@ -3234,6 +3305,7 @@ const App = struct {
     }
 
     fn restoreWorkspaceFromSnapshot(self: *App, manager: *panel_manager.PanelManager) bool {
+        if (!platformSupportsWorkspaceSnapshots()) return false;
         const snapshot = self.workspace_snapshot orelse return false;
         if (!self.isWorkspaceSnapshotReasonable(snapshot)) {
             if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
@@ -3850,6 +3922,7 @@ const App = struct {
     }
 
     fn detachPanelToNewWindow(self: *App, source_window: *UiWindow, panel_id: workspace.PanelId) void {
+        if (!platformSupportsMultiWindow()) return;
         const moved = source_window.manager.takePanel(panel_id) orelse return;
         if (source_window.manager.workspace.syncDockLayout() catch false) {
             source_window.manager.workspace.markDirty();
@@ -3867,6 +3940,7 @@ const App = struct {
     }
 
     fn createDetachedWindowFromPanel(self: *App, source_window: *UiWindow, panel: workspace.Panel) bool {
+        if (!platformSupportsMultiWindow()) return false;
         var ws = workspace.Workspace.initEmpty(self.allocator);
         var ws_owned = true;
         defer if (ws_owned) ws.deinit(self.allocator);
@@ -3904,6 +3978,7 @@ const App = struct {
         title: []const u8,
         persist_in_workspace: bool,
     ) !*UiWindow {
+        if (!platformSupportsMultiWindow()) return error.UnsupportedPlatform;
         const width: c_int = 960;
         const height: c_int = 720;
         const title_with_null = try self.allocator.alloc(u8, title.len + 1);
@@ -4212,6 +4287,7 @@ const App = struct {
     }
 
     fn setDragMouseCapture(self: *App, enabled: bool) void {
+        if (storage.isAndroid()) return;
         if (self.drag_mouse_capture_active == enabled) return;
         _ = c.SDL_CaptureMouse(enabled);
         self.drag_mouse_capture_active = enabled;
@@ -4232,6 +4308,7 @@ const App = struct {
     }
 
     fn syncMouseStateFromGlobal(self: *App, ui_window: *UiWindow) void {
+        if (storage.isAndroid()) return;
         var mouse_global_x: f32 = 0.0;
         var mouse_global_y: f32 = 0.0;
         const buttons = c.SDL_GetGlobalMouseState(&mouse_global_x, &mouse_global_y);
@@ -4625,7 +4702,7 @@ const App = struct {
                 self.running = false;
             },
             .y => {
-                if (key_evt.mods.ctrl and !key_evt.repeat) {
+                if (platformSupportsMultiWindow() and key_evt.mods.ctrl and !key_evt.repeat) {
                     request_spawn_window.* = true;
                 }
             },
@@ -4794,7 +4871,7 @@ const App = struct {
         self.config.setThemeProfile(configThemeProfileFromSettings(self.settings_panel.theme_profile));
         try self.config.setThemePack(if (self.settings_panel.theme_pack.items.len > 0) self.settings_panel.theme_pack.items else null);
         _ = self.config.rememberThemePack(self.effectiveThemePackPath());
-        self.config.setWatchThemePack(self.settings_panel.watch_theme_pack);
+        self.config.setWatchThemePack(self.settings_panel.watch_theme_pack and themePackWatchSupported());
         try self.config.setTerminalBackend(terminal_render_backend.Backend.kindName(self.settings_panel.terminal_backend_kind));
         self.config.gui_verbose_ws_logs = self.settings_panel.ws_verbose_logs;
         try self.config.syncSelectedProfileFromLegacyFields();
@@ -6902,6 +6979,7 @@ const App = struct {
     }
 
     fn openThemePackBrowseLocation(self: *App) void {
+        if (!themePackBrowseSupported()) return;
         const target = self.rawThemePackPath() orelse "themes";
         const argv = switch (builtin.target.os.tag) {
             .windows => [_][]const u8{ "explorer.exe", target },
@@ -7930,6 +8008,7 @@ const App = struct {
     }
 
     fn windowMenuBarHeight(self: *App) f32 {
+        if (storage.isAndroid()) return 0.0;
         const layout = self.panelLayoutMetrics();
         return @max(layout.button_height + layout.inner_inset * 1.2, 30.0 * self.ui_scale);
     }
@@ -7959,6 +8038,9 @@ const App = struct {
     }
 
     fn drawWindowMenuBar(self: *App, ui_window: *UiWindow, fb_width: u32) f32 {
+        if (storage.isAndroid()) {
+            return 0.0;
+        }
         const layout = self.panelLayoutMetrics();
         const bar_h = self.windowMenuBarHeight();
         const bar_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), bar_h);
@@ -8135,7 +8217,7 @@ const App = struct {
                     }
                 },
                 .window => {
-                    if (self.drawButtonWidget(
+                    if (platformSupportsMultiWindow() and self.drawButtonWidget(
                         Rect.fromXYWH(row_x, row_y, row_w, row_h),
                         "New Window",
                         .{ .variant = .secondary },
@@ -12247,10 +12329,10 @@ const App = struct {
                 .failed => .failed,
             },
             .theme_pack_status_text = pack_status.msg,
-            .theme_pack_watch_supported = !(builtin.target.os.tag == .emscripten or builtin.target.os.tag == .wasi),
+            .theme_pack_watch_supported = themePackWatchSupported(),
             .theme_pack_reload_supported = true,
-            .theme_pack_browse_supported = true,
-            .theme_pack_refresh_supported = !(builtin.target.os.tag == .emscripten or builtin.target.os.tag == .wasi),
+            .theme_pack_browse_supported = themePackBrowseSupported(),
+            .theme_pack_refresh_supported = themePackRefreshSupported(),
         };
     }
 
@@ -12359,8 +12441,12 @@ const App = struct {
                 self.applyThemeSettings(false);
             },
             .toggle_watch_theme_pack => {
-                self.settings_panel.watch_theme_pack = !self.settings_panel.watch_theme_pack;
-                if (self.settings_panel.watch_theme_pack) self.syncThemePackWatchStamp();
+                if (themePackWatchSupported()) {
+                    self.settings_panel.watch_theme_pack = !self.settings_panel.watch_theme_pack;
+                    if (self.settings_panel.watch_theme_pack) self.syncThemePackWatchStamp();
+                } else {
+                    self.settings_panel.watch_theme_pack = false;
+                }
             },
             .apply_theme_pack_input => {
                 _ = self.config.rememberThemePack(self.effectiveThemePackPath());
@@ -12389,7 +12475,7 @@ const App = struct {
                 self.openThemePackBrowseLocation();
             },
             .refresh_theme_pack_list => {
-                self.refreshThemePackEntries();
+                if (themePackRefreshSupported()) self.refreshThemePackEntries();
             },
             .toggle_auto_connect_on_launch => {
                 self.settings_panel.auto_connect_on_launch = !self.settings_panel.auto_connect_on_launch;
@@ -15194,6 +15280,11 @@ const App = struct {
                 std.log.warn("Failed to parse connect setup hint payload: {s}", .{@errorName(err)});
                 self.clearConnectSetupHint();
             };
+            if (storage.isAndroid()) {
+                self.ensureAppLocalNodeBootstrap(client) catch |err| {
+                    std.log.warn("SpiderApp Android local node bootstrap skipped: {s}", .{@errorName(err)});
+                };
+            }
         }
 
         self.setFilesystemError("Filesystem transport is idle until you attach a Spiderweb session to the selected workspace.");
@@ -15608,7 +15699,7 @@ const App = struct {
         self.restoreWorkspaceLayout(profile_id, project_id) catch {};
         self.config.recordRecentWorkspace(profile_id, project_id, null) catch {};
         self.config.save() catch {};
-        _ = c.SDL_SetWindowTitle(self.window, "SpiderApp - Workspace");
+        _ = c.SDL_SetWindowTitle(self.window, platformWindowTitle("SpiderApp - Workspace"));
     }
 
     fn returnToLauncher(self: *App, reason: stage_machine.ReturnReason) void {
@@ -15625,7 +15716,7 @@ const App = struct {
             self.active_project_id = null;
         }
         self.closeAllSecondaryWindows();
-        _ = c.SDL_SetWindowTitle(self.window, "SpiderApp - Launcher");
+        _ = c.SDL_SetWindowTitle(self.window, platformWindowTitle("SpiderApp - Launcher"));
         switch (reason) {
             .switched_project => self.setLauncherNotice("Switched back to launcher. Select another workspace."),
             .connection_lost => self.setLauncherNotice("Connection lost. Reconnect to continue."),
@@ -15656,6 +15747,7 @@ const App = struct {
     }
 
     fn persistMainWindowGeometry(self: *App) void {
+        if (!platformSupportsWindowGeometryPersistence()) return;
         var window_x: c_int = 0;
         var window_y: c_int = 0;
         var window_w: c_int = 0;
@@ -15698,6 +15790,119 @@ const App = struct {
         self.clearFilesystemDirCache();
         self.clearTerminalState();
         self.clearNodeServiceReloadDiagnostics();
+    }
+
+    fn ensureAppLocalNodeBootstrap(self: *App, client: *ws_client_mod.WebSocketClient) !void {
+        const profile_id = self.config.selectedProfileId();
+        const node_name = try app_venom_host.buildAppLocalNodeName(self.allocator, profile_id);
+        defer self.allocator.free(node_name);
+
+        const active_token = self.config.getRoleToken(self.config.active_role);
+        var bootstrap_token = active_token;
+        var bootstrap_client = client;
+        var used_admin_fallback = false;
+        var admin_client_storage: ?ws_client_mod.WebSocketClient = null;
+        defer if (admin_client_storage) |*admin_client| admin_client.deinit();
+
+        var ensured = control_plane.ensureNode(
+            self.allocator,
+            client,
+            &self.message_counter,
+            node_name,
+            null,
+            APP_LOCAL_NODE_LEASE_TTL_MS,
+        ) catch |primary_err| blk: {
+            const admin_token = self.config.getRoleToken(.admin);
+            if (admin_token.len == 0) return primary_err;
+            if (std.mem.eql(u8, active_token, admin_token)) return primary_err;
+            admin_client_storage = try ws_client_mod.WebSocketClient.init(
+                self.allocator,
+                self.config.server_url,
+                admin_token,
+            );
+            try admin_client_storage.?.connect();
+            try control_plane.ensureUnifiedV2Connection(self.allocator, &admin_client_storage.?, &self.message_counter);
+            bootstrap_token = admin_token;
+            bootstrap_client = &admin_client_storage.?;
+            used_admin_fallback = true;
+            break :blk try control_plane.ensureNode(
+                self.allocator,
+                &admin_client_storage.?,
+                &self.message_counter,
+                node_name,
+                null,
+                APP_LOCAL_NODE_LEASE_TTL_MS,
+            );
+        };
+        defer ensured.deinit(self.allocator);
+
+        self.startAppLocalVenomHost(
+            bootstrap_client,
+            bootstrap_token,
+            ensured,
+            APP_LOCAL_NODE_LEASE_TTL_MS,
+        ) catch |start_err| {
+            const admin_token = self.config.getRoleToken(.admin);
+            if (admin_token.len == 0) return start_err;
+            if (used_admin_fallback or std.mem.eql(u8, bootstrap_token, admin_token)) return start_err;
+            if (admin_client_storage == null) {
+                admin_client_storage = try ws_client_mod.WebSocketClient.init(
+                    self.allocator,
+                    self.config.server_url,
+                    admin_token,
+                );
+                try admin_client_storage.?.connect();
+                try control_plane.ensureUnifiedV2Connection(self.allocator, &admin_client_storage.?, &self.message_counter);
+            }
+            try self.startAppLocalVenomHost(
+                &admin_client_storage.?,
+                admin_token,
+                ensured,
+                APP_LOCAL_NODE_LEASE_TTL_MS,
+            );
+            bootstrap_token = admin_token;
+            bootstrap_client = &admin_client_storage.?;
+            used_admin_fallback = true;
+        };
+
+        if (self.config.appLocalNode(profile_id)) |existing| {
+            if (std.mem.eql(u8, existing.node_name, ensured.node_name) and
+                std.mem.eql(u8, existing.node_id, ensured.node_id) and
+                std.mem.eql(u8, existing.node_secret, ensured.node_secret))
+            {
+                return;
+            }
+        }
+
+        try self.config.setAppLocalNode(profile_id, ensured.node_name, ensured.node_id, ensured.node_secret);
+        try self.config.save();
+    }
+
+    fn startAppLocalVenomHost(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        control_token: []const u8,
+        ensured: control_plane.EnsuredNodeIdentity,
+        lease_ttl_ms: u64,
+    ) !void {
+        if (self.app_local_venom_host) |*existing| {
+            if (existing.matches(self.config.server_url, control_token, ensured)) return;
+            existing.deinit();
+            self.app_local_venom_host = null;
+        }
+
+        self.app_local_venom_host = try app_venom_host.AppVenomHost.init(
+            self.allocator,
+            self.config.server_url,
+            control_token,
+            ensured,
+        );
+        errdefer {
+            if (self.app_local_venom_host) |*host| host.deinit();
+            self.app_local_venom_host = null;
+        }
+        self.app_local_venom_host.?.bindSelf();
+        try self.app_local_venom_host.?.bootstrap(client, &self.message_counter, lease_ttl_ms);
     }
 
     fn saveConfig(self: *App) !void {
@@ -19083,11 +19288,29 @@ pub export fn zsc_free_image(pixels: ?*anyopaque) void {
 }
 
 pub fn main() !void {
+    if (builtin.abi.isAndroid()) {
+        var app = try App.init(std.heap.c_allocator);
+        defer {
+            app.deinit();
+            std.heap.c_allocator.destroy(app);
+        }
+
+        if (app.config.auto_connect_on_launch) {
+            app.tryConnect(&app.manager) catch {};
+        }
+
+        try app.run();
+        return;
+    }
+
     var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
     defer _ = gpa.deinit();
 
     var app = try App.init(gpa.allocator());
-    defer app.deinit();
+    defer {
+        app.deinit();
+        gpa.allocator().destroy(app);
+    }
 
     if (app.config.auto_connect_on_launch) {
         app.tryConnect(&app.manager) catch {};
