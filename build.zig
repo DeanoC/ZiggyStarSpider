@@ -122,11 +122,11 @@ fn addGuiArtifact(
         .target = target,
         .optimize = optimize,
     });
-    const spider_protocol = b.dependency("spider_protocol", .{
+    const spider_node = b.dependency("spider_node", .{
         .target = target,
         .optimize = optimize,
     });
-    const spider_protocol_module = spider_protocol.module("spider-protocol");
+    const spider_protocol_module = spider_node.module("spider-protocol");
     const ziggy_ui = b.dependency("ziggy_ui", .{
         .target = target,
         .optimize = optimize,
@@ -186,8 +186,8 @@ fn addGuiArtifact(
     });
     app_venom_host_module.addImport("control_plane", control_plane_module);
     if (os_tag != .windows) {
-        const spiderweb_node_module = spider_protocol.module("spiderweb_node");
-        const spiderweb_fs_module = spider_protocol.module("spiderweb_fs");
+        const spiderweb_node_module = spider_node.module("spiderweb_node");
+        const spiderweb_fs_module = spider_node.module("spiderweb_fs");
         app_venom_host_module.addImport("websocket", websocket.module("websocket"));
         app_venom_host_module.addImport("spider-protocol", spider_protocol_module);
         app_venom_host_module.addImport("spiderweb_node", spiderweb_node_module);
@@ -332,12 +332,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const spider_protocol = b.dependency("spider_protocol", .{
+    const spider_node = b.dependency("spider_node", .{
         .target = target,
         .optimize = optimize,
     });
     const os_tag = target.result.os.tag;
-    const spider_protocol_module = spider_protocol.module("spider-protocol");
+    const spider_protocol_module = spider_node.module("spider-protocol");
 
     const ziggy_ui = b.dependency("ziggy_ui", .{
         .target = target,
@@ -385,8 +385,8 @@ pub fn build(b: *std.Build) void {
     cli_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     cli_module.addImport("spider-protocol", spider_protocol_module);
     if (os_tag != .windows) {
-        cli_module.addImport("spiderweb_node", spider_protocol.module("spiderweb_node"));
-        cli_module.addImport("spiderweb_fs", spider_protocol.module("spiderweb_fs"));
+        cli_module.addImport("spiderweb_node", spider_node.module("spiderweb_node"));
+        cli_module.addImport("spiderweb_fs", spider_node.module("spiderweb_fs"));
     }
     cli_module.addImport("build_options", build_options_module);
     cli_module.addImport("platform_storage", platform_storage_module);
@@ -483,13 +483,13 @@ pub fn build(b: *std.Build) void {
                 .target = android_target,
                 .optimize = optimize,
             });
-            const spider_protocol_android = b.dependency("spider_protocol", .{
+            const spider_node_android = b.dependency("spider_node", .{
                 .target = android_target,
                 .optimize = optimize,
             });
-            const spider_protocol_module_android = spider_protocol_android.module("spider-protocol");
-            const spiderweb_node_module_android = spider_protocol_android.module("spiderweb_node");
-            const spiderweb_fs_module_android = spider_protocol_android.module("spiderweb_fs");
+            const spider_protocol_module_android = spider_node_android.module("spider-protocol");
+            const spiderweb_node_module_android = spider_node_android.module("spiderweb_node");
+            const spiderweb_fs_module_android = spider_node_android.module("spiderweb_fs");
             const ziggy_ui_android = b.dependency("ziggy_ui", .{
                 .target = android_target,
                 .optimize = optimize,
@@ -654,8 +654,8 @@ pub fn build(b: *std.Build) void {
     test_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
     test_module.addImport("spider-protocol", spider_protocol_module);
     if (os_tag != .windows) {
-        test_module.addImport("spiderweb_node", spider_protocol.module("spiderweb_node"));
-        test_module.addImport("spiderweb_fs", spider_protocol.module("spiderweb_fs"));
+        test_module.addImport("spiderweb_node", spider_node.module("spiderweb_node"));
+        test_module.addImport("spiderweb_fs", spider_node.module("spiderweb_fs"));
     }
     test_module.addImport("build_options", build_options_module);
     test_module.addImport("platform_storage", platform_storage_module);

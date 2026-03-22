@@ -13,6 +13,9 @@
         .spider_protocol = .{
             .path = "deps/spider-protocol",
         },
+        .spider_node = .{
+            .path = "deps/spider-node",
+        },
         .ziggy_ui = .{
             .path = "deps/ziggy-ui",
         },
@@ -74,5 +77,3 @@
         "README.md",
     },
 }
-
-
