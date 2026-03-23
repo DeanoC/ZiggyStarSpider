@@ -16657,7 +16657,7 @@ const App = struct {
             GuiFsPathReader{ .app = self, .client = client },
             .{
                 .agent_id = self.selectedAgentId(),
-                .project_id = self.selectedWorkspaceId(),
+                .workspace_id = self.selectedWorkspaceId(),
             },
         );
     }
