@@ -6431,7 +6431,7 @@ const App = struct {
 
     fn syncLauncherConnectTokenFromConfig(self: *App) !void {
         self.launcher_connect_token.clearRetainingCapacity();
-        const token = self.config.getRoleToken(self.config.active_role);
+        const token = self.config.activeRoleToken();
         if (token.len > 0) {
             try self.launcher_connect_token.appendSlice(self.allocator, token);
         }
@@ -6439,7 +6439,8 @@ const App = struct {
 
     fn persistLauncherConnectToken(self: *App) !void {
         const token = std.mem.trim(u8, self.launcher_connect_token.items, " \t\r\n");
-        try self.setRoleToken(self.config.active_role, token, false);
+        try self.setRoleToken(.admin, token, false);
+        try self.setRoleToken(.user, token, false);
     }
 
     fn activeRoleLabel(self: *const App) []const u8 {
@@ -7457,7 +7458,7 @@ const App = struct {
         self.drawLabel(
             left_rect.min[0] + pad,
             left_y,
-            if (self.config.active_role == .admin) "Admin Token" else "User Token",
+            "Access Token",
             self.theme.colors.text_secondary,
         );
         left_y += layout.line_height + layout.row_gap * 0.25;
@@ -7466,10 +7467,7 @@ const App = struct {
             self.launcher_connect_token.items,
             self.settings_panel.focused_field == .launcher_connect_token,
             .{
-                .placeholder = if (self.config.active_role == .admin)
-                    "Admin auth token"
-                else
-                    "User auth token",
+                .placeholder = "Spiderweb access token",
             },
         );
         if (connect_token_focused) self.settings_panel.focused_field = .launcher_connect_token;
@@ -8223,7 +8221,14 @@ const App = struct {
                         "About SpiderApp",
                         .{ .variant = .secondary },
                     )) {
-                        self.appendMessage("system", "SpiderApp IDE - launcher/workspace flow enabled.", null) catch {};
+                        const about = std.fmt.allocPrint(
+                            self.allocator,
+                            "SpiderApp v{s} - launcher/workspace flow enabled.",
+                            .{currentBuildLabel()},
+                        ) catch null;
+                        defer if (about) |value| self.allocator.free(value);
+                        if (about) |value| self.setLauncherNotice(value);
+                        self.appendMessage("system", about orelse "SpiderApp IDE - launcher/workspace flow enabled.", null) catch {};
                         self.ide_menu_open = null;
                     }
                 },
@@ -15202,24 +15207,35 @@ const App = struct {
         self.node_service_snapshot_retry_at_ms = 0;
         self.clearDebugStreamSnapshot();
 
-        const effective_url = self.settings_panel.server_url.items;
+        const effective_url = std.mem.trim(u8, self.settings_panel.server_url.items, " \t\r\n");
+        if (effective_url.len == 0) {
+            self.setConnectionState(.error_state, "Server URL cannot be empty");
+            return;
+        }
         try self.persistLauncherConnectToken();
-        const connect_token = self.config.getRoleToken(self.config.active_role);
+        const connect_token = std.mem.trim(u8, self.launcher_connect_token.items, " \t\r\n");
+        std.log.info(
+            "[GUI] SpiderApp v{s} connect requested url={s} token_present={}",
+            .{ currentBuildLabel(), effective_url, connect_token.len > 0 },
+        );
+        appendGuiDiagnosticLogFmt("[GUI] SpiderApp v{s} connect requested url={s} token_present={}", .{
+            currentBuildLabel(),
+            effective_url,
+            connect_token.len > 0,
+        });
         if (connect_token.len == 0) {
-            const msg = try std.fmt.allocPrint(
-                self.allocator,
-                "{s} token is required to connect.",
-                .{self.activeRoleLabel()},
-            );
+            const msg = try self.allocator.dupe(u8, "Access token is required to connect.");
             defer self.allocator.free(msg);
             self.setConnectionState(.error_state, msg);
             if (self.ui_stage == .launcher) self.setLauncherNotice(msg);
+            appendGuiDiagnosticLogFmt("[GUI] connect blocked: {s}", .{msg});
             return error.AuthTokenRequired;
         }
         var ws_client = ws_client_mod.WebSocketClient.init(self.allocator, effective_url, connect_token) catch |err| {
             const msg = try std.fmt.allocPrint(self.allocator, "Client init failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
             self.setConnectionState(.error_state, msg);
+            appendGuiDiagnosticLogFmt("[GUI] client init failed: {s}", .{@errorName(err)});
             return;
         };
         ws_client.setVerboseLogs(self.settings_panel.ws_verbose_logs);
@@ -15231,6 +15247,7 @@ const App = struct {
             const msg = try std.fmt.allocPrint(self.allocator, "Connect failed: {s}", .{@errorName(err)});
             defer self.allocator.free(msg);
             self.setConnectionState(.error_state, msg);
+            appendGuiDiagnosticLogFmt("[GUI] websocket connect failed: {s}", .{@errorName(err)});
             return;
         };
 
@@ -15241,10 +15258,14 @@ const App = struct {
                 &self.message_counter,
                 CONTROL_CONNECT_TIMEOUT_MS,
             ) catch |err| {
+                std.log.err("[GUI] unified control connect failed: {s}", .{@errorName(err)});
+                appendGuiDiagnosticLogFmt("[GUI] unified control connect failed: {s}", .{@errorName(err)});
                 client.deinit();
                 self.ws_client = null;
                 const msg = if (err == error.RemoteError) blk: {
                     if (control_plane.lastRemoteError()) |remote| {
+                        std.log.err("[GUI] remote control error detail: {s}", .{remote});
+                        appendGuiDiagnosticLogFmt("[GUI] remote control error detail: {s}", .{remote});
                         if (isProvisioningRemoteError(remote)) {
                             break :blk self.formatControlRemoteMessage("Connection blocked", remote) orelse
                                 try std.fmt.allocPrint(self.allocator, "Connection blocked: {s}", .{remote});
@@ -15264,16 +15285,21 @@ const App = struct {
                 } else try std.fmt.allocPrint(self.allocator, "Handshake failed: {s}", .{@errorName(err)});
                 defer self.allocator.free(msg);
                 self.setConnectionState(.error_state, msg);
+                appendGuiDiagnosticLogFmt("[GUI] handshake result: {s}", .{msg});
                 return;
             };
             defer self.allocator.free(connect_payload_json);
+            std.log.info("[GUI] unified control connect succeeded payload={s}", .{connect_payload_json});
+            appendGuiDiagnosticLogFmt("[GUI] unified control connect succeeded payload={s}", .{connect_payload_json});
             self.applyConnectSetupHintFromPayload(connect_payload_json) catch |err| {
                 std.log.warn("Failed to parse connect setup hint payload: {s}", .{@errorName(err)});
                 self.clearConnectSetupHint();
+                appendGuiDiagnosticLogFmt("[GUI] connect payload hint parse failed: {s}", .{@errorName(err)});
             };
             if (storage.isAndroid()) {
                 self.ensureAppLocalNodeBootstrap(client) catch |err| {
                     std.log.warn("SpiderApp Android local node bootstrap skipped: {s}", .{@errorName(err)});
+                    appendGuiDiagnosticLogFmt("[GUI] Android local node bootstrap skipped: {s}", .{@errorName(err)});
                 };
             }
         }
@@ -19308,4 +19334,42 @@ pub fn main() !void {
     }
 
     try app.run();
+}
+fn currentBuildLabel() []const u8 {
+    if (std.mem.eql(u8, build_options.git_revision, "unknown")) return build_options.app_version;
+    return std.fmt.comptimePrint("{s} ({s})", .{ build_options.app_version, build_options.git_revision });
+}
+
+fn appendGuiDiagnosticLogFmt(comptime fmt: []const u8, args: anytype) void {
+    const allocator = std.heap.page_allocator;
+    const line = std.fmt.allocPrint(allocator, fmt, args) catch return;
+    defer allocator.free(line);
+    appendGuiDiagnosticLog(line);
+}
+
+fn appendGuiDiagnosticLog(line: []const u8) void {
+    const allocator = std.heap.page_allocator;
+    const home = std.process.getEnvVarOwned(allocator, "HOME") catch return;
+    defer allocator.free(home);
+
+    const log_dir = std.fmt.allocPrint(allocator, "{s}/Library/Logs/SpiderApp", .{home}) catch return;
+    defer allocator.free(log_dir);
+    std.fs.makeDirAbsolute(log_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return,
+    };
+
+    const log_path = std.fmt.allocPrint(allocator, "{s}/gui.log", .{log_dir}) catch return;
+    defer allocator.free(log_path);
+
+    const file = std.fs.openFileAbsolute(log_path, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => std.fs.createFileAbsolute(log_path, .{}) catch return,
+        else => return,
+    };
+    defer file.close();
+
+    file.seekFromEnd(0) catch return;
+    const payload = std.fmt.allocPrint(allocator, "[{d}] {s}\n", .{ std.time.timestamp(), line }) catch return;
+    defer allocator.free(payload);
+    _ = file.writeAll(payload) catch return;
 }

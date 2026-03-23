@@ -4,8 +4,8 @@
 
 Connect to Spiderweb server.
 
-Connection uses unified-v2 control negotiation:
-`control.version` (`protocol=unified-v2`) then `control.connect`.
+Connection uses Spiderweb control negotiation:
+`control.version` (`protocol=spiderweb-control`) then `control.connect`.
 
 **Options:**
 - `--url <url>` - Server URL (required if not configured)

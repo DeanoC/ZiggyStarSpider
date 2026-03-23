@@ -74,6 +74,40 @@ fn controlErrorCodeFromRoot(root: std.json.ObjectMap) ?[]const u8 {
     return null;
 }
 
+fn appendGuiDiagnosticLogFmt(comptime fmt: []const u8, args: anytype) void {
+    const allocator = std.heap.page_allocator;
+    const line = std.fmt.allocPrint(allocator, fmt, args) catch return;
+    defer allocator.free(line);
+    appendGuiDiagnosticLog(line);
+}
+
+fn appendGuiDiagnosticLog(line: []const u8) void {
+    const allocator = std.heap.page_allocator;
+    const home = std.process.getEnvVarOwned(allocator, "HOME") catch return;
+    defer allocator.free(home);
+
+    const log_dir = std.fmt.allocPrint(allocator, "{s}/Library/Logs/SpiderApp", .{home}) catch return;
+    defer allocator.free(log_dir);
+    std.fs.makeDirAbsolute(log_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return,
+    };
+
+    const log_path = std.fmt.allocPrint(allocator, "{s}/gui.log", .{log_dir}) catch return;
+    defer allocator.free(log_path);
+
+    const file = std.fs.openFileAbsolute(log_path, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => std.fs.createFileAbsolute(log_path, .{}) catch return,
+        else => return,
+    };
+    defer file.close();
+
+    file.seekFromEnd(0) catch return;
+    const payload = std.fmt.allocPrint(allocator, "[{d}] {s}\n", .{ std.time.timestamp(), line }) catch return;
+    defer allocator.free(payload);
+    _ = file.writeAll(payload) catch return;
+}
+
 pub fn sendControlVersionAndConnect(
     allocator: std.mem.Allocator,
     client: anytype,
@@ -97,18 +131,24 @@ pub fn sendControlVersionAndConnectPayloadJson(
 ) ![]u8 {
     const version_id = try nextRequestId(allocator, message_counter, "control-version");
     defer allocator.free(version_id);
+    std.log.info("[control] sending control.version id={s}", .{version_id});
+    appendGuiDiagnosticLogFmt("[control] sending control.version id={s}", .{version_id});
     var version = try sendControlRequest(
         allocator,
         client,
         "control.version",
         version_id,
-        "{\"protocol\":\"unified-v2\"}",
+        "{\"protocol\":\"spiderweb-control\"}",
         timeout_ms,
     );
     defer version.deinit(allocator);
+    std.log.info("[control] received {s} id={s}", .{ controlReplyType(&version) orelse "<unknown>", version_id });
+    appendGuiDiagnosticLogFmt("[control] received {s} id={s}", .{ controlReplyType(&version) orelse "<unknown>", version_id });
 
     const connect_id = try nextRequestId(allocator, message_counter, "control-connect");
     defer allocator.free(connect_id);
+    std.log.info("[control] sending control.connect id={s}", .{connect_id});
+    appendGuiDiagnosticLogFmt("[control] sending control.connect id={s}", .{connect_id});
     var connect = try sendControlRequest(
         allocator,
         client,
@@ -118,6 +158,8 @@ pub fn sendControlVersionAndConnectPayloadJson(
         timeout_ms,
     );
     defer connect.deinit(allocator);
+    std.log.info("[control] received {s} id={s}", .{ controlReplyType(&connect) orelse "<unknown>", connect_id });
+    appendGuiDiagnosticLogFmt("[control] received {s} id={s}", .{ controlReplyType(&connect) orelse "<unknown>", connect_id });
 
     return controlReplyPayloadJson(allocator, &connect);
 }

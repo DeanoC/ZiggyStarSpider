@@ -158,6 +158,7 @@ pub const WebSocketClient = struct {
     waiters_mutex: std.Thread.Mutex = .{},
     acheron_waiters: std.AutoHashMapUnmanaged(u32, *PendingFrameWaiter) = .{},
     control_waiters: std.StringHashMapUnmanaged(*PendingFrameWaiter) = .{},
+    pending_control_frames: std.StringHashMapUnmanaged([]u8) = .{},
     next_acheron_tag: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
     next_acheron_fid: std.atomic.Value(u32) = std.atomic.Value(u32).init(2),
 
@@ -437,6 +438,10 @@ pub const WebSocketClient = struct {
     pub fn awaitControlFrame(self: *WebSocketClient, request_id: []const u8, timeout_ms: u32) !?[]u8 {
         if (self.mode != .threaded_queue) return self.receive(timeout_ms);
 
+        if (self.takePendingControlFrame(request_id)) |frame| {
+            return frame;
+        }
+
         const key = try self.allocator.dupe(u8, request_id);
         errdefer self.allocator.free(key);
 
@@ -606,13 +611,36 @@ pub const WebSocketClient = struct {
         if (extractControlRequestId(msg)) |request_id| {
             self.waiters_mutex.lock();
             const waiter = self.control_waiters.get(request_id);
-            self.waiters_mutex.unlock();
             if (waiter) |matched| {
+                self.waiters_mutex.unlock();
                 self.signalWaiter(matched, msg);
                 return true;
             }
+            const key = self.allocator.dupe(u8, request_id) catch {
+                self.waiters_mutex.unlock();
+                return false;
+            };
+            errdefer self.allocator.free(key);
+            if (self.pending_control_frames.fetchRemove(request_id)) |entry| {
+                self.allocator.free(entry.key);
+                self.allocator.free(entry.value);
+            }
+            self.pending_control_frames.put(self.allocator, key, msg) catch {
+                self.waiters_mutex.unlock();
+                return false;
+            };
+            self.waiters_mutex.unlock();
+            return true;
         }
         return false;
+    }
+
+    fn takePendingControlFrame(self: *WebSocketClient, request_id: []const u8) ?[]u8 {
+        self.waiters_mutex.lock();
+        defer self.waiters_mutex.unlock();
+        const removed = self.pending_control_frames.fetchRemove(request_id) orelse return null;
+        self.allocator.free(removed.key);
+        return removed.value;
     }
 
     fn signalWaiter(self: *WebSocketClient, waiter: *PendingFrameWaiter, msg: []u8) void {
@@ -667,6 +695,13 @@ pub const WebSocketClient = struct {
             self.allocator.destroy(waiter);
         }
         self.control_waiters.deinit(self.allocator);
+
+        var pending_it = self.pending_control_frames.iterator();
+        while (pending_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.pending_control_frames.deinit(self.allocator);
     }
 };
 
@@ -679,23 +714,43 @@ fn failPendingWaiter(waiter: *PendingFrameWaiter) void {
 }
 
 fn extractJsonStringFieldValue(msg: []const u8, key: []const u8) ?[]const u8 {
-    var prefix_buf: [64]u8 = undefined;
-    const prefix = std.fmt.bufPrint(&prefix_buf, "\"{s}\":\"", .{key}) catch return null;
-    const start = std.mem.indexOf(u8, msg, prefix) orelse return null;
-    const value_start = start + prefix.len;
-    const value_end = std.mem.indexOfScalarPos(u8, msg, value_start, '"') orelse return null;
-    return msg[value_start..value_end];
+    var key_buf: [128]u8 = undefined;
+    const key_pattern = std.fmt.bufPrint(&key_buf, "\"{s}\"", .{key}) catch return null;
+    const key_start = std.mem.indexOf(u8, msg, key_pattern) orelse return null;
+    var idx = key_start + key_pattern.len;
+
+    while (idx < msg.len and std.ascii.isWhitespace(msg[idx])) : (idx += 1) {}
+    if (idx >= msg.len or msg[idx] != ':') return null;
+    idx += 1;
+
+    while (idx < msg.len and std.ascii.isWhitespace(msg[idx])) : (idx += 1) {}
+    if (idx >= msg.len or msg[idx] != '"') return null;
+    idx += 1;
+
+    const value_start = idx;
+    while (idx < msg.len) : (idx += 1) {
+        if (msg[idx] == '"' and (idx == value_start or msg[idx - 1] != '\\')) {
+            return msg[value_start..idx];
+        }
+    }
+    return null;
 }
 
 fn extractJsonUnsignedFieldValue(msg: []const u8, key: []const u8) ?u32 {
-    var prefix_buf: [64]u8 = undefined;
-    const prefix = std.fmt.bufPrint(&prefix_buf, "\"{s}\":", .{key}) catch return null;
-    const start = std.mem.indexOf(u8, msg, prefix) orelse return null;
-    const value_start = start + prefix.len;
-    var value_end = value_start;
-    while (value_end < msg.len and std.ascii.isDigit(msg[value_end])) : (value_end += 1) {}
-    if (value_end == value_start) return null;
-    return std.fmt.parseInt(u32, msg[value_start..value_end], 10) catch null;
+    var key_buf: [128]u8 = undefined;
+    const key_pattern = std.fmt.bufPrint(&key_buf, "\"{s}\"", .{key}) catch return null;
+    const key_start = std.mem.indexOf(u8, msg, key_pattern) orelse return null;
+    var idx = key_start + key_pattern.len;
+
+    while (idx < msg.len and std.ascii.isWhitespace(msg[idx])) : (idx += 1) {}
+    if (idx >= msg.len or msg[idx] != ':') return null;
+    idx += 1;
+
+    while (idx < msg.len and std.ascii.isWhitespace(msg[idx])) : (idx += 1) {}
+    const value_start = idx;
+    while (idx < msg.len and std.ascii.isDigit(msg[idx])) : (idx += 1) {}
+    if (idx == value_start) return null;
+    return std.fmt.parseInt(u32, msg[value_start..idx], 10) catch null;
 }
 
 fn extractAcheronTag(msg: []const u8) ?u32 {

@@ -3,6 +3,7 @@ zig-out/
 zig-cache/
 .zig-cache/
 libs/
+macos/dist/
 
 # Common IDE/Editor folders
 .vscode/
