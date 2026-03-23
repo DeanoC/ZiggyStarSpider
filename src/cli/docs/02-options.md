@@ -36,12 +36,12 @@ spider --workspace-token ws-secret workspace use ws-demo
 ### `--operator-token <token>`
 Operator token used for protected control mutations (for example `control.workspace_create`).
 
-If omitted, ZSS uses the saved admin role token when available.
+If omitted, SpiderApp CLI uses the saved admin role token when available.
 
 ### `--role <admin|user>`
 Select which saved role token is used for connection/auth on this command.
 
-If omitted, ZSS uses the locally saved active role.
+If omitted, SpiderApp CLI uses the locally saved active role.
 
 **Examples:**
 ```bash

@@ -149,7 +149,7 @@ pub const CredentialStore = struct {
         if (profile_trimmed.len == 0 or key_trimmed.len == 0) {
             return error.InvalidCredentialTarget;
         }
-        return std.fmt.allocPrint(self.allocator, "ZSS/{s}/{s}", .{ profile_trimmed, key_trimmed });
+        return std.fmt.allocPrint(self.allocator, "SpiderApp/{s}/{s}", .{ profile_trimmed, key_trimmed });
     }
 
     fn fallbackFilePath(self: *CredentialStore, target: []const u8) ![]u8 {

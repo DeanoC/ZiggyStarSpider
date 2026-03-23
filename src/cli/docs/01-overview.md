@@ -68,6 +68,12 @@ spider --help
 - `--help` - Show this help
 - `--version` - Show version
 
+## Which CLI To Use
+
+- Use `spider` for day-to-day user workflows: connect, choose a workspace, attach sessions, inspect nodes, and work with chat/filesystem flows.
+- Use Spiderweb's `control_cli` when you need raw `control.*` requests, protocol debugging, or transport-level inspection.
+- Use SpiderNode's `fs_node_main` when you need to run or pair a node daemon; it is not a general operator workflow CLI.
+
 ## Interactive Mode
 
 Interactive mode entry exists, but the REPL is not implemented yet.
@@ -83,7 +89,7 @@ Use command mode for now.
 
 ## Design Philosophy
 
-ZSS uses a noun-verb command structure:
+SpiderApp CLI uses a noun-verb command structure:
 - **Noun** = What you're acting on (chat, workspace, node, session)
 - **Verb** = What you're doing (send, list, create, use)
 

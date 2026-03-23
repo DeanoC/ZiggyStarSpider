@@ -33,7 +33,7 @@ const session_status_timeout_ms: i64 = 5_000;
 const session_warming_wait_timeout_ms: i64 = 30_000;
 const session_warming_poll_interval_ms: u64 = 250;
 const app_local_node_lease_ttl_ms: u64 = 15 * 60 * 1000;
-const system_project_id = "system";
+const system_workspace_id = "system";
 const system_agent_id = "spiderweb";
 
 const ChatProgressOptions = struct {
@@ -569,8 +569,8 @@ fn isUserScopedAgentId(agent_id: []const u8) bool {
     return std.mem.eql(u8, agent_id, "user") or std.mem.eql(u8, agent_id, "user-isolated");
 }
 
-fn isSystemProjectId(project_id: []const u8) bool {
-    return std.mem.eql(u8, project_id, system_project_id);
+fn isSystemWorkspaceId(workspace_id: []const u8) bool {
+    return std.mem.eql(u8, workspace_id, system_workspace_id);
 }
 
 fn isSystemAgentId(agent_id: []const u8) bool {
@@ -630,7 +630,7 @@ fn resolveAttachAgentForWorkspace(
     project_id: []const u8,
 ) ![]u8 {
     const role = effectiveRole(options, cfg);
-    if (role == .user and isSystemProjectId(project_id)) {
+    if (role == .user and isSystemWorkspaceId(project_id)) {
         return error.UserRoleCannotAttachSystemProject;
     }
     var resolved_agent = if (cfg.selectedAgent()) |selected_agent| blk: {
@@ -644,7 +644,7 @@ fn resolveAttachAgentForWorkspace(
         resolved_agent = try fetchDefaultAgentFromSessionList(allocator, client, preferred_session_key);
     }
 
-    if (isSystemProjectId(project_id)) {
+    if (isSystemWorkspaceId(project_id)) {
         if (!isSystemAgentId(resolved_agent)) {
             allocator.free(resolved_agent);
             resolved_agent = try allocator.dupe(u8, system_agent_id);
@@ -2129,7 +2129,7 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
         .{ session.session_key, session.agent_id, session.project_id orelse "(none)" },
     );
 
-    const attach_agent = if (isSystemProjectId(attach_project_id))
+    const attach_agent = if (isSystemWorkspaceId(attach_project_id))
         try allocator.dupe(u8, system_agent_id)
     else if (isSystemAgentId(session.agent_id))
         resolveAttachAgentForWorkspace(

@@ -17,8 +17,8 @@ pub const EnsuredNodeIdentity = struct {
     }
 };
 
-fn normalizeProjectToken(project_token: ?[]const u8) ?[]const u8 {
-    const token = project_token orelse return null;
+fn normalizeWorkspaceToken(workspace_token: ?[]const u8) ?[]const u8 {
+    const token = workspace_token orelse return null;
     const trimmed = std.mem.trim(u8, token, " \t\r\n");
     if (trimmed.len == 0) return null;
     return trimmed;
@@ -263,7 +263,7 @@ pub fn activateProject(
     project_id: []const u8,
     project_token: ?[]const u8,
 ) !workspace_types.WorkspaceStatus {
-    const normalized_project_token = normalizeProjectToken(project_token);
+    const normalized_project_token = normalizeWorkspaceToken(project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
     const payload_req = if (normalized_project_token) |token| blk: {
@@ -307,7 +307,7 @@ pub fn setProjectMount(
     export_name: []const u8,
     mount_path: []const u8,
 ) !workspace_types.ProjectDetail {
-    const normalized_project_token = normalizeProjectToken(project_token);
+    const normalized_project_token = normalizeWorkspaceToken(project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
     const escaped_token = if (normalized_project_token) |value|
@@ -383,7 +383,7 @@ pub fn removeProjectMount(
 ) !workspace_types.ProjectDetail {
     if ((node_id_filter == null) != (export_name_filter == null)) return error.InvalidArguments;
 
-    const normalized_project_token = normalizeProjectToken(project_token);
+    const normalized_project_token = normalizeWorkspaceToken(project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
     const escaped_token = if (normalized_project_token) |value|
@@ -520,7 +520,7 @@ pub fn setWorkspaceBind(
     bind_path: []const u8,
     target_path: []const u8,
 ) !workspace_types.WorkspaceDetail {
-    const normalized_workspace_token = normalizeProjectToken(workspace_token);
+    const normalized_workspace_token = normalizeWorkspaceToken(workspace_token);
     const escaped_workspace = try unified_v2.jsonEscape(allocator, workspace_id);
     defer allocator.free(escaped_workspace);
     const escaped_token = if (normalized_workspace_token) |value|
@@ -568,7 +568,7 @@ pub fn removeWorkspaceBind(
     workspace_token: ?[]const u8,
     bind_path: []const u8,
 ) !workspace_types.WorkspaceDetail {
-    const normalized_workspace_token = normalizeProjectToken(workspace_token);
+    const normalized_workspace_token = normalizeWorkspaceToken(workspace_token);
     const escaped_workspace = try unified_v2.jsonEscape(allocator, workspace_id);
     defer allocator.free(escaped_workspace);
     const escaped_token = if (normalized_workspace_token) |value|
@@ -649,7 +649,7 @@ pub fn rotateProjectToken(
     project_id: []const u8,
     current_project_token: ?[]const u8,
 ) !ProjectTokenMutation {
-    const normalized_project_token = normalizeProjectToken(current_project_token);
+    const normalized_project_token = normalizeWorkspaceToken(current_project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
     const escaped_token = if (normalized_project_token) |value|
@@ -689,7 +689,7 @@ pub fn revokeProjectToken(
     project_id: []const u8,
     current_project_token: ?[]const u8,
 ) !ProjectTokenMutation {
-    const normalized_project_token = normalizeProjectToken(current_project_token);
+    const normalized_project_token = normalizeWorkspaceToken(current_project_token);
     const escaped_project = try unified_v2.jsonEscape(allocator, project_id);
     defer allocator.free(escaped_project);
     const escaped_token = if (normalized_project_token) |value|
@@ -938,7 +938,7 @@ pub fn workspaceStatus(
     project_id: ?[]const u8,
     project_token: ?[]const u8,
 ) !workspace_types.WorkspaceStatus {
-    const normalized_project_token = normalizeProjectToken(project_token);
+    const normalized_project_token = normalizeWorkspaceToken(project_token);
     var payload_req: ?[]u8 = null;
     defer if (payload_req) |value| allocator.free(value);
 
@@ -1036,7 +1036,7 @@ pub fn sessionAttach(
     const workspace = workspace_id orelse return error.ProjectIdRequired;
     const trimmed_workspace = std.mem.trim(u8, workspace, " \t\r\n");
     if (trimmed_workspace.len == 0) return error.ProjectIdRequired;
-    const normalized_workspace_token = normalizeProjectToken(workspace_token);
+    const normalized_workspace_token = normalizeWorkspaceToken(workspace_token);
 
     const escaped_session = try unified_v2.jsonEscape(allocator, session_key);
     defer allocator.free(escaped_session);
@@ -1730,13 +1730,13 @@ fn getOptionalI64(obj: std.json.ObjectMap, name: []const u8, default_value: i64)
     return value.integer;
 }
 
-test "normalizeProjectToken trims empty and preserves non-empty tokens" {
-    try std.testing.expect(normalizeProjectToken(null) == null);
-    try std.testing.expect(normalizeProjectToken("   \t\r\n") == null);
-    try std.testing.expectEqualStrings("proj-secret", normalizeProjectToken("  proj-secret  ").?);
+test "normalizeWorkspaceToken trims empty and preserves non-empty tokens" {
+    try std.testing.expect(normalizeWorkspaceToken(null) == null);
+    try std.testing.expect(normalizeWorkspaceToken("   \t\r\n") == null);
+    try std.testing.expectEqualStrings("proj-secret", normalizeWorkspaceToken("  proj-secret  ").?);
     const long_token =
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    try std.testing.expectEqualStrings(long_token, normalizeProjectToken(long_token).?);
+    try std.testing.expectEqualStrings(long_token, normalizeWorkspaceToken(long_token).?);
 }
 
 test "parseProjectSummary accepts project_id key" {
