@@ -1030,22 +1030,22 @@ pub fn sessionAttach(
     message_counter: *u64,
     session_key: []const u8,
     agent_id: []const u8,
-    project_id: ?[]const u8,
-    project_token: ?[]const u8,
+    workspace_id: ?[]const u8,
+    workspace_token: ?[]const u8,
 ) !workspace_types.SessionAttachStatus {
-    const project = project_id orelse return error.ProjectIdRequired;
-    const trimmed_project = std.mem.trim(u8, project, " \t\r\n");
-    if (trimmed_project.len == 0) return error.ProjectIdRequired;
-    const normalized_project_token = normalizeProjectToken(project_token);
+    const workspace = workspace_id orelse return error.ProjectIdRequired;
+    const trimmed_workspace = std.mem.trim(u8, workspace, " \t\r\n");
+    if (trimmed_workspace.len == 0) return error.ProjectIdRequired;
+    const normalized_workspace_token = normalizeProjectToken(workspace_token);
 
     const escaped_session = try unified_v2.jsonEscape(allocator, session_key);
     defer allocator.free(escaped_session);
     const escaped_agent = try unified_v2.jsonEscape(allocator, agent_id);
     defer allocator.free(escaped_agent);
-    const escaped_project = try unified_v2.jsonEscape(allocator, trimmed_project);
-    defer allocator.free(escaped_project);
+    const escaped_workspace = try unified_v2.jsonEscape(allocator, trimmed_workspace);
+    defer allocator.free(escaped_workspace);
 
-    const escaped_token = if (normalized_project_token) |value|
+    const escaped_token = if (normalized_workspace_token) |value|
         try unified_v2.jsonEscape(allocator, value)
     else
         null;
@@ -1054,11 +1054,11 @@ pub fn sessionAttach(
     var payload = std.ArrayListUnmanaged(u8){};
     defer payload.deinit(allocator);
     try payload.writer(allocator).print(
-        "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\",\"project_id\":\"{s}\"",
-        .{ escaped_session, escaped_agent, escaped_project },
+        "{{\"session_key\":\"{s}\",\"agent_id\":\"{s}\",\"workspace_id\":\"{s}\"",
+        .{ escaped_session, escaped_agent, escaped_workspace },
     );
     if (escaped_token) |value| {
-        try payload.writer(allocator).print(",\"project_token\":\"{s}\"", .{value});
+        try payload.writer(allocator).print(",\"workspace_token\":\"{s}\"", .{value});
     }
     try payload.append(allocator, '}');
 

@@ -621,7 +621,7 @@ fn fetchFirstNonSystemAgent(
     return error.NoProjectCompatibleAgent;
 }
 
-fn resolveAttachAgentForProject(
+fn resolveAttachAgentForWorkspace(
     allocator: std.mem.Allocator,
     options: args.Options,
     cfg: *const Config,
@@ -813,7 +813,7 @@ fn maybeApplyWorkspaceContext(
 
     const token = if (options.workspace_token) |value| value else cfg.getWorkspaceToken(project_id);
     const session_key = resolveSessionKey(&cfg);
-    const attach_agent = resolveAttachAgentForProject(
+    const attach_agent = resolveAttachAgentForWorkspace(
         allocator,
         options,
         &cfg,
@@ -1987,16 +1987,16 @@ fn executeSessionStatus(allocator: std.mem.Allocator, options: args.Options, cmd
 const SessionAttachArgs = struct {
     session_key: []const u8,
     agent_id: []const u8,
-    project_id: ?[]const u8 = null,
-    project_token: ?[]const u8 = null,
+    workspace_id: ?[]const u8 = null,
+    workspace_token: ?[]const u8 = null,
 };
 
 fn parseSessionAttachArgs(options: args.Options, cmd: args.Command) !SessionAttachArgs {
     var parsed = SessionAttachArgs{
         .session_key = undefined,
         .agent_id = undefined,
-        .project_id = options.workspace,
-        .project_token = options.workspace_token,
+        .workspace_id = options.workspace,
+        .workspace_token = options.workspace_token,
     };
 
     var positional: [2][]const u8 = undefined;
@@ -2007,13 +2007,13 @@ fn parseSessionAttachArgs(options: args.Options, cmd: args.Command) !SessionAtta
         if (std.mem.eql(u8, arg, "--workspace")) {
             i += 1;
             if (i >= cmd.args.len) return error.InvalidArguments;
-            parsed.project_id = cmd.args[i];
+            parsed.workspace_id = cmd.args[i];
             continue;
         }
         if (std.mem.eql(u8, arg, "--workspace-token")) {
             i += 1;
             if (i >= cmd.args.len) return error.InvalidArguments;
-            parsed.project_token = cmd.args[i];
+            parsed.workspace_token = cmd.args[i];
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
@@ -2033,7 +2033,7 @@ fn executeSessionAttach(allocator: std.mem.Allocator, options: args.Options, cmd
         logger.err("session attach usage: session attach <session_key> <agent_id> --workspace <workspace_id> [--workspace-token <token>]", .{});
         return error.InvalidArguments;
     };
-    const project_id = parsed.project_id orelse {
+    const workspace_id = parsed.workspace_id orelse {
         logger.err("session attach requires --workspace <workspace_id>", .{});
         return error.InvalidArguments;
     };
@@ -2048,8 +2048,8 @@ fn executeSessionAttach(allocator: std.mem.Allocator, options: args.Options, cmd
         &g_control_request_counter,
         parsed.session_key,
         parsed.agent_id,
-        project_id,
-        parsed.project_token,
+        workspace_id,
+        parsed.workspace_token,
     );
     defer status.deinit(allocator);
     try printSessionAttachStatus(stdout, &status);
@@ -2132,7 +2132,7 @@ fn executeSessionRestore(allocator: std.mem.Allocator, options: args.Options, cm
     const attach_agent = if (isSystemProjectId(attach_project_id))
         try allocator.dupe(u8, system_agent_id)
     else if (isSystemAgentId(session.agent_id))
-        resolveAttachAgentForProject(
+        resolveAttachAgentForWorkspace(
             allocator,
             options,
             &cfg,
