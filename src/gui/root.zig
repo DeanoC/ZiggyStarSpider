@@ -13026,6 +13026,8 @@ const App = struct {
             .draw_button = launcherSettingsDrawButton,
             .draw_surface_panel = filesystemDrawSurfacePanel,
             .draw_text_wrapped = filesystemDrawTextWrapped,
+            .push_clip = debugEventStreamPushClip,
+            .pop_clip = debugEventStreamPopClip,
             .draw_filled_rect = filesystemDrawFilledRect,
             .draw_rect = filesystemDrawRect,
         };
