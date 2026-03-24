@@ -981,11 +981,11 @@ fn printPackageResult(stdout: anytype, result_json: []const u8) !void {
                         jsonObjectStringOr(error_val.object, "code", "error"),
                     },
                 );
-                return;
+                return error.RemoteError;
             }
         }
         try stdout.print("{s}\n", .{result_json});
-        return;
+        return error.RemoteError;
     }
 
     const operation = jsonObjectStringOr(root, "operation", "unknown");
