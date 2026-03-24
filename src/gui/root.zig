@@ -17068,6 +17068,22 @@ const App = struct {
         return self.readFsPathTextGui(client, result_path);
     }
 
+    fn setPackageManagerRemoteErrorFromResult(self: *App, root: std.json.ObjectMap, fallback: []const u8) void {
+        if (root.get("error")) |error_value| {
+            if (error_value == .object) {
+                const code = jsonObjectFirstString(error_value.object, &.{"code"}) orelse "error";
+                const message = jsonObjectFirstString(error_value.object, &.{"message"}) orelse fallback;
+                const formatted = std.fmt.allocPrint(self.allocator, "{s} [{s}]", .{ message, code }) catch null;
+                defer if (formatted) |value| self.allocator.free(value);
+                if (formatted) |value| {
+                    self.setPackageManagerModalError(value);
+                    return;
+                }
+            }
+        }
+        self.setPackageManagerModalError(fallback);
+    }
+
     fn refreshPackageManagerPackages(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         const selected_package_id = if (self.selectedPackageManagerEntry()) |entry|
@@ -17083,7 +17099,10 @@ const App = struct {
         defer parsed.deinit();
         if (parsed.value != .object) return error.InvalidResponse;
         const root = parsed.value.object;
-        if (jsonObjectFirstBool(root, &.{"ok"}) != true) return error.RemoteError;
+        if (jsonObjectFirstBool(root, &.{"ok"}) != true) {
+            self.setPackageManagerRemoteErrorFromResult(root, "Package list failed.");
+            return error.RemoteError;
+        }
         const result_value = root.get("result") orelse return error.InvalidResponse;
         if (result_value != .object) return error.InvalidResponse;
         const packages_value = result_value.object.get("packages") orelse return error.InvalidResponse;
