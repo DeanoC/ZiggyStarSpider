@@ -52,16 +52,17 @@ pub fn readPreferredVenomBinding(
         defer allocator.free(agent_index_path);
         const agent_prefix = try std.fmt.allocPrint(allocator, "/agents/{s}/venoms/", .{agent_id});
         defer allocator.free(agent_prefix);
-        return readVenomBindingFromIndexPath(
+        const agent_binding = readVenomBindingFromIndexPath(
             allocator,
             reader,
             agent_index_path,
             agent_prefix,
             venom_id,
         ) catch |err| switch (err) {
-            error.FileNotFound, error.ServiceNotFound => {},
+            error.FileNotFound, error.ServiceNotFound => null,
             else => return err,
         };
+        if (agent_binding) |binding| return binding;
     }
     return readVenomBindingFromIndexPath(
         allocator,
