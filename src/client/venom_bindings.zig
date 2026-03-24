@@ -47,7 +47,22 @@ pub fn readPreferredVenomBinding(
     scope: WorkspaceBindingScope,
     venom_id: []const u8,
 ) !VenomBinding {
-    _ = scope;
+    if (scope.agent_id) |agent_id| {
+        const agent_index_path = try std.fmt.allocPrint(allocator, "/agents/{s}/venoms/VENOMS.json", .{agent_id});
+        defer allocator.free(agent_index_path);
+        const agent_prefix = try std.fmt.allocPrint(allocator, "/agents/{s}/venoms/", .{agent_id});
+        defer allocator.free(agent_prefix);
+        return readVenomBindingFromIndexPath(
+            allocator,
+            reader,
+            agent_index_path,
+            agent_prefix,
+            venom_id,
+        ) catch |err| switch (err) {
+            error.FileNotFound, error.ServiceNotFound => {},
+            else => return err,
+        };
+    }
     return readVenomBindingFromIndexPath(
         allocator,
         reader,

@@ -11549,120 +11549,139 @@ const App = struct {
     }
 
     fn performWorkspacePanelAction(self: *App, action: panels_bridge.WorkspacePanelAction) void {
-        switch (action) {
-            .select_workspace_index => |project_index| {
-                if (project_index >= self.projects.items.len) return;
-                const project = self.projects.items[project_index];
-                self.selectWorkspaceInSettings(project.id) catch |err| {
-                    const msg = std.fmt.allocPrint(self.allocator, "Workspace select failed: {s}", .{@errorName(err)}) catch null;
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setWorkspaceError(text);
-                    }
-                };
-            },
-            .create_workspace => {
-                self.createWorkspaceFromPanel() catch |err| {
-                    self.handleWorkspacePanelError("Workspace create failed", err);
-                };
-            },
-            .refresh_workspace => {
-                self.refreshWorkspaceData() catch |err| {
-                    self.handleWorkspacePanelError("Workspace refresh failed", err);
-                };
-            },
-            .activate_workspace => {
-                self.activateSelectedWorkspace() catch |err| {
-                    self.handleWorkspacePanelError("Workspace activate failed", err);
-                };
-            },
-            .attach_session => {
-                self.attachSelectedSessionFromPanel() catch |err| {
-                    self.handleWorkspacePanelError("Session attach failed", err);
-                };
-            },
-            .lock_workspace => {
-                self.lockSelectedWorkspaceFromPanel() catch |err| {
-                    self.handleWorkspacePanelError("Workspace lock failed", err);
-                };
-            },
-            .unlock_workspace => {
-                self.unlockSelectedWorkspaceFromPanel() catch |err| {
-                    self.handleWorkspacePanelError("Workspace unlock failed", err);
-                };
-            },
-            .add_mount => {
-                if (self.validateWorkspaceMountAddInput()) |message| {
-                    self.setWorkspaceError(message);
-                } else {
-                    self.setWorkspaceMountFromPanel() catch |err| {
-                        self.handleWorkspacePanelError("Mount set failed", err);
-                    };
+        const action_tag = std.meta.activeTag(action);
+        if (action_tag == .select_workspace_index) {
+            const project_index = action.select_workspace_index;
+            if (project_index >= self.projects.items.len) return;
+            const project = self.projects.items[project_index];
+            self.selectWorkspaceInSettings(project.id) catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Workspace select failed: {s}", .{@errorName(err)}) catch null;
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setWorkspaceError(text);
                 }
-            },
-            .remove_mount => {
-                if (self.validateWorkspaceMountRemoveInput()) |message| {
-                    self.setWorkspaceError(message);
-                } else {
-                    self.removeWorkspaceMountFromPanel() catch |err| {
-                        self.handleWorkspacePanelError("Mount remove failed", err);
-                    };
-                }
-            },
-            .add_bind => {
-                if (self.validateWorkspaceBindAddInput()) |message| {
-                    self.setWorkspaceError(message);
-                } else {
-                    self.setWorkspaceBindFromPanel() catch |err| {
-                        self.handleWorkspacePanelError("Bind set failed", err);
-                    };
-                }
-            },
-            .remove_bind => {
-                if (self.validateWorkspaceBindRemoveInput()) |message| {
-                    self.setWorkspaceError(message);
-                } else {
-                    self.removeWorkspaceBindFromPanel() catch |err| {
-                        self.handleWorkspacePanelError("Bind remove failed", err);
-                    };
-                }
-            },
-            .auth_status => {
-                self.fetchAuthStatusFromPanel(false) catch |err| {
-                    self.handleWorkspacePanelError("Auth status failed", err);
-                };
-            },
-            .rotate_auth_user => {
-                self.rotateAuthTokenFromPanel("user") catch |err| {
-                    self.handleWorkspacePanelError("Auth rotate(user) failed", err);
-                };
-            },
-            .rotate_auth_admin => {
-                self.rotateAuthTokenFromPanel("admin") catch |err| {
-                    self.handleWorkspacePanelError("Auth rotate(admin) failed", err);
-                };
-            },
-            .reveal_auth_admin => {
-                self.revealAuthTokenFromPanel("admin") catch |err| {
-                    self.handleWorkspacePanelError("Reveal admin token failed", err);
-                };
-            },
-            .copy_auth_admin => {
-                self.copyAuthTokenFromPanel("admin") catch |err| {
-                    self.handleWorkspacePanelError("Copy admin token failed", err);
-                };
-            },
-            .reveal_auth_user => {
-                self.revealAuthTokenFromPanel("user") catch |err| {
-                    self.handleWorkspacePanelError("Reveal user token failed", err);
-                };
-            },
-            .copy_auth_user => {
-                self.copyAuthTokenFromPanel("user") catch |err| {
-                    self.handleWorkspacePanelError("Copy user token failed", err);
-                };
-            },
+            };
+            return;
         }
+        if (action_tag == .create_workspace) {
+            self.createWorkspaceFromPanel() catch |err| {
+                self.handleWorkspacePanelError("Workspace create failed", err);
+            };
+            return;
+        }
+        if (action_tag == .refresh_workspace) {
+            self.refreshWorkspaceData() catch |err| {
+                self.handleWorkspacePanelError("Workspace refresh failed", err);
+            };
+            return;
+        }
+        if (action_tag == .activate_workspace) {
+            self.activateSelectedWorkspace() catch |err| {
+                self.handleWorkspacePanelError("Workspace activate failed", err);
+            };
+            return;
+        }
+        if (action_tag == .attach_session) {
+            self.attachSelectedSessionFromPanel() catch |err| {
+                self.handleWorkspacePanelError("Session attach failed", err);
+            };
+            return;
+        }
+        if (action_tag == .lock_workspace) {
+            self.lockSelectedWorkspaceFromPanel() catch |err| {
+                self.handleWorkspacePanelError("Workspace lock failed", err);
+            };
+            return;
+        }
+        if (action_tag == .unlock_workspace) {
+            self.unlockSelectedWorkspaceFromPanel() catch |err| {
+                self.handleWorkspacePanelError("Workspace unlock failed", err);
+            };
+            return;
+        }
+        if (action_tag == .add_mount) {
+            if (self.validateWorkspaceMountAddInput()) |message| {
+                self.setWorkspaceError(message);
+            } else {
+                self.setWorkspaceMountFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Mount set failed", err);
+                };
+            }
+            return;
+        }
+        if (action_tag == .remove_mount) {
+            if (self.validateWorkspaceMountRemoveInput()) |message| {
+                self.setWorkspaceError(message);
+            } else {
+                self.removeWorkspaceMountFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Mount remove failed", err);
+                };
+            }
+            return;
+        }
+        if (action_tag == .add_bind) {
+            if (self.validateWorkspaceBindAddInput()) |message| {
+                self.setWorkspaceError(message);
+            } else {
+                self.setWorkspaceBindFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Bind set failed", err);
+                };
+            }
+            return;
+        }
+        if (action_tag == .remove_bind) {
+            if (self.validateWorkspaceBindRemoveInput()) |message| {
+                self.setWorkspaceError(message);
+            } else {
+                self.removeWorkspaceBindFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Bind remove failed", err);
+                };
+            }
+            return;
+        }
+        if (action_tag == .auth_status) {
+            self.fetchAuthStatusFromPanel(false) catch |err| {
+                self.handleWorkspacePanelError("Auth status failed", err);
+            };
+            return;
+        }
+        if (action_tag == .rotate_auth_user) {
+            self.rotateAuthTokenFromPanel("user") catch |err| {
+                self.handleWorkspacePanelError("Auth rotate(user) failed", err);
+            };
+            return;
+        }
+        if (action_tag == .rotate_auth_admin) {
+            self.rotateAuthTokenFromPanel("admin") catch |err| {
+                self.handleWorkspacePanelError("Auth rotate(admin) failed", err);
+            };
+            return;
+        }
+        if (action_tag == .reveal_auth_admin) {
+            self.revealAuthTokenFromPanel("admin") catch |err| {
+                self.handleWorkspacePanelError("Reveal admin token failed", err);
+            };
+            return;
+        }
+        if (action_tag == .copy_auth_admin) {
+            self.copyAuthTokenFromPanel("admin") catch |err| {
+                self.handleWorkspacePanelError("Copy admin token failed", err);
+            };
+            return;
+        }
+        if (action_tag == .reveal_auth_user) {
+            self.revealAuthTokenFromPanel("user") catch |err| {
+                self.handleWorkspacePanelError("Reveal user token failed", err);
+            };
+            return;
+        }
+        if (action_tag == .copy_auth_user) {
+            self.copyAuthTokenFromPanel("user") catch |err| {
+                self.handleWorkspacePanelError("Copy user token failed", err);
+            };
+            return;
+        }
+        self.setWorkspaceError("This workspace action is not supported in the current SpiderApp branch yet.");
     }
 
     const VisibleFilesystemEntry = struct {
@@ -16776,6 +16795,7 @@ const App = struct {
         if (parsed.value != .object) return error.InvalidResponse;
         const root = parsed.value.object;
         if (jsonObjectFirstBool(root, &.{"ok"}) != true) {
+            self.clearPackageManagerPackages();
             self.setPackageManagerRemoteErrorFromResult(root, "Package list failed.");
             return error.RemoteError;
         }
