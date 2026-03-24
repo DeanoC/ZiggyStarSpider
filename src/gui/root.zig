@@ -6003,11 +6003,27 @@ const App = struct {
                 old_detail.deinit(self.allocator);
             }
             self.selected_workspace_detail = new_detail;
+            // Validate selection indices against the refreshed arrays so a
+            // stale index cannot target the wrong row or enable remove actions
+            // for entries that no longer exist.
+            if (new_detail) |*d| {
+                if (self.workspace_selected_mount_index) |mi| {
+                    if (mi >= d.mounts.items.len) self.workspace_selected_mount_index = null;
+                }
+                if (self.workspace_selected_bind_index) |bi| {
+                    if (bi >= d.binds.items.len) self.workspace_selected_bind_index = null;
+                }
+            } else {
+                self.workspace_selected_mount_index = null;
+                self.workspace_selected_bind_index = null;
+            }
         } else {
             if (self.selected_workspace_detail) |*old_detail| {
                 old_detail.deinit(self.allocator);
                 self.selected_workspace_detail = null;
             }
+            self.workspace_selected_mount_index = null;
+            self.workspace_selected_bind_index = null;
         }
 
         self.refreshMissionDashboardData() catch |err| {
@@ -6914,6 +6930,11 @@ const App = struct {
         const project_id = self.selectedWorkspaceId() orelse return error.MissingField;
         const project_token = self.selectedWorkspaceToken(project_id);
         try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+        // Pass node_id and export_name as filters so that in workspaces with
+        // multiple mounts on the same path we remove only the selected row,
+        // not every mount that shares the path.
+        const node_id_filter: ?[]const u8 = if (mount.node_id.len > 0) mount.node_id else null;
+        const export_name_filter: ?[]const u8 = if (mount.export_name.len > 0) mount.export_name else null;
         var result = try control_plane.removeWorkspaceMount(
             self.allocator,
             client,
@@ -6921,8 +6942,8 @@ const App = struct {
             project_id,
             project_token,
             mount.mount_path,
-            null,
-            null,
+            node_id_filter,
+            export_name_filter,
         );
         defer result.deinit(self.allocator);
         self.workspace_selected_mount_index = null;
