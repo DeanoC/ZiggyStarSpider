@@ -1,5 +1,5 @@
 const std = @import("std");
-const unified_v2 = @import("unified_v2_client.zig");
+pub const unified_v2 = @import("unified_v2_client.zig");
 pub const workspace_types = @import("workspace_types.zig");
 
 pub const default_timeout_ms: i64 = unified_v2.default_control_timeout_ms;

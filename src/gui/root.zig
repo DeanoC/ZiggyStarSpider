@@ -7,6 +7,7 @@ const app_venom_host = @import("app_venom_host");
 const config_mod = @import("client-config");
 const credential_store_mod = config_mod.credential_store;
 const control_plane = @import("control_plane");
+const unified_v2_client = control_plane.unified_v2;
 const venom_bindings = @import("venom_bindings");
 const build_options = @import("build_options");
 const storage = @import("platform_storage");
@@ -315,17 +316,6 @@ fn platformWindowTitle(title: [:0]const u8) [:0]const u8 {
     if (storage.isAndroid()) return "";
     return title;
 }
-
-const FsrpcEnvelope = struct {
-    raw: []u8,
-    parsed: std.json.Parsed(std.json.Value),
-
-    fn deinit(self: *FsrpcEnvelope, allocator: std.mem.Allocator) void {
-        self.parsed.deinit();
-        allocator.free(self.raw);
-        self.* = undefined;
-    }
-};
 
 const FilesystemEntryKind = panels_bridge.FilesystemEntryKind;
 const FilesystemSortKey = panels_bridge.FilesystemSortKey;
@@ -1354,7 +1344,6 @@ const App = struct {
     filesystem_last_request_duration_ms: f32 = 0.0,
     filesystem_dir_cache: std.StringHashMapUnmanaged(FilesystemDirCacheEntry) = .{},
     fsrpc_last_remote_error: ?[]u8 = null,
-    fsrpc_ready: bool = false,
     contract_services: std.ArrayListUnmanaged(ContractServiceEntry) = .{},
     contract_service_selected_index: usize = 0,
     contract_invoke_payload: std.ArrayList(u8) = .empty,
@@ -1440,8 +1429,6 @@ const App = struct {
     pending_close_window_id: ?u32 = null,
 
     message_counter: u64 = 0,
-    next_fsrpc_tag: u32 = 1,
-    next_fsrpc_fid: u32 = 2,
     debug_frame_counter: u64 = 0,
     perf_frame_panel_ns: PanelDrawFrameNs = .{},
     perf_frame_cmd_stats: RenderCommandFrameStats = .{},
@@ -1676,8 +1663,6 @@ const App = struct {
         app.text_edit_history_field = .none;
         app.active_pointer_layer = .base;
         app.frame_dt_seconds = 1.0 / 60.0;
-        app.next_fsrpc_tag = 1;
-        app.next_fsrpc_fid = 2;
         app.credential_store = credential_store;
         app.configurePerfAutomationFromEnv();
         app.launcher_project_filter.appendSlice(allocator, "") catch {};
@@ -5224,14 +5209,10 @@ const App = struct {
     }
 
     fn resetFsrpcConnectionState(self: *App) void {
-        self.fsrpc_ready = false;
-        self.next_fsrpc_tag = 1;
-        self.next_fsrpc_fid = 2;
         self.clearFsrpcRemoteError();
     }
 
     fn invalidateFsrpcAttachment(self: *App) void {
-        self.fsrpc_ready = false;
         self.clearFsrpcRemoteError();
     }
 
@@ -5358,13 +5339,12 @@ const App = struct {
         client: *ws_client_mod.WebSocketClient,
         path: []const u8,
     ) ![]u8 {
-        try self.fsrpcBootstrapGui(client);
-        const fid = try self.fsrpcWalkPathGui(client, path);
-        defer self.fsrpcClunkBestEffort(client, fid);
-        const is_dir = try self.fsrpcFidIsDirGui(client, fid);
-        if (!is_dir) return error.NotDir;
-        try self.fsrpcOpenGui(client, fid, "r");
-        return self.fsrpcReadAllTextGui(client, fid);
+        var snapshot = try self.mountAttachSnapshotGui(client, path, 1);
+        defer snapshot.deinit(self.allocator);
+
+        const root_info = try self.mountSnapshotRootInfo(snapshot.parsed.value.object);
+        if (root_info.info.kind != .directory) return error.NotDir;
+        return self.buildMountDirectoryListingText(root_info.root_node_id, snapshot.parsed.value.object);
     }
 
     fn readFilesystemFileGui(
@@ -5372,7 +5352,6 @@ const App = struct {
         client: *ws_client_mod.WebSocketClient,
         path: []const u8,
     ) ![]u8 {
-        try self.fsrpcBootstrapGui(client);
         return self.readFsPathTextGui(client, path);
     }
 
@@ -6028,7 +6007,6 @@ const App = struct {
 
     fn refreshMissionDashboardData(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
 
         const request_id = try std.fmt.allocPrint(self.allocator, "missions-{d}", .{std.time.milliTimestamp()});
         self.client_context.setPendingWorkboardRequest(request_id);
@@ -6325,7 +6303,6 @@ const App = struct {
     fn resolveMissionApproval(self: *App, action: zui.ui.operator_view.ExecApprovalResolveAction) !void {
         const mission = self.findMissionForApprovalId(action.request_id) orelse return error.NotFound;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
 
         const request_id = try std.fmt.allocPrint(self.allocator, "mission-approval-{d}", .{std.time.milliTimestamp()});
         const approval_target = try self.allocator.dupe(u8, action.request_id);
@@ -10606,7 +10583,6 @@ const App = struct {
 
     fn readFilesystemServiceRuntimeFile(self: *App, name: []const u8) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
         const path = try self.filesystemServiceRuntimePath(name);
         defer self.allocator.free(path);
         const content = try self.readFsPathTextGui(client, path);
@@ -10617,7 +10593,6 @@ const App = struct {
 
     fn writeFilesystemServiceRuntimeControl(self: *App, name: []const u8, payload: []const u8) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
 
         const control_dir = try self.filesystemServiceRuntimePath("control");
         defer self.allocator.free(control_dir);
@@ -10678,7 +10653,6 @@ const App = struct {
 
     fn refreshContractServices(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
         const payload = try self.readFsPathTextGui(client, "/.spiderweb/venoms/VENOMS.json");
         defer self.allocator.free(payload);
 
@@ -10738,7 +10712,6 @@ const App = struct {
     fn readSelectedContractServiceStatus(self: *App) !void {
         const entry = self.selectedContractService() orelse return error.MissingField;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
         const status_path = try self.contractStatusPathFromInvokePath(entry.invoke_path);
         defer self.allocator.free(status_path);
         const status = try self.readFsPathTextGui(client, status_path);
@@ -10762,7 +10735,6 @@ const App = struct {
     fn readSelectedContractServiceHelp(self: *App) !void {
         const entry = self.selectedContractService() orelse return error.MissingField;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
         const content = try self.readContractServiceFileWithFallback(client, entry.help_path, null);
         defer self.allocator.free(content);
         try self.applyFilesystemPreview(entry.help_path, content);
@@ -10772,7 +10744,6 @@ const App = struct {
     fn readSelectedContractServiceSchema(self: *App) !void {
         const entry = self.selectedContractService() orelse return error.MissingField;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
         const fallback = try self.joinFilesystemPath(entry.service_path, "schema.json");
         defer self.allocator.free(fallback);
         const content = try self.readContractServiceFileWithFallback(client, entry.schema_path, fallback);
@@ -10784,7 +10755,6 @@ const App = struct {
     fn useSelectedContractServiceTemplate(self: *App) !void {
         const entry = self.selectedContractService() orelse return error.MissingField;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
         const fallback = try self.joinFilesystemPath(entry.service_path, "template.json");
         defer self.allocator.free(fallback);
         const template_text = try self.readContractServiceFileWithFallback(client, entry.template_path, fallback);
@@ -10800,7 +10770,6 @@ const App = struct {
     fn readSelectedContractServiceResult(self: *App) !void {
         const entry = self.selectedContractService() orelse return error.MissingField;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
         const result_path = try self.contractResultPathFromInvokePath(entry.invoke_path);
         defer self.allocator.free(result_path);
         const result = try self.readFsPathTextGui(client, result_path);
@@ -10812,7 +10781,6 @@ const App = struct {
     fn invokeSelectedContractService(self: *App) !void {
         const entry = self.selectedContractService() orelse return error.MissingField;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
 
         const payload_trimmed = std.mem.trim(u8, self.contract_invoke_payload.items, " \t\r\n");
         const payload = if (payload_trimmed.len > 0) payload_trimmed else "{}";
@@ -10838,7 +10806,6 @@ const App = struct {
 
     fn writeTerminalControl(self: *App, control_name: []const u8, payload: []const u8) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
         const control_path = try std.fmt.allocPrint(
             self.allocator,
             "/agents/self/terminal/control/{s}",
@@ -10850,7 +10817,6 @@ const App = struct {
 
     fn readTerminalPath(self: *App, path: []const u8) ![]u8 {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        try self.fsrpcBootstrapGui(client);
         return self.readFsPathTextGui(client, path);
     }
 
@@ -15749,10 +15715,13 @@ const App = struct {
         if (had_pending_send) {
             self.pending_send_resume_notified = true;
         }
-        if (had_pending_send and try self.tryResumePendingSendJob()) {
-            try self.appendMessage("system", "Reconnected to Spiderweb and resumed pending job.", null);
-        } else if (had_pending_send) {
-            try self.appendMessage("system", "Reconnected to Spiderweb. Pending job not ready yet.", null);
+        if (had_pending_send) {
+            _ = try self.tryResumePendingSendJob();
+            try self.appendMessage(
+                "system",
+                "Reconnected to Spiderweb. Pending chat/job state was cleared because chat transport is being redesigned.",
+                null,
+            );
         } else {
             try self.appendMessage("system", "Connected to Spiderweb", null);
         }
@@ -16462,576 +16431,11 @@ const App = struct {
 
     fn sendChatMessageText(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
-        std.log.info("[GUI] sendChatMessageText: text_len={d} connected={}", .{ text.len, self.ws_client != null });
-        if (self.awaiting_reply) {
-            try self.appendMessage("system", "Wait for the current send to finish.", null);
-            return;
-        }
-        const client = if (self.ws_client) |*value|
-            value
-        else {
-            try self.appendMessage("system", "No active websocket connection", null);
-            return;
-        };
-
-        // Keep a session key for this send
-        const session_key = try self.currentSessionOrDefault();
-        if (session_key.len == 0) {
-            try self.appendMessage("system", "No active session available", null);
-            return;
-        }
-        const attach_project_id = self.preferredAttachWorkspaceId();
-        std.log.info(
-            "[GUI] sendChatMessageText: session={s} workspace={s} attach_state={s}",
-            .{ session_key, attach_project_id orelse "(none)", @tagName(self.session_attach_state) },
-        );
-        if (self.session_attach_state == .err) {
-            const detail = self.workspace_last_error orelse "Sandbox runtime is unavailable for this session.";
-            try self.appendMessage("system", detail, null);
-            return error.RemoteError;
-        }
-        if (self.session_attach_state != .ready) {
-            const msg = "Chat is disabled until you attach a Spiderweb session from Workspace Overview. External runtimes can keep using the mounted workspace without live chat.";
-            self.setWorkspaceError(msg);
-            try self.appendMessage("system", msg, null);
-            return error.ProjectIdRequired;
-        }
-
-        const user_msg_id = try self.nextMessageId("msg");
-        const appended_user_msg_id = try self.appendMessageWithIdForSession(session_key, "user", text, .sending, user_msg_id);
-        defer self.allocator.free(appended_user_msg_id);
-        self.allocator.free(user_msg_id);
-        try self.setPendingSend(self.allocator, appended_user_msg_id, session_key);
-
-        const request_id = try self.nextMessageId("send");
-        defer self.allocator.free(request_id);
-        if (self.pending_send_request_id) |value| {
-            self.allocator.free(value);
-            self.pending_send_request_id = null;
-        }
-        self.pending_send_request_id = try self.allocator.dupe(u8, request_id);
-        self.awaiting_reply = true;
-        std.log.info(
-            "[GUI] sendChatMessageText: submit request_id={s} session={s}",
-            .{ request_id, session_key },
-        );
-
-        const submit = self.submitChatJobViaFsrpc(client, text) catch |err| {
-            std.log.err("[GUI] sendChatMessageText: fsrpc submit failed: {s}", .{@errorName(err)});
-            const remote_detail = if (err == error.RemoteError)
-                (control_plane.lastRemoteError() orelse (self.fsrpc_last_remote_error orelse @errorName(err)))
-            else
-                @errorName(err);
-            const err_text = if (err == error.RemoteError and isTokenAuthRemoteError(remote_detail))
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    "Send failed: {s}. Verify the {s} token in Launcher.",
-                    .{ remote_detail, self.activeRoleLabel() },
-                )
-            else
-                try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{remote_detail});
-            defer self.allocator.free(err_text);
-            try self.appendMessage("system", err_text, null);
-            if (self.pending_send_message_id) |message_id| {
-                try self.setMessageFailed(message_id);
-            } else {
-                try self.setMessageFailed(appended_user_msg_id);
-            }
-            self.clearPendingSend();
-            return err;
-        };
-        std.log.info(
-            "[GUI] sendChatMessageText: submit ok request_id={s} job_id={s}",
-            .{ request_id, submit.job_id },
-        );
-        if (self.pending_send_job_id) |value| {
-            self.allocator.free(value);
-            self.pending_send_job_id = null;
-        }
-        if (self.pending_send_jobs_root) |value| {
-            self.allocator.free(value);
-            self.pending_send_jobs_root = null;
-        }
-        if (self.pending_send_correlation_id) |value| {
-            self.allocator.free(value);
-            self.pending_send_correlation_id = null;
-        }
-        self.pending_send_job_id = submit.job_id;
-        self.pending_send_jobs_root = submit.jobs_root;
-        self.pending_send_thoughts_root = submit.thoughts_root;
-        self.pending_send_correlation_id = submit.correlation_id;
-    }
-
-    fn nextFsrpcTag(self: *App) u32 {
-        if (self.ws_client) |*client| {
-            return client.nextAcheronTag();
-        }
-        const tag = self.next_fsrpc_tag;
-        self.next_fsrpc_tag +%= 1;
-        if (self.next_fsrpc_tag == 0) self.next_fsrpc_tag = 1;
-        return tag;
-    }
-
-    fn nextFsrpcFid(self: *App) u32 {
-        if (self.ws_client) |*client| {
-            return client.nextAcheronFid();
-        }
-        const fid = self.next_fsrpc_fid;
-        self.next_fsrpc_fid +%= 1;
-        if (self.next_fsrpc_fid == 0 or self.next_fsrpc_fid == 1) self.next_fsrpc_fid = 2;
-        return fid;
-    }
-
-    fn fsrpcRequestTypeForLog(request_json: []const u8) []const u8 {
-        inline for ([_][]const u8{
-            "acheron.t_version",
-            "acheron.t_attach",
-            "acheron.t_walk",
-            "acheron.t_open",
-            "acheron.t_read",
-            "acheron.t_write",
-            "acheron.t_clunk",
-        }) |needle| {
-            if (std.mem.indexOf(u8, request_json, needle) != null) return needle;
-        }
-        return "unknown";
-    }
-
-    fn fsrpcVerboseLogsEnabled(self: *const App) bool {
-        return self.settings_panel.ws_verbose_logs;
-    }
-
-    fn logFsrpcVerbose(self: *const App, comptime fmt: []const u8, args: anytype) void {
-        if (!self.fsrpcVerboseLogsEnabled()) return;
-        std.log.info(fmt, args);
-    }
-
-    fn sendAndAwaitFsrpc(
-        self: *App,
-        client: *ws_client_mod.WebSocketClient,
-        request_json: []const u8,
-        tag: u32,
-        timeout_ms: u32,
-    ) !FsrpcEnvelope {
-        const req_type = fsrpcRequestTypeForLog(request_json);
-        self.logFsrpcVerbose(
-            "[GUI][FSRPC] send type={s} tag={d} timeout_ms={d}",
-            .{ req_type, tag, timeout_ms },
-        );
-        client.send(request_json) catch |err| {
-            std.log.err(
-                "[GUI][FSRPC] send failed type={s} tag={d} err={s}",
-                .{ req_type, tag, @errorName(err) },
-            );
-            return err;
-        };
-        const raw = client.awaitAcheronFrame(tag, timeout_ms) catch |err| {
-            std.log.err(
-                "[GUI][FSRPC] await failed type={s} tag={d} err={s} alive={}",
-                .{ req_type, tag, @errorName(err), client.isAlive() },
-            );
-            return err;
-        } orelse {
-            std.log.err(
-                "[GUI][FSRPC] await timeout type={s} tag={d} alive={}",
-                .{ req_type, tag, client.isAlive() },
-            );
-            return error.Timeout;
-        };
-        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, raw, .{}) catch {
-            std.log.err(
-                "[GUI][FSRPC] parse failed type={s} tag={d}",
-                .{ req_type, tag },
-            );
-            self.allocator.free(raw);
-            return error.InvalidResponse;
-        };
-        self.logFsrpcVerbose(
-            "[GUI][FSRPC] recv type={s} tag={d} bytes={d} alive={}",
-            .{ req_type, tag, raw.len, client.isAlive() },
-        );
-        if (!client.isAlive()) {
-            self.fsrpc_ready = false;
-        }
-        return .{
-            .raw = raw,
-            .parsed = parsed,
-        };
-    }
-
-    fn ensureFsrpcOk(self: *App, envelope: *FsrpcEnvelope) !void {
-        if (envelope.parsed.value != .object) return error.InvalidResponse;
-        const obj = envelope.parsed.value.object;
-        const ok_value = obj.get("ok") orelse return error.InvalidResponse;
-        if (ok_value != .bool) return error.InvalidResponse;
-        if (ok_value.bool) {
-            self.session_attach_state = .ready;
-            self.clearFsrpcRemoteError();
-            return;
-        }
-
-        var detail: ?[]u8 = null;
-        var runtime_warming = false;
-        if (obj.get("error")) |err_value| {
-            if (err_value == .object) {
-                const err_obj = err_value.object;
-                const message = if (err_obj.get("message")) |value|
-                    if (value == .string) value.string else null
-                else
-                    null;
-                const code = if (err_obj.get("code")) |value|
-                    if (value == .string) value.string else null
-                else
-                    null;
-                if (code) |value| {
-                    if (std.mem.eql(u8, value, "runtime_warming")) runtime_warming = true;
-                }
-                const errno = if (err_obj.get("errno")) |value|
-                    if (value == .integer) value.integer else null
-                else
-                    null;
-
-                if (message != null and code != null and errno != null) {
-                    detail = std.fmt.allocPrint(self.allocator, "{s} [{s}] (errno={d})", .{ message.?, code.?, errno.? }) catch null;
-                } else if (message != null and errno != null) {
-                    detail = std.fmt.allocPrint(self.allocator, "{s} (errno={d})", .{ message.?, errno.? }) catch null;
-                } else if (message != null and code != null) {
-                    detail = std.fmt.allocPrint(self.allocator, "{s} [{s}]", .{ message.?, code.? }) catch null;
-                } else if (message) |value| {
-                    detail = self.allocator.dupe(u8, value) catch null;
-                } else if (code) |value| {
-                    detail = std.fmt.allocPrint(self.allocator, "remote fsrpc error [{s}]", .{value}) catch null;
-                } else if (errno) |value| {
-                    detail = std.fmt.allocPrint(self.allocator, "remote fsrpc error (errno={d})", .{value}) catch null;
-                }
-            } else if (err_value == .string) {
-                detail = self.allocator.dupe(u8, err_value.string) catch null;
-            }
-        }
-
-        if (detail) |value| {
-            defer self.allocator.free(value);
-            self.setFsrpcRemoteError(value);
-            std.log.warn("[GUI][FSRPC] remote error: {s}", .{value});
-        } else {
-            self.setFsrpcRemoteError("remote fsrpc error");
-            std.log.warn("[GUI][FSRPC] remote error: remote fsrpc error", .{});
-        }
-        if (runtime_warming) {
-            self.session_attach_state = .unknown;
-            if (self.connection_state == .connected) {
-                self.setConnectionState(.connected, "Connected");
-            }
-            self.setFsrpcRemoteError("sandbox runtime unavailable");
-            return error.RemoteError;
-        }
-        return error.RemoteError;
-    }
-
-    fn getFsrpcPayloadObject(self: *App, root: std.json.ObjectMap) !std.json.ObjectMap {
-        _ = self;
-        const payload = root.get("payload") orelse return error.InvalidResponse;
-        if (payload != .object) return error.InvalidResponse;
-        return payload.object;
-    }
-
-    fn fsrpcBootstrapGui(self: *App, client: *ws_client_mod.WebSocketClient) !void {
-        if (self.fsrpc_ready) {
-            self.logFsrpcVerbose("[GUI][FSRPC] bootstrap skipped: already ready", .{});
-            return;
-        }
-
-        self.logFsrpcVerbose("[GUI][FSRPC] bootstrap start", .{});
-
-        try control_plane.ensureUnifiedV2Connection(
-            self.allocator,
-            client,
-            &self.message_counter,
-        );
-        self.logFsrpcVerbose("[GUI][FSRPC] unified-v2 ready", .{});
-
-        const version_tag = self.nextFsrpcTag();
-        const version_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"acheron-1\"}}",
-            .{version_tag},
-        );
-        defer self.allocator.free(version_req);
-        var version = try self.sendAndAwaitFsrpc(client, version_req, version_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer version.deinit(self.allocator);
-        try self.ensureFsrpcOk(&version);
-        self.logFsrpcVerbose("[GUI][FSRPC] version ok tag={d}", .{version_tag});
-
-        const attach_tag = self.nextFsrpcTag();
-        const attach_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_attach\",\"tag\":{d},\"fid\":1}}",
-            .{attach_tag},
-        );
-        defer self.allocator.free(attach_req);
-        var attach = try self.sendAndAwaitFsrpc(client, attach_req, attach_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer attach.deinit(self.allocator);
-        try self.ensureFsrpcOk(&attach);
-        self.fsrpc_ready = true;
-        self.logFsrpcVerbose("[GUI][FSRPC] bootstrap ready attach_tag={d}", .{attach_tag});
-    }
-
-    fn fsrpcClunkBestEffort(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) void {
-        const tag = self.nextFsrpcTag();
-        const req = std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
-            .{ tag, fid },
-        ) catch return;
-        defer self.allocator.free(req);
-
-        var response = self.sendAndAwaitFsrpc(client, req, tag, FSRPC_CLUNK_TIMEOUT_MS) catch return;
-        response.deinit(self.allocator);
-    }
-
-    fn sendChatViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
-        var submit = try self.submitChatJobViaFsrpc(client, text);
-        defer submit.deinit(self.allocator);
-
-        const result_fid = self.nextFsrpcFid();
-        defer self.fsrpcClunkBestEffort(client, result_fid);
-
-        const result_path = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}/{s}/result.txt",
-            .{ submit.jobs_root, submit.job_id },
-        );
-        defer self.allocator.free(result_path);
-        try self.walkPathGui(client, result_fid, result_path);
-
-        const open_result_tag = self.nextFsrpcTag();
-        const open_result_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"r\"}}",
-            .{ open_result_tag, result_fid },
-        );
-        defer self.allocator.free(open_result_req);
-        var open_result = try self.sendAndAwaitFsrpc(client, open_result_req, open_result_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer open_result.deinit(self.allocator);
-        try self.ensureFsrpcOk(&open_result);
-
-        const read_tag = self.nextFsrpcTag();
-        const read_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
-            .{ read_tag, result_fid },
-        );
-        defer self.allocator.free(read_req);
-        var read = try self.sendAndAwaitFsrpc(client, read_req, read_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer read.deinit(self.allocator);
-        try self.ensureFsrpcOk(&read);
-
-        const read_payload = try self.getFsrpcPayloadObject(read.parsed.value.object);
-        const data_b64 = read_payload.get("data_b64") orelse return error.InvalidResponse;
-        if (data_b64 != .string) return error.InvalidResponse;
-
-        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
-        const decoded = try self.allocator.alloc(u8, decoded_len);
-        errdefer self.allocator.free(decoded);
-        _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
-
-        return decoded;
-    }
-
-    fn submitChatJobViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) !SubmitChatJobResult {
-        self.logFsrpcVerbose("[GUI][FSRPC] submitChatJobViaFsrpc start text_len={d}", .{text.len});
-        try self.fsrpcBootstrapGui(client);
-        var chat_paths = try self.discoverScopedChatBindingPathsGui(client);
-        defer chat_paths.deinit(self.allocator);
-
-        const input_fid = self.nextFsrpcFid();
-        defer self.fsrpcClunkBestEffort(client, input_fid);
-        self.logFsrpcVerbose("[GUI][FSRPC] chat input fid={d}", .{input_fid});
-        try self.walkPathGui(client, input_fid, chat_paths.input_path);
-
-        const open_input_tag = self.nextFsrpcTag();
-        const open_input_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
-            .{ open_input_tag, input_fid },
-        );
-        defer self.allocator.free(open_input_req);
-        var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer open_input.deinit(self.allocator);
-        try self.ensureFsrpcOk(&open_input);
-        self.logFsrpcVerbose("[GUI][FSRPC] chat input open ok fid={d}", .{input_fid});
-
-        const encoded = try encodeDataB64(self.allocator, text);
-        defer self.allocator.free(encoded);
-        var generated_write_request_id: ?[]const u8 = null;
-        defer if (generated_write_request_id) |value| self.allocator.free(value);
-        const write_request_id = if (self.pending_send_request_id) |pending|
-            pending
-        else blk: {
-            const generated = try self.nextMessageId("job");
-            generated_write_request_id = generated;
-            break :blk generated;
-        };
-        const escaped_write_request_id = try jsonEscape(self.allocator, write_request_id);
-        defer self.allocator.free(escaped_write_request_id);
-        const write_tag = self.nextFsrpcTag();
-        const write_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"id\":\"{s}\",\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
-            .{ write_tag, escaped_write_request_id, input_fid, encoded },
-        );
-        defer self.allocator.free(write_req);
-        var write = try self.sendAndAwaitFsrpc(client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS);
-        defer write.deinit(self.allocator);
-        try self.ensureFsrpcOk(&write);
-
-        const write_payload = try self.getFsrpcPayloadObject(write.parsed.value.object);
-        const job_value = write_payload.get("job") orelse return error.InvalidResponse;
-        if (job_value != .string) return error.InvalidResponse;
-        self.logFsrpcVerbose(
-            "[GUI][FSRPC] chat write ok fid={d} request_id={s} job={s}",
-            .{ input_fid, write_request_id, job_value.string },
-        );
-        return .{
-            .job_id = try self.allocator.dupe(u8, job_value.string),
-            .jobs_root = try self.allocator.dupe(u8, chat_paths.jobs_root),
-            .thoughts_root = try self.allocator.dupe(u8, chat_paths.thoughts_root),
-            .correlation_id = if (write_payload.get("correlation_id")) |value|
-                if (value == .string and value.string.len > 0) try self.allocator.dupe(u8, value.string) else null
-            else
-                null,
-        };
-    }
-
-    fn walkPathGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32, path: []const u8) !void {
-        var segments = try self.splitFsPathSegments(path);
-        defer self.freeFsPathSegments(&segments);
-        const path_json = try self.buildPathArrayJsonGui(segments.items);
-        defer self.allocator.free(path_json);
-
-        const walk_tag = self.nextFsrpcTag();
-        const walk_req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
-            .{ walk_tag, fid, path_json },
-        );
-        defer self.allocator.free(walk_req);
-        var walk = try self.sendAndAwaitFsrpc(client, walk_req, walk_tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer walk.deinit(self.allocator);
-        try self.ensureFsrpcOk(&walk);
-    }
-
-    fn splitFsPathSegments(self: *App, path: []const u8) !std.ArrayListUnmanaged([]u8) {
-        var out = std.ArrayListUnmanaged([]u8){};
-        errdefer {
-            for (out.items) |segment| self.allocator.free(segment);
-            out.deinit(self.allocator);
-        }
-
-        const trimmed = std.mem.trim(u8, path, " \t\r\n");
-        if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "/")) return out;
-
-        var iter = std.mem.splitScalar(u8, trimmed, '/');
-        while (iter.next()) |raw| {
-            const part = std.mem.trim(u8, raw, " \t\r\n");
-            if (part.len == 0) continue;
-            try out.append(self.allocator, try self.allocator.dupe(u8, part));
-        }
-        return out;
-    }
-
-    fn freeFsPathSegments(self: *App, segments: *std.ArrayListUnmanaged([]u8)) void {
-        for (segments.items) |segment| self.allocator.free(segment);
-        segments.deinit(self.allocator);
-        segments.* = .{};
-    }
-
-    fn buildPathArrayJsonGui(self: *App, segments: []const []const u8) ![]u8 {
-        var out = std.ArrayListUnmanaged(u8){};
-        defer out.deinit(self.allocator);
-        try out.append(self.allocator, '[');
-        for (segments, 0..) |segment, idx| {
-            if (idx > 0) try out.append(self.allocator, ',');
-            const escaped = try jsonEscape(self.allocator, segment);
-            defer self.allocator.free(escaped);
-            try out.writer(self.allocator).print("\"{s}\"", .{escaped});
-        }
-        try out.append(self.allocator, ']');
-        return out.toOwnedSlice(self.allocator);
-    }
-
-    fn fsrpcWalkPathGui(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8) !u32 {
-        var segments = try self.splitFsPathSegments(path);
-        defer self.freeFsPathSegments(&segments);
-        const path_json = try self.buildPathArrayJsonGui(segments.items);
-        defer self.allocator.free(path_json);
-
-        const new_fid = self.nextFsrpcFid();
-        const tag = self.nextFsrpcTag();
-        const req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
-            .{ tag, new_fid, path_json },
-        );
-        defer self.allocator.free(req);
-
-        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer response.deinit(self.allocator);
-        try self.ensureFsrpcOk(&response);
-        return new_fid;
-    }
-
-    fn fsrpcOpenGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32, mode: []const u8) !void {
-        const escaped_mode = try jsonEscape(self.allocator, mode);
-        defer self.allocator.free(escaped_mode);
-        const tag = self.nextFsrpcTag();
-        const req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
-            .{ tag, fid, escaped_mode },
-        );
-        defer self.allocator.free(req);
-
-        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer response.deinit(self.allocator);
-        try self.ensureFsrpcOk(&response);
-    }
-
-    fn fsrpcReadAllTextGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) ![]u8 {
-        var out = std.ArrayListUnmanaged(u8){};
-        errdefer out.deinit(self.allocator);
-
-        var offset: u64 = 0;
-        while (true) {
-            const tag = self.nextFsrpcTag();
-            const req = try std.fmt.allocPrint(
-                self.allocator,
-                "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":{d},\"count\":{d}}}",
-                .{ tag, fid, offset, FSRPC_READ_CHUNK_BYTES },
-            );
-            defer self.allocator.free(req);
-
-            var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
-            defer response.deinit(self.allocator);
-            try self.ensureFsrpcOk(&response);
-
-            const payload = try self.getFsrpcPayloadObject(response.parsed.value.object);
-            const data_b64 = payload.get("data_b64") orelse return error.InvalidResponse;
-            if (data_b64 != .string) return error.InvalidResponse;
-
-            const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
-            const decoded = try self.allocator.alloc(u8, decoded_len);
-            defer self.allocator.free(decoded);
-            _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
-
-            if (decoded.len == 0) break;
-            if (out.items.len + decoded.len > FSRPC_READ_MAX_TOTAL_BYTES) return error.ResponseTooLarge;
-            try out.appendSlice(self.allocator, decoded);
-            offset += @as(u64, @intCast(decoded.len));
-            if (decoded.len < @as(usize, FSRPC_READ_CHUNK_BYTES)) break;
-        }
-
-        return out.toOwnedSlice(self.allocator);
+        const msg = "Chat and job transport is temporarily unavailable while SpiderApp moves fully to the mount-based workspace model.";
+        self.setWorkspaceError(msg);
+        try self.appendMessage("system", msg, null);
+        self.clearPendingSend();
+        return error.Unsupported;
     }
 
     fn jsonValueAsU64(value: std.json.Value) ?u64 {
@@ -17081,75 +16485,193 @@ const App = struct {
         return .unknown;
     }
 
-    fn fsrpcStatInfoGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) !FilesystemStatInfo {
-        const tag = self.nextFsrpcTag();
-        const req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_stat\",\"tag\":{d},\"fid\":{d}}}",
-            .{ tag, fid },
-        );
-        defer self.allocator.free(req);
-
-        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
-        defer response.deinit(self.allocator);
-        try self.ensureFsrpcOk(&response);
-
-        const payload = try self.getFsrpcPayloadObject(response.parsed.value.object);
-        var info = FilesystemStatInfo{};
-        const kind = payload.get("kind") orelse return error.InvalidResponse;
-        if (kind != .string) return error.InvalidResponse;
-        info.kind = filesystemKindFromStatLabel(kind.string);
-        info.size_bytes = jsonObjectFirstU64(payload, &.{ "size", "size_bytes", "bytes", "length", "len" });
-        info.modified_unix_ms = normalizeFilesystemTimestampMs(
-            jsonObjectFirstI64(payload, &.{ "modified_ms", "mtime_ms", "mtime", "modified", "updated_at_ms", "modified_at", "updated_at" }),
-        );
-        return info;
-    }
-
-    fn fsrpcFidIsDirGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) !bool {
-        const info = try self.fsrpcStatInfoGui(client, fid);
-        return info.kind == .directory;
-    }
-
     fn resolveFilesystemPathStatGui(
         self: *App,
         client: *ws_client_mod.WebSocketClient,
         path: []const u8,
     ) !FilesystemStatInfo {
-        try self.fsrpcBootstrapGui(client);
-        const fid = try self.fsrpcWalkPathGui(client, path);
-        defer self.fsrpcClunkBestEffort(client, fid);
-        return self.fsrpcStatInfoGui(client, fid);
+        var snapshot = try self.mountAttachSnapshotGui(client, path, 0);
+        defer snapshot.deinit(self.allocator);
+        const root_info = try self.mountSnapshotRootInfo(snapshot.parsed.value.object);
+        return root_info.info;
     }
 
     fn readFsPathTextGui(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8) ![]u8 {
-        const fid = try self.fsrpcWalkPathGui(client, path);
-        defer self.fsrpcClunkBestEffort(client, fid);
-        try self.fsrpcOpenGui(client, fid, "r");
-        return self.fsrpcReadAllTextGui(client, fid);
-    }
-
-    fn fsrpcWriteTextGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32, content: []const u8) !void {
-        const encoded = try encodeDataB64(self.allocator, content);
-        defer self.allocator.free(encoded);
-        const tag = self.nextFsrpcTag();
-        const req = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
-            .{ tag, fid, encoded },
-        );
-        defer self.allocator.free(req);
-
-        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_CHAT_WRITE_TIMEOUT_MS);
-        defer response.deinit(self.allocator);
-        try self.ensureFsrpcOk(&response);
+        return self.mountReadAllTextGui(client, path);
     }
 
     fn writeFsPathTextGui(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8, content: []const u8) !void {
-        const fid = try self.fsrpcWalkPathGui(client, path);
-        defer self.fsrpcClunkBestEffort(client, fid);
-        try self.fsrpcOpenGui(client, fid, "rw");
-        try self.fsrpcWriteTextGui(client, fid, content);
+        try self.mountWriteAllTextGui(client, path, content);
+    }
+
+    const MountSnapshotRootInfo = struct {
+        root_node_id: u64,
+        info: FilesystemStatInfo,
+    };
+
+    fn sendMountControlRequestGui(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        control_type: []const u8,
+        payload_json: []const u8,
+        timeout_ms: i64,
+    ) !unified_v2_client.JsonEnvelope {
+        unified_v2_client.clearLastRemoteError();
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+        const request_id = try unified_v2_client.nextRequestId(self.allocator, &self.message_counter, "mount");
+        defer self.allocator.free(request_id);
+        return unified_v2_client.sendControlRequest(
+            self.allocator,
+            client,
+            control_type,
+            request_id,
+            payload_json,
+            timeout_ms,
+        ) catch |err| {
+            if (err == error.RemoteError) {
+                if (unified_v2_client.lastRemoteError()) |remote| self.setFsrpcRemoteError(remote);
+            }
+            return err;
+        };
+    }
+
+    fn controlPayloadObjectGui(self: *App, envelope: *unified_v2_client.JsonEnvelope) !std.json.ObjectMap {
+        _ = self;
+        return unified_v2_client.extractPayloadObject(envelope);
+    }
+
+    fn mountAttachSnapshotGui(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        path: []const u8,
+        depth: u32,
+    ) !unified_v2_client.JsonEnvelope {
+        const escaped_path = try jsonEscape(self.allocator, path);
+        defer self.allocator.free(escaped_path);
+        const payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"path\":\"{s}\",\"depth\":{d}}}",
+            .{ escaped_path, depth },
+        );
+        defer self.allocator.free(payload);
+        return self.sendMountControlRequestGui(client, "control.mount_attach", payload, FSRPC_DEFAULT_TIMEOUT_MS);
+    }
+
+    fn mountNodeKind(kind_label: []const u8) FilesystemEntryKind {
+        if (std.mem.indexOf(u8, kind_label, "directory") != null) return .directory;
+        if (std.mem.indexOf(u8, kind_label, "file") != null) return .file;
+        if (std.mem.eql(u8, kind_label, "export_root")) return .directory;
+        if (std.mem.eql(u8, kind_label, "dir")) return .directory;
+        if (std.mem.eql(u8, kind_label, "file")) return .file;
+        return .unknown;
+    }
+
+    fn mountSnapshotRootInfo(
+        self: *App,
+        root: std.json.ObjectMap,
+    ) !MountSnapshotRootInfo {
+        _ = self;
+        const payload_value = root.get("payload") orelse return error.InvalidResponse;
+        if (payload_value != .object) return error.InvalidResponse;
+        const payload = payload_value.object;
+        const root_node_id = jsonObjectFirstU64(payload, &.{"root_node_id"}) orelse return error.InvalidResponse;
+        const nodes_value = payload.get("nodes") orelse return error.InvalidResponse;
+        if (nodes_value != .array) return error.InvalidResponse;
+
+        for (nodes_value.array.items) |node_value| {
+            if (node_value != .object) continue;
+            const node_obj = node_value.object;
+            const node_id = jsonObjectFirstU64(node_obj, &.{"id"}) orelse continue;
+            if (node_id != root_node_id) continue;
+            const kind_label = jsonObjectFirstString(node_obj, &.{"kind"}) orelse return error.InvalidResponse;
+            return .{
+                .root_node_id = root_node_id,
+                .info = .{
+                    .kind = mountNodeKind(kind_label),
+                    .size_bytes = jsonObjectFirstU64(node_obj, &.{ "size", "size_bytes", "bytes", "length", "len" }),
+                    .modified_unix_ms = null,
+                },
+            };
+        }
+        return error.InvalidResponse;
+    }
+
+    fn buildMountDirectoryListingText(
+        self: *App,
+        root_node_id: u64,
+        root: std.json.ObjectMap,
+    ) ![]u8 {
+        const payload = root.get("payload") orelse return error.InvalidResponse;
+        if (payload != .object) return error.InvalidResponse;
+        const nodes_value = payload.object.get("nodes") orelse return error.InvalidResponse;
+        if (nodes_value != .array) return error.InvalidResponse;
+
+        var out = std.ArrayListUnmanaged(u8){};
+        defer out.deinit(self.allocator);
+        var first = true;
+        for (nodes_value.array.items) |node_value| {
+            if (node_value != .object) continue;
+            const node_obj = node_value.object;
+            const parent_id = jsonObjectFirstU64(node_obj, &.{"parent_id"}) orelse continue;
+            if (parent_id != root_node_id) continue;
+            const name = jsonObjectFirstString(node_obj, &.{"name"}) orelse continue;
+            if (!first) try out.append(self.allocator, '\n');
+            first = false;
+            try out.appendSlice(self.allocator, name);
+        }
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    fn mountReadAllTextGui(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8) ![]u8 {
+        var out = std.ArrayListUnmanaged(u8){};
+        errdefer out.deinit(self.allocator);
+        var offset: u64 = 0;
+        while (true) {
+            const escaped_path = try jsonEscape(self.allocator, path);
+            defer self.allocator.free(escaped_path);
+            const payload = try std.fmt.allocPrint(
+                self.allocator,
+                "{{\"path\":\"{s}\",\"offset\":{d},\"length\":{d}}}",
+                .{ escaped_path, offset, FSRPC_READ_CHUNK_BYTES },
+            );
+            defer self.allocator.free(payload);
+
+            var envelope = try self.sendMountControlRequestGui(client, "control.mount_file_read", payload, FSRPC_DEFAULT_TIMEOUT_MS);
+            defer envelope.deinit(self.allocator);
+            const response = try self.controlPayloadObjectGui(&envelope);
+            const data_b64 = jsonObjectFirstString(response, &.{"data_b64"}) orelse return error.InvalidResponse;
+            const eof = jsonObjectFirstBool(response, &.{"eof"}) orelse false;
+
+            const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64) catch return error.InvalidResponse;
+            const decoded = try self.allocator.alloc(u8, decoded_len);
+            defer self.allocator.free(decoded);
+            _ = std.base64.standard.Decoder.decode(decoded, data_b64) catch return error.InvalidResponse;
+
+            if (decoded.len != 0) {
+                if (out.items.len + decoded.len > FSRPC_READ_MAX_TOTAL_BYTES) return error.ResponseTooLarge;
+                try out.appendSlice(self.allocator, decoded);
+                offset += @as(u64, @intCast(decoded.len));
+            }
+            if (eof or decoded.len == 0 or decoded.len < @as(usize, FSRPC_READ_CHUNK_BYTES)) break;
+        }
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    fn mountWriteAllTextGui(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8, content: []const u8) !void {
+        const escaped_path = try jsonEscape(self.allocator, path);
+        defer self.allocator.free(escaped_path);
+        const encoded = try encodeDataB64(self.allocator, content);
+        defer self.allocator.free(encoded);
+        const payload = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"path\":\"{s}\",\"offset\":0,\"truncate_to_size\":{d},\"data_b64\":\"{s}\"}}",
+            .{ escaped_path, content.len, encoded },
+        );
+        defer self.allocator.free(payload);
+
+        var envelope = try self.sendMountControlRequestGui(client, "control.mount_file_write", payload, FSRPC_CHAT_WRITE_TIMEOUT_MS);
+        defer envelope.deinit(self.allocator);
+        _ = try self.controlPayloadObjectGui(&envelope);
     }
 
     fn jsonObjectFirstString(obj: std.json.ObjectMap, keys: []const []const u8) ?[]const u8 {
@@ -17178,7 +16700,6 @@ const App = struct {
         control_name: []const u8,
         payload: []const u8,
     ) ![]u8 {
-        try self.fsrpcBootstrapGui(client);
         const control_dir = try self.buildPackagesControlPathGui("control");
         defer self.allocator.free(control_dir);
         const control_path = try self.joinFilesystemPath(control_dir, control_name);
@@ -17514,88 +17035,10 @@ const App = struct {
     }
 
     fn tryResumePendingSendJob(self: *App) !bool {
-        const job_id = self.pending_send_job_id orelse return false;
-        const jobs_root = self.pending_send_jobs_root orelse "/.spiderweb/venoms/jobs";
-        const client = if (self.ws_client) |*value| value else return false;
         if (!self.pending_send_resume_notified) return false;
-        const session_key = if (self.pending_send_session_key) |value|
-            value
-        else
-            try self.currentSessionOrDefault();
-
-        const now_ms = std.time.milliTimestamp();
-        if (self.pending_send_last_resume_attempt_ms != 0 and now_ms - self.pending_send_last_resume_attempt_ms < 1_500) {
-            return false;
-        }
-        self.pending_send_last_resume_attempt_ms = now_ms;
-        std.log.info("[GUI] tryResumePendingSendJob: job_id={s}", .{job_id});
-
-        try self.fsrpcBootstrapGui(client);
-        var status = try self.readJobStatusGui(client, jobs_root, job_id);
-        defer status.deinit(self.allocator);
-
-        const maybe_log = self.readJobArtifactTextGui(client, jobs_root, job_id, "log.txt") catch null;
-        defer if (maybe_log) |value| self.allocator.free(value);
-
-        if (self.pending_send_thoughts_root) |thoughts_root| {
-            const latest_path = try std.fmt.allocPrint(self.allocator, "{s}/latest.txt", .{thoughts_root});
-            defer self.allocator.free(latest_path);
-            const latest_thought_text = self.readFsPathTextGui(client, latest_path) catch null;
-            defer if (latest_thought_text) |value| self.allocator.free(value);
-            if (latest_thought_text) |value| {
-                const trimmed = std.mem.trim(u8, value, " \t\r\n");
-                try self.syncPendingThoughtText(session_key, if (trimmed.len > 0) trimmed else null);
-            } else if (maybe_log) |log_text| {
-                try self.syncPendingThoughtFromJobLog(session_key, log_text);
-            }
-        } else if (maybe_log) |log_text| {
-            try self.syncPendingThoughtFromJobLog(session_key, log_text);
-        }
-
-        if (maybe_log) |log_text| {
-            try self.ingestDebugEventsFromJobLog(log_text);
-        }
-
-        if (!std.mem.eql(u8, status.state, "done") and !std.mem.eql(u8, status.state, "failed")) {
-            return false;
-        }
-
-        const result = self.readJobArtifactTextGui(client, jobs_root, job_id, "result.txt") catch |err| blk: {
-            const msg = try std.fmt.allocPrint(self.allocator, "resume read failed: {s}", .{@errorName(err)});
-            break :blk msg;
-        };
-        defer self.allocator.free(result);
-
-        if (std.mem.eql(u8, status.state, "failed")) {
-            if (self.pending_send_message_id) |message_id| {
-                try self.setMessageFailed(message_id);
-            }
-            if (status.error_text) |err_text| {
-                const msg = try std.fmt.allocPrint(self.allocator, "Job {s} failed: {s}", .{ job_id, err_text });
-                defer self.allocator.free(msg);
-                try self.appendMessage("system", msg, null);
-            } else {
-                const msg = try std.fmt.allocPrint(self.allocator, "Job {s} failed: {s}", .{ job_id, result });
-                defer self.allocator.free(msg);
-                try self.appendMessage("system", msg, null);
-            }
-            self.clearPendingSend();
-            return true;
-        }
-
-        if (self.pending_send_message_id) |message_id| {
-            try self.setMessageState(message_id, null);
-        }
-        if (maybe_log) |log_text| {
-            const replayed = try self.replaySessionReceiveFromJobLog(session_key, log_text);
-            if (!replayed) {
-                try self.appendMessageForSession(session_key, "assistant", result, null);
-            }
-        } else {
-            try self.appendMessageForSession(session_key, "assistant", result, null);
-        }
+        if (self.pending_send_job_id == null and self.pending_send_message_id == null) return false;
         self.clearPendingSend();
-        return true;
+        return false;
     }
 
     fn nextMessageId(self: *App, prefix: []const u8) ![]const u8 {

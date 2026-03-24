@@ -28,6 +28,8 @@ var g_app_local_node_bootstrap_done: bool = false;
 var g_app_local_venom_host: ?app_venom_host.AppVenomHost = null;
 const fsrpc_default_timeout_ms: i64 = 15_000;
 const fsrpc_chat_write_timeout_ms: i64 = 180_000;
+const mount_read_chunk_bytes: u32 = 128 * 1024;
+const mount_read_max_total_bytes: usize = 8 * 1024 * 1024;
 const chat_job_poll_interval_ms: u64 = 500;
 const session_status_timeout_ms: i64 = 5_000;
 const session_warming_wait_timeout_ms: i64 = 30_000;
@@ -52,7 +54,7 @@ const CliFsPathReader = struct {
     client: *WebSocketClient,
 
     pub fn readText(self: @This(), path: []const u8) ![]u8 {
-        return fsrpcReadPathText(self.allocator, self.client, path);
+        return mountReadPathText(self.allocator, self.client, path);
     }
 };
 
@@ -355,17 +357,11 @@ fn executeCommand(allocator: std.mem.Allocator, options: args.Options, cmd: args
 
     switch (cmd.noun) {
         .chat => {
-            switch (cmd.verb) {
-                .send => try executeChatSend(allocator, options, cmd),
-                .resume_job => try executeChatResume(allocator, options, cmd),
-                .history => {
-                    try stdout.print("Chat history not yet implemented\n", .{});
-                },
-                else => {
-                    logger.err("Unknown chat verb", .{});
-                    return error.InvalidArguments;
-                },
-            }
+            try stdout.print(
+                "Chat is temporarily unavailable while SpiderApp moves fully to the mount-based workspace model.\n",
+                .{},
+            );
+            return;
         },
         .fs => {
             switch (cmd.verb) {
@@ -1060,7 +1056,7 @@ fn executePackageCommand(allocator: std.mem.Allocator, options: args.Options, cm
     const client = try getOrCreateClient(allocator, options);
     try ensureUnifiedV2Control(allocator, client);
     try maybeApplyWorkspaceContext(allocator, options, client);
-    try fsrpcBootstrap(allocator, client);
+    try ensureUnifiedV2Control(allocator, client);
 
     const control_name: []const u8 = switch (cmd.verb) {
         .list => "list.json",
@@ -2650,7 +2646,7 @@ fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, 
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyWorkspaceContext(allocator, options, client);
-    try fsrpcBootstrap(allocator, client);
+    try ensureUnifiedV2Control(allocator, client);
 
     if (node_filter) |node_id| {
         try stdout.print(
@@ -2668,14 +2664,7 @@ fn executeNodeServiceWatch(allocator: std.mem.Allocator, options: args.Options, 
     defer if (previous_snapshot) |value| allocator.free(value);
 
     while (true) {
-        const fid = fsrpcWalkPath(allocator, client, "/.spiderweb/catalog/node-venom-events.ndjson") catch |err| {
-            logger.err("node watch open failed: {s}", .{@errorName(err)});
-            return err;
-        };
-        defer fsrpcClunkBestEffort(allocator, client, fid);
-        try fsrpcOpen(allocator, client, fid, "r");
-
-        const snapshot = fsrpcReadAllText(allocator, client, fid) catch |err| {
+        const snapshot = mountReadPathText(allocator, client, "/.spiderweb/catalog/node-venom-events.ndjson") catch |err| {
             logger.err("node watch read failed: {s}", .{@errorName(err)});
             return err;
         };
@@ -3058,19 +3047,224 @@ fn executeNodeDeny(allocator: std.mem.Allocator, options: args.Options, cmd: arg
     );
 }
 
+const MountNodeKind = enum {
+    directory,
+    file,
+    unknown,
+};
+
+const MountSnapshotRootInfo = struct {
+    root_node_id: u64,
+    kind: MountNodeKind,
+};
+
+fn jsonObjectU64Or(obj: std.json.ObjectMap, name: []const u8, fallback: u64) u64 {
+    const value = obj.get(name) orelse return fallback;
+    if (value != .integer or value.integer < 0) return fallback;
+    return @intCast(value.integer);
+}
+
+fn jsonObjectFirstU64(obj: std.json.ObjectMap, names: []const []const u8) ?u64 {
+    for (names) |name| {
+        const value = obj.get(name) orelse continue;
+        if (value == .integer and value.integer >= 0) return @intCast(value.integer);
+    }
+    return null;
+}
+
+fn mountNodeKind(kind_label: []const u8) MountNodeKind {
+    if (std.mem.indexOf(u8, kind_label, "directory") != null) return .directory;
+    if (std.mem.indexOf(u8, kind_label, "file") != null) return .file;
+    if (std.mem.eql(u8, kind_label, "export_root")) return .directory;
+    if (std.mem.eql(u8, kind_label, "dir")) return .directory;
+    if (std.mem.eql(u8, kind_label, "file")) return .file;
+    return .unknown;
+}
+
+fn requestMountPayloadJson(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    control_type: []const u8,
+    payload_json: []const u8,
+    timeout_ms: i64,
+) ![]u8 {
+    try ensureUnifiedV2Control(allocator, client);
+    return control_plane.requestControlPayloadJsonWithTimeout(
+        allocator,
+        client,
+        &g_control_request_counter,
+        control_type,
+        payload_json,
+        timeout_ms,
+    );
+}
+
+fn mountAttachPayloadJson(
+    allocator: std.mem.Allocator,
+    client: *WebSocketClient,
+    path: []const u8,
+    depth: u32,
+) ![]u8 {
+    const escaped_path = try unified.jsonEscape(allocator, path);
+    defer allocator.free(escaped_path);
+    const payload = try std.fmt.allocPrint(
+        allocator,
+        "{{\"path\":\"{s}\",\"depth\":{d}}}",
+        .{ escaped_path, depth },
+    );
+    defer allocator.free(payload);
+    return requestMountPayloadJson(allocator, client, "control.mount_attach", payload, fsrpc_default_timeout_ms);
+}
+
+fn mountSnapshotRootInfoFromParsed(parsed: *const std.json.Parsed(std.json.Value)) !MountSnapshotRootInfo {
+    if (parsed.value != .object) return error.InvalidResponse;
+    const root = parsed.value.object;
+    const root_node_id = jsonObjectFirstU64(root, &.{"root_node_id"}) orelse return error.InvalidResponse;
+    const nodes_value = root.get("nodes") orelse return error.InvalidResponse;
+    if (nodes_value != .array) return error.InvalidResponse;
+    for (nodes_value.array.items) |node_value| {
+        if (node_value != .object) continue;
+        const node_obj = node_value.object;
+        const node_id = jsonObjectFirstU64(node_obj, &.{"id"}) orelse continue;
+        if (node_id != root_node_id) continue;
+        const kind_label = jsonObjectStringOr(node_obj, "kind", "");
+        return .{
+            .root_node_id = root_node_id,
+            .kind = mountNodeKind(kind_label),
+        };
+    }
+    return error.InvalidResponse;
+}
+
+fn mountListPathText(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8) ![]u8 {
+    const payload_json = try mountAttachPayloadJson(allocator, client, path, 1);
+    defer allocator.free(payload_json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    const info = try mountSnapshotRootInfoFromParsed(&parsed);
+    if (parsed.value != .object) return error.InvalidResponse;
+    const nodes_value = parsed.value.object.get("nodes") orelse return error.InvalidResponse;
+    if (nodes_value != .array) return error.InvalidResponse;
+
+    var out = std.ArrayListUnmanaged(u8){};
+    defer out.deinit(allocator);
+    var first = true;
+    for (nodes_value.array.items) |node_value| {
+        if (node_value != .object) continue;
+        const node_obj = node_value.object;
+        const parent_id = jsonObjectFirstU64(node_obj, &.{"parent_id"}) orelse continue;
+        if (parent_id != info.root_node_id) continue;
+        const name = jsonObjectStringOr(node_obj, "name", "");
+        if (name.len == 0) continue;
+        if (!first) try out.append(allocator, '\n');
+        first = false;
+        try out.appendSlice(allocator, name);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn mountStatRaw(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8) ![]u8 {
+    const payload_json = try mountAttachPayloadJson(allocator, client, path, 0);
+    defer allocator.free(payload_json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    const info = try mountSnapshotRootInfoFromParsed(&parsed);
+    if (parsed.value != .object) return error.InvalidResponse;
+    const nodes_value = parsed.value.object.get("nodes") orelse return error.InvalidResponse;
+    if (nodes_value != .array) return error.InvalidResponse;
+    for (nodes_value.array.items) |node_value| {
+        if (node_value != .object) continue;
+        const node_obj = node_value.object;
+        const node_id = jsonObjectFirstU64(node_obj, &.{"id"}) orelse continue;
+        if (node_id != info.root_node_id) continue;
+        var out = std.ArrayListUnmanaged(u8){};
+        defer out.deinit(allocator);
+        try std.fmt.format(out.writer(allocator), "{f}", .{std.json.fmt(node_value, .{ .whitespace = .indent_2 })});
+        return out.toOwnedSlice(allocator);
+    }
+    return error.InvalidResponse;
+}
+
+fn mountPathIsDir(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8) !bool {
+    const payload_json = try mountAttachPayloadJson(allocator, client, path, 0);
+    defer allocator.free(payload_json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+    defer parsed.deinit();
+    const info = try mountSnapshotRootInfoFromParsed(&parsed);
+    return info.kind == .directory;
+}
+
+fn mountReadPathText(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8){};
+    errdefer out.deinit(allocator);
+    var offset: u64 = 0;
+    while (true) {
+        const escaped_path = try unified.jsonEscape(allocator, path);
+        defer allocator.free(escaped_path);
+        const payload = try std.fmt.allocPrint(
+            allocator,
+            "{{\"path\":\"{s}\",\"offset\":{d},\"length\":{d}}}",
+            .{ escaped_path, offset, mount_read_chunk_bytes },
+        );
+        defer allocator.free(payload);
+        const payload_json = try requestMountPayloadJson(
+            allocator,
+            client,
+            "control.mount_file_read",
+            payload,
+            fsrpc_default_timeout_ms,
+        );
+        defer allocator.free(payload_json);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const root = parsed.value.object;
+        const data_b64 = jsonObjectStringOr(root, "data_b64", "");
+        const eof = jsonObjectBoolOr(root, "eof", false);
+
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64) catch return error.InvalidResponse;
+        const decoded = try allocator.alloc(u8, decoded_len);
+        defer allocator.free(decoded);
+        _ = std.base64.standard.Decoder.decode(decoded, data_b64) catch return error.InvalidResponse;
+
+        if (decoded.len != 0) {
+            if (out.items.len + decoded.len > mount_read_max_total_bytes) return error.ResponseTooLarge;
+            try out.appendSlice(allocator, decoded);
+            offset += decoded.len;
+        }
+        if (eof or decoded.len == 0 or decoded.len < @as(usize, mount_read_chunk_bytes)) break;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn mountWritePathText(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8, content: []const u8) !void {
+    const escaped_path = try unified.jsonEscape(allocator, path);
+    defer allocator.free(escaped_path);
+    const encoded = try unified.encodeDataB64(allocator, content);
+    defer allocator.free(encoded);
+    const payload = try std.fmt.allocPrint(
+        allocator,
+        "{{\"path\":\"{s}\",\"offset\":0,\"truncate_to_size\":{d},\"data_b64\":\"{s}\"}}",
+        .{ escaped_path, content.len, encoded },
+    );
+    defer allocator.free(payload);
+    const payload_json = try requestMountPayloadJson(
+        allocator,
+        client,
+        "control.mount_file_write",
+        payload,
+        fsrpc_chat_write_timeout_ms,
+    );
+    allocator.free(payload_json);
+}
+
 fn fsrpcReadPathText(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8) ![]u8 {
-    const fid = try fsrpcWalkPath(allocator, client, path);
-    defer fsrpcClunkBestEffort(allocator, client, fid);
-    try fsrpcOpen(allocator, client, fid, "r");
-    return fsrpcReadAllText(allocator, client, fid);
+    return mountReadPathText(allocator, client, path);
 }
 
 fn fsrpcWritePathText(allocator: std.mem.Allocator, client: *WebSocketClient, path: []const u8, content: []const u8) !void {
-    const fid = try fsrpcWalkPath(allocator, client, path);
-    defer fsrpcClunkBestEffort(allocator, client, fid);
-    try fsrpcOpen(allocator, client, fid, "rw");
-    var write = try fsrpcWriteText(allocator, client, fid, content, null);
-    defer write.deinit(allocator);
+    return mountWritePathText(allocator, client, path, content);
 }
 
 fn executeNodeServiceGet(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
@@ -3525,7 +3719,7 @@ fn executeNodeServiceRuntime(allocator: std.mem.Allocator, options: args.Options
     };
     defer allocator.free(runtime_root);
 
-    try fsrpcBootstrap(allocator, client);
+    try ensureUnifiedV2Control(allocator, client);
 
     switch (action) {
         .help => {
@@ -4239,14 +4433,8 @@ fn executeFsLs(allocator: std.mem.Allocator, options: args.Options, cmd: args.Co
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyWorkspaceContext(allocator, options, client);
-    try fsrpcBootstrap(allocator, client);
-
     const path = if (cmd.args.len > 0) cmd.args[0] else "/";
-    const fid = try fsrpcWalkPath(allocator, client, path);
-    defer fsrpcClunkBestEffort(allocator, client, fid);
-
-    try fsrpcOpen(allocator, client, fid, "r");
-    const content = try fsrpcReadAllText(allocator, client, fid);
+    const content = try mountListPathText(allocator, client, path);
     defer allocator.free(content);
 
     if (content.len == 0) {
@@ -4265,13 +4453,7 @@ fn executeFsRead(allocator: std.mem.Allocator, options: args.Options, cmd: args.
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyWorkspaceContext(allocator, options, client);
-    try fsrpcBootstrap(allocator, client);
-
-    const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
-    defer fsrpcClunkBestEffort(allocator, client, fid);
-
-    try fsrpcOpen(allocator, client, fid, "r");
-    const content = try fsrpcReadAllText(allocator, client, fid);
+    const content = try mountReadPathText(allocator, client, cmd.args[0]);
     defer allocator.free(content);
     try stdout.print("{s}\n", .{content});
 }
@@ -4285,18 +4467,11 @@ fn executeFsWrite(allocator: std.mem.Allocator, options: args.Options, cmd: args
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyWorkspaceContext(allocator, options, client);
-    try fsrpcBootstrap(allocator, client);
-
-    const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
-    defer fsrpcClunkBestEffort(allocator, client, fid);
-
     const content = try std.mem.join(allocator, " ", cmd.args[1..]);
     defer allocator.free(content);
 
-    try fsrpcOpen(allocator, client, fid, "rw");
-    var write = try fsrpcWriteText(allocator, client, fid, content, null);
-    defer write.deinit(allocator);
-    try stdout.print("wrote {d} byte(s)\n", .{write.written});
+    try mountWritePathText(allocator, client, cmd.args[0], content);
+    try stdout.print("wrote {d} byte(s)\n", .{content.len});
 }
 
 fn executeFsStat(allocator: std.mem.Allocator, options: args.Options, cmd: args.Command) !void {
@@ -4308,12 +4483,7 @@ fn executeFsStat(allocator: std.mem.Allocator, options: args.Options, cmd: args.
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyWorkspaceContext(allocator, options, client);
-    try fsrpcBootstrap(allocator, client);
-
-    const fid = try fsrpcWalkPath(allocator, client, cmd.args[0]);
-    defer fsrpcClunkBestEffort(allocator, client, fid);
-
-    const stat_json = try fsrpcStatRaw(allocator, client, fid);
+    const stat_json = try mountStatRaw(allocator, client, cmd.args[0]);
     defer allocator.free(stat_json);
     try stdout.print("{s}\n", .{stat_json});
 }
@@ -4322,8 +4492,6 @@ fn executeFsTree(allocator: std.mem.Allocator, options: args.Options, cmd: args.
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try getOrCreateClient(allocator, options);
     try maybeApplyWorkspaceContext(allocator, options, client);
-    try fsrpcBootstrap(allocator, client);
-
     var tree_opts = FsTreeOptions{};
     var i: usize = 0;
     while (i < cmd.args.len) : (i += 1) {
@@ -4378,9 +4546,7 @@ fn fsTreeWalk(
     depth: usize,
     opts: FsTreeOptions,
 ) !void {
-    const fid = try fsrpcWalkPath(allocator, client, path);
-    defer fsrpcClunkBestEffort(allocator, client, fid);
-    const is_dir = try fsrpcFidIsDir(allocator, client, fid);
+    const is_dir = try mountPathIsDir(allocator, client, path);
 
     const print_entry = if (is_dir) !opts.files_only else !opts.dirs_only;
     if (print_entry) {
@@ -4392,8 +4558,7 @@ fn fsTreeWalk(
     }
 
     if (!is_dir or depth >= opts.max_depth) return;
-    try fsrpcOpen(allocator, client, fid, "r");
-    const listing = try fsrpcReadAllText(allocator, client, fid);
+    const listing = try mountListPathText(allocator, client, path);
     defer allocator.free(listing);
 
     var iter = std.mem.splitScalar(u8, listing, '\n');
