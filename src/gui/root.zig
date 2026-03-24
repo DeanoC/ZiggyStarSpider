@@ -4924,6 +4924,12 @@ const App = struct {
             self.workspace_last_error = null;
         }
         self.workspace_last_refresh_ms = 0;
+        if (self.selected_workspace_detail) |*detail| {
+            detail.deinit(self.allocator);
+            self.selected_workspace_detail = null;
+        }
+        self.workspace_selected_mount_index = null;
+        self.workspace_selected_bind_index = null;
         self.clearMissionDashboardData();
     }
 
