@@ -93,6 +93,7 @@ const FILESYSTEM_PREVIEW_TEXT_SCAN_BYTES: usize = 512;
 const DEBUG_STREAM_SNAPSHOT_RETRY_MS: i64 = 2_000;
 const DEBUG_STREAM_PATH = "/debug/stream.log";
 const NODE_SERVICE_EVENTS_PATH = "/.spiderweb/catalog/node-venom-events.ndjson";
+const PACKAGES_CONTROL_ROOT = "/.spiderweb/control/packages";
 const NODE_SERVICE_SNAPSHOT_RETRY_MS: i64 = 2_000;
 const DEBUG_EVENT_DEDUPE_WINDOW: usize = 4096;
 const DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -399,6 +400,24 @@ const ContractServiceEntry = struct {
     }
 };
 
+const PackageManagerEntry = struct {
+    package_id: []u8,
+    kind: []u8,
+    version: []u8,
+    runtime_kind: []u8,
+    enabled: bool = true,
+    help_md: ?[]u8 = null,
+
+    fn deinit(self: *PackageManagerEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.package_id);
+        allocator.free(self.kind);
+        allocator.free(self.version);
+        allocator.free(self.runtime_kind);
+        if (self.help_md) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
 const FilesystemDirCacheEntry = struct {
     listing: []u8,
     cached_at_ms: i64,
@@ -574,6 +593,7 @@ const SettingsFocusField = enum {
     debug_search_filter,
     perf_benchmark_label,
     filesystem_contract_payload,
+    package_manager_install_payload,
     terminal_command_input,
 };
 
@@ -1367,6 +1387,12 @@ const App = struct {
     launcher_create_template_page: usize = 0,
     launcher_create_templates: std.ArrayListUnmanaged(workspace_types.WorkspaceTemplate) = .{},
     launcher_create_modal_error: ?[]u8 = null,
+    package_manager_modal_open: bool = false,
+    package_manager_packages: std.ArrayListUnmanaged(PackageManagerEntry) = .{},
+    package_manager_selected_index: usize = 0,
+    package_manager_install_payload: std.ArrayList(u8) = .empty,
+    package_manager_modal_error: ?[]u8 = null,
+    package_manager_modal_notice: ?[]u8 = null,
     ide_menu_open: ?IdeMenuDomain = null,
     credential_store: credential_store_mod.CredentialStore,
 
@@ -1654,6 +1680,7 @@ const App = struct {
         app.launcher_profile_name.appendSlice(allocator, "") catch {};
         app.launcher_profile_metadata.appendSlice(allocator, "") catch {};
         app.launcher_connect_token.appendSlice(allocator, "") catch {};
+        app.package_manager_install_payload.appendSlice(allocator, "") catch {};
         app.syncLauncherSelectionFromConfig();
         app.applyLauncherSelectedProfile() catch {};
         app.node_service_watch_filter.appendSlice(allocator, "") catch {};
@@ -1796,6 +1823,10 @@ const App = struct {
         workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.launcher_create_templates);
         if (self.launcher_create_modal_error) |value| self.allocator.free(value);
         if (self.launcher_notice) |value| self.allocator.free(value);
+        self.clearPackageManagerPackages();
+        self.package_manager_install_payload.deinit(self.allocator);
+        if (self.package_manager_modal_error) |value| self.allocator.free(value);
+        if (self.package_manager_modal_notice) |value| self.allocator.free(value);
         if (self.active_profile_id) |value| self.allocator.free(value);
         if (self.active_workspace_id) |value| self.allocator.free(value);
         self.credential_store.deinit();
@@ -4348,6 +4379,7 @@ const App = struct {
             .debug_search_filter => &self.debug_search_filter,
             .perf_benchmark_label => &self.perf_benchmark_label_input,
             .filesystem_contract_payload => &self.contract_invoke_payload,
+            .package_manager_install_payload => &self.package_manager_install_payload,
             .terminal_command_input => &self.terminal_input,
             .none => null,
         };
@@ -7911,10 +7943,265 @@ const App = struct {
         }
     }
 
+    fn drawPackageManagerModal(self: *App, fb_width: u32, fb_height: u32) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inset, 12.0 * self.ui_scale);
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+
+        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
+
+        const modal_w = std.math.clamp(
+            screen_rect.width() * 0.72,
+            560.0 * self.ui_scale,
+            980.0 * self.ui_scale,
+        );
+        const modal_h = std.math.clamp(
+            screen_rect.height() * 0.78,
+            420.0 * self.ui_scale,
+            760.0 * self.ui_scale,
+        );
+        const modal_rect = Rect.fromXYWH(
+            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
+            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
+            modal_w,
+            modal_h,
+        );
+
+        self.drawSurfacePanel(modal_rect);
+        self.drawRect(modal_rect, self.theme.colors.border);
+
+        const left_w = @max(220.0 * self.ui_scale, modal_rect.width() * 0.38);
+        const right_w = modal_rect.width() - left_w - pad * 3.0;
+        const left_rect = Rect.fromXYWH(modal_rect.min[0] + pad, modal_rect.min[1] + pad, left_w, modal_rect.height() - pad * 2.0);
+        const right_rect = Rect.fromXYWH(left_rect.max[0] + pad, modal_rect.min[1] + pad, right_w, modal_rect.height() - pad * 2.0);
+
+        self.drawLabel(left_rect.min[0], left_rect.min[1], "Packages", self.theme.colors.text_primary);
+        self.drawLabel(right_rect.min[0], right_rect.min[1], "Package Manager", self.theme.colors.text_primary);
+
+        const left_y = left_rect.min[1] + layout.line_height + layout.row_gap * 0.6;
+        const list_h = @max(120.0 * self.ui_scale, left_rect.height() - row_h - layout.row_gap - (left_y - left_rect.min[1]));
+        const list_rect = Rect.fromXYWH(left_rect.min[0], left_y, left_rect.width(), list_h);
+        self.drawSurfacePanel(list_rect);
+        self.drawRect(list_rect, self.theme.colors.border);
+
+        var row_y = list_rect.min[1] + layout.inner_inset;
+        const row_w = list_rect.width() - layout.inner_inset * 2.0;
+        for (self.package_manager_packages.items, 0..) |entry, idx| {
+            if (row_y + row_h > list_rect.max[1] - layout.inner_inset) break;
+            const label = std.fmt.allocPrint(
+                self.allocator,
+                "{s} [{s}]",
+                .{ entry.package_id, if (entry.enabled) "enabled" else "disabled" },
+            ) catch null;
+            defer if (label) |value| self.allocator.free(value);
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(list_rect.min[0] + layout.inner_inset, row_y, row_w, row_h),
+                label orelse entry.package_id,
+                .{ .variant = if (idx == self.package_manager_selected_index) .primary else .secondary },
+            )) {
+                self.package_manager_selected_index = idx;
+                self.clearPackageManagerModalNotice();
+                self.clearPackageManagerModalError();
+            }
+            row_y += row_h + layout.row_gap * 0.35;
+        }
+
+        const refresh_rect = Rect.fromXYWH(
+            left_rect.min[0],
+            left_rect.max[1] - row_h,
+            left_rect.width(),
+            row_h,
+        );
+        if (self.drawButtonWidget(
+            refresh_rect,
+            "Refresh Packages",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.clearPackageManagerModalNotice();
+            self.refreshPackageManagerPackages() catch |err| {
+                const msg = self.formatControlOpError("Package list failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setPackageManagerModalError(text);
+                } else {
+                    self.setPackageManagerModalError("Package list failed.");
+                }
+            };
+        }
+
+        var right_y = right_rect.min[1] + layout.line_height + layout.row_gap * 0.6;
+        if (self.package_manager_modal_notice) |message| {
+            self.drawTextTrimmed(right_rect.min[0], right_y, right_rect.width(), message, self.theme.colors.text_secondary);
+            right_y += layout.line_height + layout.row_gap * 0.45;
+        }
+        if (self.package_manager_modal_error) |message| {
+            self.drawTextTrimmed(right_rect.min[0], right_y, right_rect.width(), message, zcolors.rgba(220, 80, 80, 255));
+            right_y += layout.line_height + layout.row_gap * 0.45;
+        }
+
+        const selected_entry = self.selectedPackageManagerEntry();
+        const detail_rect = Rect.fromXYWH(
+            right_rect.min[0],
+            right_y,
+            right_rect.width(),
+            @max(150.0 * self.ui_scale, right_rect.height() * 0.36),
+        );
+        self.drawSurfacePanel(detail_rect);
+        self.drawRect(detail_rect, self.theme.colors.border);
+
+        if (selected_entry) |entry| {
+            const header = std.fmt.allocPrint(
+                self.allocator,
+                "{s} ({s}) v{s}",
+                .{ entry.package_id, entry.kind, entry.version },
+            ) catch null;
+            const runtime_line = std.fmt.allocPrint(
+                self.allocator,
+                "Runtime: {s} | Enabled: {s}",
+                .{ entry.runtime_kind, if (entry.enabled) "true" else "false" },
+            ) catch null;
+            defer if (header) |value| self.allocator.free(value);
+            defer if (runtime_line) |value| self.allocator.free(value);
+            self.drawTextTrimmed(
+                detail_rect.min[0] + layout.inner_inset,
+                detail_rect.min[1] + layout.inner_inset * 0.7,
+                detail_rect.width() - layout.inner_inset * 2.0,
+                header orelse entry.package_id,
+                self.theme.colors.text_primary,
+            );
+            self.drawTextTrimmed(
+                detail_rect.min[0] + layout.inner_inset,
+                detail_rect.min[1] + layout.inner_inset * 0.7 + layout.line_height,
+                detail_rect.width() - layout.inner_inset * 2.0,
+                runtime_line orelse "",
+                self.theme.colors.text_secondary,
+            );
+            if (entry.help_md) |help_md| {
+                self.drawTextTrimmed(
+                    detail_rect.min[0] + layout.inner_inset,
+                    detail_rect.min[1] + layout.inner_inset * 0.7 + layout.line_height * 2.0,
+                    detail_rect.width() - layout.inner_inset * 2.0,
+                    help_md,
+                    self.theme.colors.text_secondary,
+                );
+            }
+        } else {
+            self.drawTextTrimmed(
+                detail_rect.min[0] + layout.inner_inset,
+                detail_rect.min[1] + layout.inner_inset * 0.7,
+                detail_rect.width() - layout.inner_inset * 2.0,
+                "No packages loaded yet. Refresh the list to inspect package lifecycle state.",
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        right_y = detail_rect.max[1] + layout.row_gap * 0.7;
+        const action_w = (right_rect.width() - pad * 2.0) / 3.0;
+        const selected_disabled = selected_entry == null or self.connection_state != .connected;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0], right_y, action_w, row_h),
+            if (selected_entry != null and !selected_entry.?.enabled) "Enable" else "Disable",
+            .{ .variant = .secondary, .disabled = selected_disabled },
+        )) {
+            if (selected_entry) |entry| {
+                const payload = std.fmt.allocPrint(self.allocator, "{{\"venom_id\":\"{s}\"}}", .{entry.package_id}) catch null;
+                defer if (payload) |value| self.allocator.free(value);
+                if (payload) |value| {
+                    const control_name = if (entry.enabled) "disable.json" else "enable.json";
+                    const notice = if (entry.enabled) "Package disabled." else "Package enabled.";
+                    self.runPackageManagerOperation(control_name, value, notice) catch |err| {
+                        if (err != error.RemoteError) {
+                            const msg = self.formatControlOpError("Package update failed", err);
+                            if (msg) |text| {
+                                defer self.allocator.free(text);
+                                self.setPackageManagerModalError(text);
+                            }
+                        }
+                    };
+                }
+            }
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0] + action_w + pad, right_y, action_w, row_h),
+            "Remove",
+            .{ .variant = .secondary, .disabled = selected_disabled },
+        )) {
+            if (selected_entry) |entry| {
+                const payload = std.fmt.allocPrint(self.allocator, "{{\"venom_id\":\"{s}\"}}", .{entry.package_id}) catch null;
+                defer if (payload) |value| self.allocator.free(value);
+                if (payload) |value| {
+                    self.runPackageManagerOperation("remove.json", value, "Package removed.") catch |err| {
+                        if (err != error.RemoteError) {
+                            const msg = self.formatControlOpError("Package remove failed", err);
+                            if (msg) |text| {
+                                defer self.allocator.free(text);
+                                self.setPackageManagerModalError(text);
+                            }
+                        }
+                    };
+                }
+            }
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0] + (action_w + pad) * 2.0, right_y, action_w, row_h),
+            "Close",
+            .{ .variant = .primary },
+        )) {
+            self.closePackageManagerModal();
+            return;
+        }
+
+        right_y += row_h + layout.row_gap * 0.75;
+        self.drawLabel(right_rect.min[0], right_y, "Install Package JSON", self.theme.colors.text_secondary);
+        right_y += layout.line_height + layout.row_gap * 0.25;
+        const payload_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(right_rect.min[0], right_y, right_rect.width(), layout.input_height),
+            self.package_manager_install_payload.items,
+            self.settings_panel.focused_field == .package_manager_install_payload,
+            .{ .placeholder = "{\"package\":{...}}" },
+        );
+        if (payload_focused) self.settings_panel.focused_field = .package_manager_install_payload;
+        right_y += layout.input_height + layout.row_gap * 0.55;
+
+        const install_payload = std.mem.trim(u8, self.package_manager_install_payload.items, " \t\r\n");
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0], right_y, right_rect.width(), row_h),
+            "Install From JSON",
+            .{ .variant = .primary, .disabled = self.connection_state != .connected or install_payload.len == 0 },
+        )) {
+            self.runPackageManagerOperation("install.json", install_payload, "Package installed.") catch |err| {
+                if (err != error.RemoteError) {
+                    const msg = self.formatControlOpError("Package install failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setPackageManagerModalError(text);
+                    }
+                }
+            };
+        }
+
+        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.closePackageManagerModal();
+        }
+    }
+
     fn drawWorkspaceUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
         self.ui_commands.clear();
         ui_draw_context.setGlobalCommandList(&self.ui_commands);
         defer ui_draw_context.clearGlobalCommandList();
+
+        const package_modal_open = self.package_manager_modal_open;
+        const saved_mouse_down = self.mouse_down;
+        const saved_mouse_clicked = self.mouse_clicked;
+        const saved_mouse_released = self.mouse_released;
+        const saved_mouse_right_clicked = self.mouse_right_clicked;
+        if (package_modal_open) {
+            self.mouse_down = false;
+            self.mouse_clicked = false;
+            self.mouse_released = false;
+            self.mouse_right_clicked = false;
+        }
 
         const status_height: f32 = 24.0 * self.ui_scale;
         const menu_height = self.windowMenuBarHeight();
@@ -7944,9 +8231,6 @@ const App = struct {
             self.mouse_x <= viewport.max[0] and
             self.mouse_y >= viewport.min[1] and
             self.mouse_y <= viewport.max[1];
-        const saved_mouse_clicked = self.mouse_clicked;
-        const saved_mouse_released = self.mouse_released;
-        const saved_mouse_down = self.mouse_down;
         if (!mouse_in_viewport) {
             self.mouse_clicked = false;
             self.mouse_released = false;
@@ -7991,9 +8275,23 @@ const App = struct {
         self.mouse_clicked = saved_mouse_clicked;
         self.mouse_released = saved_mouse_released;
         self.mouse_down = saved_mouse_down;
+        self.mouse_right_clicked = saved_mouse_right_clicked;
 
+        if (package_modal_open) {
+            self.mouse_down = false;
+            self.mouse_clicked = false;
+            self.mouse_released = false;
+            self.mouse_right_clicked = false;
+        }
         _ = self.drawWindowMenuBar(ui_window, fb_width);
         self.drawStatusOverlay(fb_width, fb_height);
+        if (package_modal_open) {
+            self.mouse_down = saved_mouse_down;
+            self.mouse_clicked = saved_mouse_clicked;
+            self.mouse_released = saved_mouse_released;
+            self.mouse_right_clicked = saved_mouse_right_clicked;
+            self.drawPackageManagerModal(fb_width, fb_height);
+        }
     }
 
     fn windowMenuBarHeight(self: *App) f32 {
@@ -8020,7 +8318,7 @@ const App = struct {
             .edit => 2,
             .view => 2,
             .project => 2,
-            .tools => 2,
+            .tools => 4,
             .window => 1,
             .help => 1,
         };
@@ -8184,6 +8482,15 @@ const App = struct {
                         .{ .variant = .secondary },
                     )) {
                         self.ensureSettingsPanel(&self.manager);
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Packages",
+                        .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+                    )) {
+                        self.openPackageManagerModal();
                         self.ide_menu_open = null;
                     }
                     row_y += row_h + row_gap;
@@ -15551,6 +15858,64 @@ const App = struct {
         self.launcher_create_modal_error = null;
     }
 
+    fn clearPackageManagerPackages(self: *App) void {
+        for (self.package_manager_packages.items) |*entry| entry.deinit(self.allocator);
+        self.package_manager_packages.deinit(self.allocator);
+        self.package_manager_packages = .{};
+        self.package_manager_selected_index = 0;
+    }
+
+    fn setPackageManagerModalError(self: *App, message: []const u8) void {
+        if (self.package_manager_modal_error) |existing| self.allocator.free(existing);
+        self.package_manager_modal_error = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearPackageManagerModalError(self: *App) void {
+        if (self.package_manager_modal_error) |existing| self.allocator.free(existing);
+        self.package_manager_modal_error = null;
+    }
+
+    fn setPackageManagerModalNotice(self: *App, message: []const u8) void {
+        if (self.package_manager_modal_notice) |existing| self.allocator.free(existing);
+        self.package_manager_modal_notice = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearPackageManagerModalNotice(self: *App) void {
+        if (self.package_manager_modal_notice) |existing| self.allocator.free(existing);
+        self.package_manager_modal_notice = null;
+    }
+
+    fn selectedPackageManagerEntry(self: *App) ?*const PackageManagerEntry {
+        if (self.package_manager_packages.items.len == 0) return null;
+        if (self.package_manager_selected_index >= self.package_manager_packages.items.len) return null;
+        return &self.package_manager_packages.items[self.package_manager_selected_index];
+    }
+
+    fn openPackageManagerModal(self: *App) void {
+        self.package_manager_modal_open = true;
+        self.settings_panel.focused_field = .package_manager_install_payload;
+        self.clearPackageManagerModalError();
+        self.clearPackageManagerModalNotice();
+        self.refreshPackageManagerPackages() catch |err| {
+            const msg = self.formatControlOpError("Package list failed", err);
+            if (msg) |text| {
+                defer self.allocator.free(text);
+                self.setPackageManagerModalError(text);
+            } else {
+                self.setPackageManagerModalError("Package list failed.");
+            }
+        };
+    }
+
+    fn closePackageManagerModal(self: *App) void {
+        self.package_manager_modal_open = false;
+        self.clearPackageManagerModalError();
+        self.clearPackageManagerModalNotice();
+        if (self.settings_panel.focused_field == .package_manager_install_payload) {
+            self.settings_panel.focused_field = .none;
+        }
+    }
+
     fn syncLauncherCreateSelectedTemplateToSettings(self: *App) !void {
         if (self.launcher_create_templates.items.len == 0) {
             self.settings_panel.workspace_template_id.clearRetainingCapacity();
@@ -15716,6 +16081,7 @@ const App = struct {
 
     fn returnToLauncher(self: *App, reason: stage_machine.ReturnReason) void {
         self.saveActiveWorkspaceLayout();
+        self.closePackageManagerModal();
         self.ui_stage = .launcher;
         self.ide_menu_open = null;
         self.windows_menu_open_window_id = null;
@@ -15779,6 +16145,7 @@ const App = struct {
 
     fn disconnect(self: *App) void {
         self.setDragMouseCapture(false);
+        self.closePackageManagerModal();
         self.debug_scrollbar_dragging = false;
         self.form_scroll_drag_target = .none;
         self.stopFilesystemWorker();
@@ -16661,6 +17028,132 @@ const App = struct {
         defer self.fsrpcClunkBestEffort(client, fid);
         try self.fsrpcOpenGui(client, fid, "rw");
         try self.fsrpcWriteTextGui(client, fid, content);
+    }
+
+    fn jsonObjectFirstString(obj: std.json.ObjectMap, keys: []const []const u8) ?[]const u8 {
+        for (keys) |key| {
+            const value = obj.get(key) orelse continue;
+            if (value == .string) return value.string;
+        }
+        return null;
+    }
+
+    fn jsonObjectFirstBool(obj: std.json.ObjectMap, keys: []const []const u8) ?bool {
+        for (keys) |key| {
+            const value = obj.get(key) orelse continue;
+            if (value == .bool) return value.bool;
+        }
+        return null;
+    }
+
+    fn buildPackagesControlPathGui(self: *App, leaf: []const u8) ![]u8 {
+        return self.joinFilesystemPath(PACKAGES_CONTROL_ROOT, leaf);
+    }
+
+    fn writePackageControlAndReadResultGui(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        control_name: []const u8,
+        payload: []const u8,
+    ) ![]u8 {
+        try self.fsrpcBootstrapGui(client);
+        const control_dir = try self.buildPackagesControlPathGui("control");
+        defer self.allocator.free(control_dir);
+        const control_path = try self.joinFilesystemPath(control_dir, control_name);
+        defer self.allocator.free(control_path);
+        try self.writeFsPathTextGui(client, control_path, payload);
+
+        const result_path = try self.buildPackagesControlPathGui("result.json");
+        defer self.allocator.free(result_path);
+        return self.readFsPathTextGui(client, result_path);
+    }
+
+    fn refreshPackageManagerPackages(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const selected_package_id = if (self.selectedPackageManagerEntry()) |entry|
+            try self.allocator.dupe(u8, entry.package_id)
+        else
+            null;
+        defer if (selected_package_id) |value| self.allocator.free(value);
+
+        const result_json = try self.writePackageControlAndReadResultGui(client, "list.json", "{}");
+        defer self.allocator.free(result_json);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, result_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const root = parsed.value.object;
+        if (jsonObjectFirstBool(root, &.{"ok"}) != true) return error.RemoteError;
+        const result_value = root.get("result") orelse return error.InvalidResponse;
+        if (result_value != .object) return error.InvalidResponse;
+        const packages_value = result_value.object.get("packages") orelse return error.InvalidResponse;
+        if (packages_value != .array) return error.InvalidResponse;
+
+        var next_packages: std.ArrayListUnmanaged(PackageManagerEntry) = .{};
+        errdefer {
+            for (next_packages.items) |*entry| entry.deinit(self.allocator);
+            next_packages.deinit(self.allocator);
+        }
+
+        for (packages_value.array.items) |item| {
+            if (item != .object) continue;
+            const obj = item.object;
+            try next_packages.append(self.allocator, .{
+                .package_id = try self.allocator.dupe(u8, jsonObjectFirstString(obj, &.{ "package_id", "venom_id" }) orelse continue),
+                .kind = try self.allocator.dupe(u8, jsonObjectFirstString(obj, &.{"kind"}) orelse "(unknown)"),
+                .version = try self.allocator.dupe(u8, jsonObjectFirstString(obj, &.{"version"}) orelse "1"),
+                .runtime_kind = try self.allocator.dupe(u8, jsonObjectFirstString(obj, &.{"runtime_kind"}) orelse "native"),
+                .enabled = jsonObjectFirstBool(obj, &.{"enabled"}) orelse true,
+                .help_md = if (jsonObjectFirstString(obj, &.{"help_md"})) |value|
+                    try self.allocator.dupe(u8, value)
+                else
+                    null,
+            });
+        }
+
+        self.clearPackageManagerPackages();
+        self.package_manager_packages = next_packages;
+        self.package_manager_selected_index = 0;
+        if (selected_package_id) |wanted| {
+            for (self.package_manager_packages.items, 0..) |entry, idx| {
+                if (std.mem.eql(u8, entry.package_id, wanted)) {
+                    self.package_manager_selected_index = idx;
+                    break;
+                }
+            }
+        }
+        self.clearPackageManagerModalError();
+    }
+
+    fn runPackageManagerOperation(
+        self: *App,
+        control_name: []const u8,
+        payload: []const u8,
+        success_notice: []const u8,
+    ) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const result_json = try self.writePackageControlAndReadResultGui(client, control_name, payload);
+        defer self.allocator.free(result_json);
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, result_json, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.InvalidResponse;
+        const root = parsed.value.object;
+        if (jsonObjectFirstBool(root, &.{"ok"}) != true) {
+            if (root.get("error")) |error_value| {
+                if (error_value == .object) {
+                    const code = jsonObjectFirstString(error_value.object, &.{"code"}) orelse "error";
+                    const message = jsonObjectFirstString(error_value.object, &.{"message"}) orelse "package operation failed";
+                    const formatted = try std.fmt.allocPrint(self.allocator, "{s} [{s}]", .{ message, code });
+                    defer self.allocator.free(formatted);
+                    self.setPackageManagerModalError(formatted);
+                }
+            }
+            return error.RemoteError;
+        }
+
+        try self.refreshPackageManagerPackages();
+        self.setPackageManagerModalNotice(success_notice);
     }
 
     fn discoverScopedChatBindingPathsGui(self: *App, client: *ws_client_mod.WebSocketClient) !ScopedChatBindingPaths {
