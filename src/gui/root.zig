@@ -1317,7 +1317,10 @@ const App = struct {
     filesystem_hide_files: bool = false,
     filesystem_hide_runtime_noise: bool = false,
     filesystem_selected_path: ?[]u8 = null,
-    filesystem_entry_page: usize = 0,
+    filesystem_entry_scroll_y: f32 = 0,
+    filesystem_entry_scrollbar_dragging: bool = false,
+    filesystem_entry_scrollbar_drag_anchor: f32 = 0,
+    filesystem_entry_scrollbar_drag_scroll: f32 = 0,
     filesystem_last_clicked_entry_index: ?usize = null,
     filesystem_last_click_ms: i64 = 0,
     filesystem_type_column_width: f32 = 96.0,
@@ -1407,6 +1410,7 @@ const App = struct {
     mouse_down: bool = false,
     mouse_clicked: bool = false,
     mouse_released: bool = false,
+    mouse_scroll_y: f32 = 0,
     mouse_right_clicked: bool = false,
     text_input_cursor: usize = 0,
     text_input_selection_anchor: ?usize = null,
@@ -2316,6 +2320,7 @@ const App = struct {
         self.mouse_x = queue.state.mouse_pos[0];
         self.mouse_y = queue.state.mouse_pos[1];
         self.mouse_down = queue.state.mouse_down_left;
+        self.mouse_scroll_y = 0;
         if (self.drag_mouse_capture_active) {
             self.syncMouseStateFromGlobal(ui_window);
         }
@@ -2337,6 +2342,7 @@ const App = struct {
                     try self.handleTextInput(txt.text);
                 },
                 .mouse_wheel => |mw| {
+                    self.mouse_scroll_y += mw.delta[1];
                     const mouse_pos = .{ self.mouse_x, self.mouse_y };
                     var handled_debug_scroll = self.debug_output_rect.contains(mouse_pos);
                     if (!handled_debug_scroll) {
@@ -5015,7 +5021,10 @@ const App = struct {
         self.clearFilesystemEntries();
         self.setFilesystemSelectedPath(null);
         self.clearFilesystemPreviewState();
-        self.filesystem_entry_page = 0;
+        self.filesystem_entry_scroll_y = 0;
+        self.filesystem_entry_scrollbar_dragging = false;
+        self.filesystem_entry_scrollbar_drag_anchor = 0;
+        self.filesystem_entry_scrollbar_drag_scroll = 0;
         self.filesystem_last_clicked_entry_index = null;
         self.filesystem_last_click_ms = 0;
         if (self.filesystem_error) |value| {
@@ -11724,11 +11733,6 @@ const App = struct {
     }
 
     fn filesystemEntryLessThan(self: *App, lhs: VisibleFilesystemEntry, rhs: VisibleFilesystemEntry) bool {
-        if (lhs.entry.kind != rhs.entry.kind) {
-            if (lhs.entry.kind == .directory) return true;
-            if (rhs.entry.kind == .directory) return false;
-        }
-
         const direction = self.filesystem_sort_direction;
         const order = switch (self.filesystem_sort_key) {
             .name => blk: {
@@ -11903,30 +11907,30 @@ const App = struct {
             },
             .set_sort_key => |sort_key| {
                 self.filesystem_sort_key = sort_key;
-                self.filesystem_entry_page = 0;
+                self.filesystem_entry_scroll_y = 0;
             },
             .toggle_sort_direction => {
                 self.filesystem_sort_direction = switch (self.filesystem_sort_direction) {
                     .ascending => .descending,
                     .descending => .ascending,
                 };
-                self.filesystem_entry_page = 0;
+                self.filesystem_entry_scroll_y = 0;
             },
             .toggle_hide_hidden => {
                 self.filesystem_hide_hidden = !self.filesystem_hide_hidden;
-                self.filesystem_entry_page = 0;
+                self.filesystem_entry_scroll_y = 0;
             },
             .toggle_hide_directories => {
                 self.filesystem_hide_directories = !self.filesystem_hide_directories;
-                self.filesystem_entry_page = 0;
+                self.filesystem_entry_scroll_y = 0;
             },
             .toggle_hide_files => {
                 self.filesystem_hide_files = !self.filesystem_hide_files;
-                self.filesystem_entry_page = 0;
+                self.filesystem_entry_scroll_y = 0;
             },
             .toggle_hide_runtime_noise => {
                 self.filesystem_hide_runtime_noise = !self.filesystem_hide_runtime_noise;
-                self.filesystem_entry_page = 0;
+                self.filesystem_entry_scroll_y = 0;
             },
             .reset_explorer_view => {
                 self.filesystem_sort_key = .name;
@@ -11935,7 +11939,7 @@ const App = struct {
                 self.filesystem_hide_directories = false;
                 self.filesystem_hide_files = false;
                 self.filesystem_hide_runtime_noise = false;
-                self.filesystem_entry_page = 0;
+                self.filesystem_entry_scroll_y = 0;
             },
             .refresh_preview => {
                 self.refreshSelectedFilesystemPreview() catch |err| {
@@ -13029,7 +13033,10 @@ const App = struct {
         var view = self.buildFilesystemPanelView();
         defer view.deinit(self.allocator);
         var panel_state = FilesystemPanel.State{
-            .entry_page = self.filesystem_entry_page,
+            .entry_scroll_y = self.filesystem_entry_scroll_y,
+            .entry_scrollbar_dragging = self.filesystem_entry_scrollbar_dragging,
+            .entry_scrollbar_drag_anchor = self.filesystem_entry_scrollbar_drag_anchor,
+            .entry_scrollbar_drag_scroll = self.filesystem_entry_scrollbar_drag_scroll,
             .last_clicked_entry_index = self.filesystem_last_clicked_entry_index,
             .last_click_ms = self.filesystem_last_click_ms,
             .type_column_width = self.filesystem_type_column_width,
@@ -13059,10 +13066,14 @@ const App = struct {
                 .mouse_down = self.mouse_down,
                 .mouse_clicked = self.mouse_clicked,
                 .mouse_released = self.mouse_released,
+                .mouse_scroll_y = self.mouse_scroll_y,
             },
             &panel_state,
         );
-        self.filesystem_entry_page = panel_state.entry_page;
+        self.filesystem_entry_scroll_y = panel_state.entry_scroll_y;
+        self.filesystem_entry_scrollbar_dragging = panel_state.entry_scrollbar_dragging;
+        self.filesystem_entry_scrollbar_drag_anchor = panel_state.entry_scrollbar_drag_anchor;
+        self.filesystem_entry_scrollbar_drag_scroll = panel_state.entry_scrollbar_drag_scroll;
         self.filesystem_last_clicked_entry_index = panel_state.last_clicked_entry_index;
         self.filesystem_last_click_ms = panel_state.last_click_ms;
         self.filesystem_type_column_width = panel_state.type_column_width;
