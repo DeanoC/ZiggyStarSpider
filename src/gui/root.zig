@@ -1288,6 +1288,12 @@ const App = struct {
     workspace_state: ?workspace_types.WorkspaceStatus = null,
     workspace_last_error: ?[]u8 = null,
     workspace_last_refresh_ms: i64 = 0,
+    selected_workspace_detail: ?workspace_types.WorkspaceDetail = null,
+    workspace_selected_mount_index: ?usize = null,
+    workspace_selected_bind_index: ?usize = null,
+    workspace_op_busy: bool = false,
+    node_browser_open: bool = false,
+    node_browser_selected_index: ?usize = null,
     mission_records: std.ArrayListUnmanaged(MissionRecordView) = .{},
     mission_selected_id: ?[]u8 = null,
     mission_last_error: ?[]u8 = null,
@@ -1742,6 +1748,10 @@ const App = struct {
         if (self.workspace_last_error) |value| {
             self.allocator.free(value);
             self.workspace_last_error = null;
+        }
+        if (self.selected_workspace_detail) |*detail| {
+            detail.deinit(self.allocator);
+            self.selected_workspace_detail = null;
         }
         self.stopFilesystemWorker();
         self.filesystem_active_request = null;
@@ -4914,6 +4924,12 @@ const App = struct {
             self.workspace_last_error = null;
         }
         self.workspace_last_refresh_ms = 0;
+        if (self.selected_workspace_detail) |*detail| {
+            detail.deinit(self.allocator);
+            self.selected_workspace_detail = null;
+        }
+        self.workspace_selected_mount_index = null;
+        self.workspace_selected_bind_index = null;
         self.clearMissionDashboardData();
     }
 
@@ -5914,6 +5930,12 @@ const App = struct {
             }
         }
         self.session_attach_state = .unknown;
+        if (self.selected_workspace_detail) |*detail| {
+            detail.deinit(self.allocator);
+            self.selected_workspace_detail = null;
+        }
+        self.workspace_selected_mount_index = null;
+        self.workspace_selected_bind_index = null;
         try self.syncSettingsToConfig();
     }
 
@@ -5974,6 +5996,40 @@ const App = struct {
             self.setWorkspaceError(message);
         } else {
             self.clearWorkspaceError();
+        }
+
+        if (selected_workspace_id) |ws_id| {
+            const new_detail = control_plane.getWorkspace(
+                self.allocator,
+                client,
+                &self.message_counter,
+                ws_id,
+            ) catch null;
+            if (self.selected_workspace_detail) |*old_detail| {
+                old_detail.deinit(self.allocator);
+            }
+            self.selected_workspace_detail = new_detail;
+            // Validate selection indices against the refreshed arrays so a
+            // stale index cannot target the wrong row or enable remove actions
+            // for entries that no longer exist.
+            if (new_detail) |*d| {
+                if (self.workspace_selected_mount_index) |mi| {
+                    if (mi >= d.mounts.items.len) self.workspace_selected_mount_index = null;
+                }
+                if (self.workspace_selected_bind_index) |bi| {
+                    if (bi >= d.binds.items.len) self.workspace_selected_bind_index = null;
+                }
+            } else {
+                self.workspace_selected_mount_index = null;
+                self.workspace_selected_bind_index = null;
+            }
+        } else {
+            if (self.selected_workspace_detail) |*old_detail| {
+                old_detail.deinit(self.allocator);
+                self.selected_workspace_detail = null;
+            }
+            self.workspace_selected_mount_index = null;
+            self.workspace_selected_bind_index = null;
         }
 
         self.refreshMissionDashboardData() catch |err| {
@@ -6850,6 +6906,98 @@ const App = struct {
         );
         defer detail.deinit(self.allocator);
 
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn buildLocalNodeTtlText(allocator: std.mem.Allocator, nodes: []const workspace_types.NodeInfo, node_id: []const u8) ![]u8 {
+        const now_ms = std.time.milliTimestamp();
+        for (nodes) |*node| {
+            if (!std.mem.eql(u8, node.node_id, node_id)) continue;
+            const remaining_ms = node.lease_expires_at_ms - now_ms;
+            if (remaining_ms <= 0) {
+                return allocator.dupe(u8, "expired");
+            }
+            const remaining_sec = @divTrunc(remaining_ms, 1000);
+            const remaining_min = @divTrunc(remaining_sec, 60);
+            if (remaining_min > 0) {
+                return std.fmt.allocPrint(allocator, "{d}m {d}s", .{ remaining_min, @mod(remaining_sec, 60) });
+            }
+            return std.fmt.allocPrint(allocator, "{d}s", .{remaining_sec});
+        }
+        return allocator.dupe(u8, "offline");
+    }
+
+    fn removeWorkspaceMountByView(self: *App, idx: usize) !void {
+        const detail = if (self.selected_workspace_detail) |*d| d else return error.MissingField;
+        if (idx >= detail.mounts.items.len) return error.MissingField;
+        const mount = detail.mounts.items[idx];
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedWorkspaceId() orelse return error.MissingField;
+        const project_token = self.selectedWorkspaceToken(project_id);
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+        // Pass node_id and export_name as filters so that in workspaces with
+        // multiple mounts on the same path we remove only the selected row,
+        // not every mount that shares the path.
+        const node_id_filter: ?[]const u8 = if (mount.node_id.len > 0) mount.node_id else null;
+        const export_name_filter: ?[]const u8 = if (mount.export_name.len > 0) mount.export_name else null;
+        var result = try control_plane.removeWorkspaceMount(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            project_token,
+            mount.mount_path,
+            node_id_filter,
+            export_name_filter,
+        );
+        defer result.deinit(self.allocator);
+        self.workspace_selected_mount_index = null;
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn removeWorkspaceBindByView(self: *App, idx: usize) !void {
+        const detail = if (self.selected_workspace_detail) |*d| d else return error.MissingField;
+        if (idx >= detail.binds.items.len) return error.MissingField;
+        const bind = detail.binds.items[idx];
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedWorkspaceId() orelse return error.MissingField;
+        const project_token = self.selectedWorkspaceToken(project_id);
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+        var result = try control_plane.removeWorkspaceBind(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            project_token,
+            bind.bind_path,
+        );
+        defer result.deinit(self.allocator);
+        self.workspace_selected_bind_index = null;
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn rotateWorkspaceTokenFromPanel(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedWorkspaceId() orelse return error.MissingField;
+        const current_token = self.selectedWorkspaceToken(project_id);
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+        var result = try control_plane.rotateWorkspaceToken(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            current_token,
+        );
+        defer result.deinit(self.allocator);
+        const next_token = result.workspace_token orelse return error.InvalidResponse;
+        try self.ensureSelectedWorkspaceInSettings(project_id);
+        self.settings_panel.project_token.clearRetainingCapacity();
+        try self.settings_panel.project_token.appendSlice(self.allocator, next_token);
+        try self.config.setWorkspaceToken(project_id, next_token);
+        try self.config.save();
         self.refreshWorkspaceData() catch {};
         self.clearWorkspaceError();
     }
@@ -10280,7 +10428,15 @@ const App = struct {
     fn refreshContractServices(self: *App) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         try self.fsrpcBootstrapGui(client);
-        const payload = try self.readFsPathTextGui(client, "/agents/self/services/SERVICES.json");
+        // SERVICES.json is absent in workspaces that have no agent running — treat
+        // that as "no services" rather than surfacing an error to the user.
+        const payload = self.readFsPathTextGui(client, "/agents/self/services/SERVICES.json") catch |err| {
+            if (err == error.FileNotFound) {
+                self.clearContractServices();
+                return;
+            }
+            return err;
+        };
         defer self.allocator.free(payload);
 
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{});
@@ -10864,6 +11020,11 @@ const App = struct {
         const selected_workspace_lock_state = self.selectedWorkspaceTokenLocked();
         const selected_workspace_known = selected_workspace_lock_state != null;
         const selected_is_locked = if (selected_workspace_lock_state) |locked| locked else false;
+        const has_detail = self.selected_workspace_detail != null;
+        const has_mount_selection = self.workspace_selected_mount_index != null;
+        const has_bind_selection = self.workspace_selected_bind_index != null;
+        const profile_id = self.config.selectedProfileId();
+        const has_local_node_val = self.config.appLocalNode(profile_id) != null;
         return .{
             .connected = self.connection_state == .connected,
             .has_workspaces = self.projects.items.len > 0,
@@ -10873,6 +11034,10 @@ const App = struct {
             .can_attach_session = self.connection_state == .connected and self.selectedWorkspaceId() != null,
             .can_lock_workspace = self.connection_state == .connected and selected_workspace_known and !selected_is_locked,
             .can_unlock_workspace = self.connection_state == .connected and selected_workspace_known and selected_is_locked,
+            .can_remove_mount = self.connection_state == .connected and has_detail and has_mount_selection,
+            .can_remove_bind = self.connection_state == .connected and has_detail and has_bind_selection,
+            .can_rotate_token = self.connection_state == .connected and self.selectedWorkspaceId() != null,
+            .has_local_node = has_local_node_val,
         };
     }
 
@@ -10899,6 +11064,11 @@ const App = struct {
         projects: std.ArrayListUnmanaged(panels_bridge.WorkspaceListEntryView) = .{},
         node_lines: std.ArrayListUnmanaged([]u8) = .{},
         nodes: std.ArrayListUnmanaged(panels_bridge.WorkspaceNodeEntryView) = .{},
+        mount_entries: std.ArrayListUnmanaged(panels_bridge.WorkspaceMountEntryView) = .{},
+        bind_entries: std.ArrayListUnmanaged(panels_bridge.WorkspaceBindEntryView) = .{},
+        node_picker_entries: std.ArrayListUnmanaged(panels_bridge.WorkspaceNodePickerEntryView) = .{},
+        token_display: ?[]u8 = null,
+        local_node_ttl_text: ?[]u8 = null,
         view: panels_bridge.WorkspacePanelView = .{},
 
         fn deinit(self: *OwnedWorkspacePanelView, allocator: std.mem.Allocator) void {
@@ -10912,12 +11082,17 @@ const App = struct {
             if (self.workspace_summary_line) |value| allocator.free(value);
             if (self.workspace_health_line) |value| allocator.free(value);
             if (self.counts_line) |value| allocator.free(value);
+            if (self.token_display) |value| allocator.free(value);
+            if (self.local_node_ttl_text) |value| allocator.free(value);
             for (self.workspace_lines.items) |value| allocator.free(value);
             for (self.node_lines.items) |value| allocator.free(value);
             self.workspace_lines.deinit(allocator);
             self.projects.deinit(allocator);
             self.node_lines.deinit(allocator);
             self.nodes.deinit(allocator);
+            self.mount_entries.deinit(allocator);
+            self.bind_entries.deinit(allocator);
+            self.node_picker_entries.deinit(allocator);
             self.* = undefined;
         }
     };
@@ -11138,6 +11313,55 @@ const App = struct {
             }) catch {};
         }
 
+        if (self.selected_workspace_detail) |*detail| {
+            for (detail.mounts.items, 0..) |*mount, idx| {
+                owned.mount_entries.append(self.allocator, .{
+                    .index = idx,
+                    .mount_path = mount.mount_path,
+                    .node_id = mount.node_id,
+                    .node_name = mount.node_name,
+                    .export_name = mount.export_name,
+                    .selected = self.workspace_selected_mount_index == idx,
+                }) catch {};
+            }
+            for (detail.binds.items, 0..) |*bind, idx| {
+                owned.bind_entries.append(self.allocator, .{
+                    .index = idx,
+                    .bind_path = bind.bind_path,
+                    .target_path = bind.target_path,
+                    .selected = self.workspace_selected_bind_index == idx,
+                }) catch {};
+            }
+            if (detail.workspace_token) |token| {
+                owned.token_display = maskTokenForDisplay(self.allocator, token) catch null;
+            }
+        }
+
+        if (self.node_browser_open) {
+            const now_ms_for_nodes = std.time.milliTimestamp();
+            for (self.nodes.items, 0..) |*node, idx| {
+                const node_online = node.lease_expires_at_ms > now_ms_for_nodes;
+                owned.node_picker_entries.append(self.allocator, .{
+                    .index = idx,
+                    .node_id = node.node_id,
+                    .node_name = node.node_name,
+                    .online = node_online,
+                    .selected = self.node_browser_selected_index == idx,
+                }) catch {};
+            }
+        }
+
+        const profile_id = self.config.selectedProfileId();
+        var local_node_id_val: ?[]const u8 = null;
+        var local_node_name_val: ?[]const u8 = null;
+        var local_node_bootstrapped_val: bool = false;
+        if (self.config.appLocalNode(profile_id)) |local_node| {
+            local_node_id_val = local_node.node_id;
+            local_node_name_val = local_node.node_name;
+            local_node_bootstrapped_val = true;
+            owned.local_node_ttl_text = buildLocalNodeTtlText(self.allocator, self.nodes.items, local_node.node_id) catch null;
+        }
+
         owned.view = .{
             .title = "Workspace Overview",
             .selected_workspace_button_label = selected_workspace_button_label,
@@ -11173,6 +11397,16 @@ const App = struct {
                 "External workers can use the workspace without live chat. Use Attach Session only when you want a Spiderweb runtime.",
             .workspaces = owned.projects.items,
             .nodes = owned.nodes.items,
+            .mounts = owned.mount_entries.items,
+            .binds = owned.bind_entries.items,
+            .nodes_for_picker = owned.node_picker_entries.items,
+            .token_display = owned.token_display,
+            .local_node_id = local_node_id_val,
+            .local_node_name = local_node_name_val,
+            .local_node_ttl_text = owned.local_node_ttl_text,
+            .local_node_bootstrapped = local_node_bootstrapped_val,
+            .workspace_op_busy = self.workspace_op_busy,
+            .workspace_op_error = null,
         };
         return owned;
     }
@@ -11289,6 +11523,72 @@ const App = struct {
             .copy_auth_user => {
                 self.copyAuthTokenFromPanel("user") catch |err| {
                     self.handleWorkspacePanelError("Copy user token failed", err);
+                };
+            },
+            .select_mount_index => |idx| {
+                self.workspace_selected_mount_index = idx;
+                if (self.selected_workspace_detail) |*detail| {
+                    if (idx < detail.mounts.items.len) {
+                        const mount = detail.mounts.items[idx];
+                        self.settings_panel.project_mount_path.clearRetainingCapacity();
+                        self.settings_panel.project_mount_path.appendSlice(self.allocator, mount.mount_path) catch {};
+                        self.settings_panel.project_mount_node_id.clearRetainingCapacity();
+                        self.settings_panel.project_mount_node_id.appendSlice(self.allocator, mount.node_id) catch {};
+                        self.settings_panel.project_mount_export_name.clearRetainingCapacity();
+                        self.settings_panel.project_mount_export_name.appendSlice(self.allocator, mount.export_name) catch {};
+                    }
+                }
+            },
+            .remove_selected_mount => {
+                if (self.workspace_selected_mount_index) |idx| {
+                    self.removeWorkspaceMountByView(idx) catch |err| {
+                        self.handleWorkspacePanelError("Mount remove failed", err);
+                    };
+                }
+            },
+            .select_bind_index => |idx| {
+                self.workspace_selected_bind_index = idx;
+                if (self.selected_workspace_detail) |*detail| {
+                    if (idx < detail.binds.items.len) {
+                        const bind = detail.binds.items[idx];
+                        self.settings_panel.workspace_bind_path.clearRetainingCapacity();
+                        self.settings_panel.workspace_bind_path.appendSlice(self.allocator, bind.bind_path) catch {};
+                        self.settings_panel.workspace_bind_target_path.clearRetainingCapacity();
+                        self.settings_panel.workspace_bind_target_path.appendSlice(self.allocator, bind.target_path) catch {};
+                    }
+                }
+            },
+            .remove_selected_bind => {
+                if (self.workspace_selected_bind_index) |idx| {
+                    self.removeWorkspaceBindByView(idx) catch |err| {
+                        self.handleWorkspacePanelError("Bind remove failed", err);
+                    };
+                }
+            },
+            .select_node_for_mount => |idx| {
+                if (idx < self.nodes.items.len) {
+                    const node = self.nodes.items[idx];
+                    self.settings_panel.project_mount_node_id.clearRetainingCapacity();
+                    self.settings_panel.project_mount_node_id.appendSlice(self.allocator, node.node_id) catch {};
+                    self.node_browser_selected_index = idx;
+                    self.node_browser_open = false;
+                }
+            },
+            .rotate_workspace_token => {
+                self.rotateWorkspaceTokenFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Workspace token rotate failed", err);
+                };
+            },
+            .open_node_browser => {
+                self.node_browser_open = !self.node_browser_open;
+            },
+            .rebootstrap_local_node => {
+                const client = if (self.ws_client) |*value| value else {
+                    self.setWorkspaceError("Not connected");
+                    return;
+                };
+                self.ensureAppLocalNodeBootstrap(client) catch |err| {
+                    self.handleWorkspacePanelError("Local node bootstrap failed", err);
                 };
             },
         }
@@ -16223,6 +16523,31 @@ const App = struct {
             } else if (err_value == .string) {
                 detail = self.allocator.dupe(u8, err_value.string) catch null;
             }
+        }
+
+        // Detect the POSIX enoent code that the 9P layer sends for missing paths.
+        // This is a normal "file not found" condition; callers already handle it
+        // via `catch`. Log at debug so the console stays quiet, and return a
+        // dedicated error so callers can distinguish it from real protocol errors.
+        const is_enoent = blk: {
+            if (obj.get("error")) |ev| {
+                if (ev == .object) {
+                    if (ev.object.get("code")) |cv| {
+                        if (cv == .string and std.mem.eql(u8, cv.string, "enoent")) break :blk true;
+                    }
+                }
+            }
+            break :blk false;
+        };
+
+        if (is_enoent) {
+            if (detail) |value| {
+                defer self.allocator.free(value);
+                std.log.debug("[GUI][FSRPC] path not found: {s}", .{value});
+            } else {
+                std.log.debug("[GUI][FSRPC] path not found (enoent)", .{});
+            }
+            return error.FileNotFound;
         }
 
         if (detail) |value| {
