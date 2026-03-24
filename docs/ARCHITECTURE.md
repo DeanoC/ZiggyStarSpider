@@ -2,14 +2,14 @@
 
 ## Scope
 
-SpiderApp is the user-facing client (CLI + GUI) for Spiderweb project control, topology inspection, and Acheron FS-RPC access.
+SpiderApp is the user-facing client (CLI + GUI) for Spiderweb workspace control, topology inspection, and mount-style filesystem access.
 
 Primary goals:
 
 1. Connect to Spiderweb using unified-v2.
 2. Manage project context (list/get/create/use/activate).
 3. Surface node topology and effective project mounts.
-4. Route filesystem and capability IO through `acheron.*`.
+4. Route filesystem and capability IO through `control.mount_*`.
 
 ## Protocol Model
 
@@ -20,11 +20,9 @@ No legacy compatibility path is maintained in this client.
 ### Channels
 
 - `control`:
-  - out-of-band control API and topology/project operations
-  - includes handshake and project/node/workspace-status control calls
-- `acheron`:
-  - filesystem transport (`t_walk`, `t_open`, `t_read`, `t_write`, etc.)
-  - capability IO discovered from Venom contracts (for example `chat` via `/global/venoms/VENOMS.json` + `OPS.json`)
+  - out-of-band control API and topology/workspace operations
+  - includes handshake and workspace/node/status control calls
+  - also carries the mount-style filesystem message types `control.mount_attach`, `control.mount_file_read`, and `control.mount_file_write`
 
 ### Required control handshake
 
@@ -83,8 +81,8 @@ Persistent local state:
 `src/cli/main.zig` maps noun/verb commands to:
 
 1. control-plane operations (`project`, `node`, `workspace`)
-2. FS-RPC filesystem operations (`fs`)
-3. FS-RPC chat flow discovered from the bound `chat` Venom plus its companion jobs root
+2. mount-style filesystem operations (`fs`)
+3. package lifecycle control via `/.spiderweb/control/packages`
 
 Workspace context handling:
 
@@ -101,35 +99,32 @@ Workspace context handling:
 - onboarding wizard (`connect -> project -> mounts -> activate`)
 - topology cache (projects, nodes, mounts, drift/status)
 - filesystem browser panel (path navigation + preview)
-- non-blocking filesystem worker thread (dedicated FS-RPC websocket + request/result queues)
+- non-blocking filesystem worker thread (dedicated control websocket + request/result queues)
 - incremental per-path filesystem cache (lazy load by navigated path, explicit refresh invalidation)
-- async chat worker that applies project context before FS-RPC chat IO
-- reconnect-aware chat job resume handling
+- chat/jobs are intentionally deferred from the current public filesystem contract while their redesign is in progress
 
 The GUI refreshes project topology from control-plane APIs and shows selected project + mount state alongside chat.
 
 ## Filesystem + Capability Flow
 
-FS-RPC bootstrap sequence:
+Mount-style filesystem access uses:
 
-1. `acheron.t_version`
-2. `acheron.t_attach` (root fid)
+1. `control.version`
+2. `control.connect`
+3. `control.mount_attach` to snapshot a requested path
+4. `control.mount_file_read` / `control.mount_file_write` for file IO
 
-Then path-based operations:
+The public workspace contract exposed through that transport is:
 
-- `t_walk` to target path/capability file
-- `t_open`
-- `t_read` / `t_write`
-- `t_clunk` for fid cleanup
+- `/.spiderweb/control/*`
+- `/.spiderweb/catalog/*`
+- `/.spiderweb/venoms/VENOMS.json`
+- `/.spiderweb/venoms/{terminal,git,search_code}`
 
-Chat now discovers its canonical paths from the bound `chat` Venom contract:
-
-- read `/global/venoms/VENOMS.json`
-- resolve the bound `chat` Venom root and `invoke_path`
-- read `OPS.json` for `jobs_root`, `status_leaf`, and `result_leaf`
-- use those paths for send/resume instead of assuming fixed builtin locations
+SpiderApp reads `/.spiderweb/venoms/VENOMS.json` and the catalog files to discover the currently bound public capability set. Control substrate items like packages and runtimes are not presented as venoms.
 
 ## Current Limitations
 
 - Interactive CLI REPL remains unimplemented.
 - GUI smoke is currently validated by build + scripted workflow checks (not full headless rendering assertions).
+- Chat/jobs remain intentionally out of the current public filesystem contract until the redesign lands.

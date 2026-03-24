@@ -1,6 +1,6 @@
 # SpiderApp
 
-Client for the Spiderweb AI agent system.
+Client for the Spiderweb workspace and capability system.
 
 ## Overview
 
@@ -9,7 +9,7 @@ SpiderApp exposes a workspace-first view of a distributed Spiderweb:
 - connect to Spiderweb over WebSocket
 - select or create workspaces
 - configure workspace mounts and binds
-- generate worker handoff commands
+- generate runtime handoff commands
 - inspect Spider nodes topology
 
 ## Build
@@ -76,9 +76,6 @@ spider fs ls /
 spider fs tree /
 spider fs read /nodes/local/fs/README.md
 
-# Agent chat via FS-RPC capability path
-spider chat send "summarize current mounts"
-
 # Session control
 spider session list
 spider session history --limit 5
@@ -102,13 +99,15 @@ Useful options:
 - workspace refresh + activate workspace actions
 - live workspace/node/mount summary in settings
 - filesystem browser panel with path navigation and text preview
-- chat activation only after attaching a Spiderweb session to the selected workspace
+- package manager for `/.spiderweb/control/packages`
+- chat and jobs are intentionally out of the current public filesystem contract while their redesign is in progress
 - debug stream panel
 
 ## Protocol Notes
 
 - unified-v2 only (no legacy compatibility path)
 - control handshake: `control.version` then `control.connect`
+- filesystem and capability browsing use `control.mount_attach`, `control.mount_file_read`, and `control.mount_file_write`
 - control-plane examples:
   - `control.workspace_list`
   - `control.workspace_get`
@@ -119,10 +118,10 @@ Useful options:
   - `control.workspace_status`
   - `control.node_list`
   - `control.node_get`
-- FS-RPC examples:
-  - `acheron.t_version` / `acheron.r_version`
-  - `acheron.t_attach` / `acheron.r_attach`
-  - `acheron.t_walk`, `acheron.t_open`, `acheron.t_read`, `acheron.t_write`, `acheron.t_stat`, `acheron.t_clunk`
+- public filesystem contract:
+  - `/.spiderweb/control/*`
+  - `/.spiderweb/catalog/*`
+  - `/.spiderweb/venoms/{terminal,git,search_code}`
 
 ## Docs
 
