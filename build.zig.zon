@@ -36,7 +36,7 @@
             .hash = "N-V-__8AABsi6gAQwmFrn4CeuPIOfI95LP9XH1T0dyqc1F12",
         },
         .sdl3 = .{
-            .url = "https://github.com/castholm/SDL/archive/refs/heads/main.zip",
+            .url = "https://github.com/castholm/SDL/archive/95980cb420254ff4578657a5a85abfb44046507a.tar.gz",
             .hash = "sdl-0.3.3+3.2.28-7uIn9MiRfwFhqxnwBi_vCQlKr82YpwkQBVwdz2uy46S1",
         },
         .dawn_x86_64_linux_gnu = .{
