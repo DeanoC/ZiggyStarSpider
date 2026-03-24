@@ -22,9 +22,7 @@ No legacy compatibility path is maintained in this client.
 - `control`:
   - out-of-band control API and topology/workspace operations
   - includes handshake and workspace/node/status control calls
-- `control.mount_*`:
-  - filesystem transport for browsing and file IO against the mounted workspace contract
-  - used for workspace browsing, package management, capability files, and node-event feed reads
+  - also carries the mount-style filesystem message types `control.mount_attach`, `control.mount_file_read`, and `control.mount_file_write`
 
 ### Required control handshake
 
@@ -120,6 +118,7 @@ The public workspace contract exposed through that transport is:
 
 - `/.spiderweb/control/*`
 - `/.spiderweb/catalog/*`
+- `/.spiderweb/venoms/VENOMS.json`
 - `/.spiderweb/venoms/{terminal,git,search_code}`
 
 SpiderApp reads `/.spiderweb/venoms/VENOMS.json` and the catalog files to discover the currently bound public capability set. Control substrate items like packages and runtimes are not presented as venoms.
