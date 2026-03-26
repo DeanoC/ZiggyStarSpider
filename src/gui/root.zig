@@ -10906,25 +10906,6 @@ const App = struct {
         self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + rect.height() - pad - line_h, rect.width() - pad * 2.0, summary, self.theme.colors.text_secondary);
     }
 
-
-
-
-
-        rect: Rect,
-        pad: f32,
-        y: f32,
-        label: []const u8,
-        artifact: ?*const MissionArtifactView,
-    ) f32 {
-        const value = if (artifact) |entry|
-            entry.path orelse entry.summary orelse entry.kind
-        else
-            null;
-        return self.drawOptionalMissionDetailLine(rect, pad, y, label, value);
-    }
-
-
-
     fn workspaceRecoveryHeadline(self: *App, buf: []u8) []const u8 {
         if (self.ws.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.ws.workspace_recovery_suspended_until) {
             return "suspended";
