@@ -412,7 +412,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
             }
 
             // Noun without verb
-            if (n == .connect or n == .disconnect or n == .status) {
+            if (n == .connect or n == .disconnect or n == .status or n == .complete) {
                 options.command = .{
                     .noun = n,
                     .verb = .none,
