@@ -14,6 +14,14 @@ const storage = @import("platform_storage");
 const workspace_types = control_plane.workspace_types;
 const panels_bridge = @import("panels_bridge.zig");
 const stage_machine = @import("stage_machine.zig");
+const mission_types = @import("state/mission_types.zig");
+const venom_types = @import("state/venom_types.zig");
+const dashboard_host = @import("panel_hosts/dashboard.zig");
+const venom_manager_host = @import("panel_hosts/venom_manager.zig");
+const node_topology_host = @import("panel_hosts/node_topology.zig");
+const mcp_config_host = @import("panel_hosts/mcp_config.zig");
+const mission_workboard_host = @import("panel_hosts/mission_workboard.zig");
+const mission_helpers = @import("state/mission_helpers.zig");
 
 const zapp = zui.ui.app;
 const c = zapp.sdl_app.c;
@@ -180,137 +188,13 @@ const ConnectSetupHint = struct {
     }
 };
 
-const MissionActorView = struct {
-    actor_type: []u8,
-    actor_id: []u8,
+const MissionActorView = mission_types.MissionActorView;
+const MissionArtifactView = mission_types.MissionArtifactView;
+const MissionEventView = mission_types.MissionEventView;
+const MissionApprovalView = mission_types.MissionApprovalView;
+const MissionAgentPackView = mission_types.MissionAgentPackView;
 
-    fn deinit(self: *MissionActorView, allocator: std.mem.Allocator) void {
-        allocator.free(self.actor_type);
-        allocator.free(self.actor_id);
-        self.* = undefined;
-    }
-};
-
-const MissionArtifactView = struct {
-    kind: []u8,
-    path: ?[]u8 = null,
-    summary: ?[]u8 = null,
-    created_at_ms: i64 = 0,
-
-    fn deinit(self: *MissionArtifactView, allocator: std.mem.Allocator) void {
-        allocator.free(self.kind);
-        if (self.path) |value| allocator.free(value);
-        if (self.summary) |value| allocator.free(value);
-        self.* = undefined;
-    }
-};
-
-const MissionEventView = struct {
-    seq: u64,
-    event_type: []u8,
-    payload_json: []u8,
-    created_at_ms: i64,
-
-    fn deinit(self: *MissionEventView, allocator: std.mem.Allocator) void {
-        allocator.free(self.event_type);
-        allocator.free(self.payload_json);
-        self.* = undefined;
-    }
-};
-
-const MissionApprovalView = struct {
-    approval_id: []u8,
-    action_kind: []u8,
-    message: []u8,
-    payload_json: ?[]u8 = null,
-    requested_at_ms: i64 = 0,
-    requested_by: MissionActorView,
-    resolved_at_ms: i64 = 0,
-    resolved_by: ?MissionActorView = null,
-    resolution_note: ?[]u8 = null,
-    resolution: ?[]u8 = null,
-
-    fn deinit(self: *MissionApprovalView, allocator: std.mem.Allocator) void {
-        allocator.free(self.approval_id);
-        allocator.free(self.action_kind);
-        allocator.free(self.message);
-        if (self.payload_json) |value| allocator.free(value);
-        self.requested_by.deinit(allocator);
-        if (self.resolved_by) |*value| value.deinit(allocator);
-        if (self.resolution_note) |value| allocator.free(value);
-        if (self.resolution) |value| allocator.free(value);
-        self.* = undefined;
-    }
-};
-
-const MissionAgentPackView = struct {
-    agent_id: []u8,
-    persona_pack: ?[]u8 = null,
-
-    fn deinit(self: *MissionAgentPackView, allocator: std.mem.Allocator) void {
-        allocator.free(self.agent_id);
-        if (self.persona_pack) |value| allocator.free(value);
-        self.* = undefined;
-    }
-};
-
-const MissionRecordView = struct {
-    mission_id: []u8,
-    use_case: []u8,
-    title: ?[]u8 = null,
-    stage: []u8,
-    state: []u8,
-    agent_id: ?[]u8 = null,
-    persona_pack: ?[]u8 = null,
-    project_id: ?[]u8 = null,
-    run_id: ?[]u8 = null,
-    workspace_root: ?[]u8 = null,
-    worktree_name: ?[]u8 = null,
-    contract_id: ?[]u8 = null,
-    contract_context_path: ?[]u8 = null,
-    contract_state_path: ?[]u8 = null,
-    contract_artifact_root: ?[]u8 = null,
-    created_by: MissionActorView,
-    created_at_ms: i64 = 0,
-    updated_at_ms: i64 = 0,
-    last_heartbeat_ms: i64 = 0,
-    checkpoint_seq: u64 = 0,
-    recovery_count: u64 = 0,
-    recovery_reason: ?[]u8 = null,
-    blocked_reason: ?[]u8 = null,
-    summary: ?[]u8 = null,
-    pending_approval: ?MissionApprovalView = null,
-    artifacts: std.ArrayListUnmanaged(MissionArtifactView) = .{},
-    events: std.ArrayListUnmanaged(MissionEventView) = .{},
-
-    fn deinit(self: *MissionRecordView, allocator: std.mem.Allocator) void {
-        allocator.free(self.mission_id);
-        allocator.free(self.use_case);
-        if (self.title) |value| allocator.free(value);
-        allocator.free(self.stage);
-        allocator.free(self.state);
-        if (self.agent_id) |value| allocator.free(value);
-        if (self.persona_pack) |value| allocator.free(value);
-        if (self.project_id) |value| allocator.free(value);
-        if (self.run_id) |value| allocator.free(value);
-        if (self.workspace_root) |value| allocator.free(value);
-        if (self.worktree_name) |value| allocator.free(value);
-        if (self.contract_id) |value| allocator.free(value);
-        if (self.contract_context_path) |value| allocator.free(value);
-        if (self.contract_state_path) |value| allocator.free(value);
-        if (self.contract_artifact_root) |value| allocator.free(value);
-        self.created_by.deinit(allocator);
-        if (self.recovery_reason) |value| allocator.free(value);
-        if (self.blocked_reason) |value| allocator.free(value);
-        if (self.summary) |value| allocator.free(value);
-        if (self.pending_approval) |*value| value.deinit(allocator);
-        for (self.artifacts.items) |*item| item.deinit(allocator);
-        self.artifacts.deinit(allocator);
-        for (self.events.items) |*item| item.deinit(allocator);
-        self.events.deinit(allocator);
-        self.* = undefined;
-    }
-};
+const MissionRecordView = mission_types.MissionRecordView;
 
 fn platformWindowTitle(title: [:0]const u8) [:0]const u8 {
     if (storage.isAndroid()) return "";
@@ -407,6 +291,50 @@ const PackageManagerEntry = struct {
         self.* = undefined;
     }
 };
+
+const VenomScope = enum {
+    global,
+    workspace,
+    agent,
+
+    pub fn label(scope: VenomScope) []const u8 {
+        return switch (scope) {
+            .global => "global",
+            .workspace => "workspace",
+            .agent => "agent",
+        };
+    }
+
+    pub fn color(scope: VenomScope) [4]f32 {
+        return switch (scope) {
+            .global => zcolors.rgba(80, 160, 240, 255),
+            .workspace => zcolors.rgba(80, 200, 100, 255),
+            .agent => zcolors.rgba(220, 140, 50, 255),
+        };
+    }
+};
+
+const VenomEntry = struct {
+    venom_id: []u8,
+    scope: VenomScope,
+    provider_node_id: ?[]u8,
+    venom_path: []u8,
+    endpoint_path: ?[]u8,
+    invoke_path: ?[]u8,
+
+    fn deinit(self: *VenomEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.venom_id);
+        if (self.provider_node_id) |v| allocator.free(v);
+        allocator.free(self.venom_path);
+        if (self.endpoint_path) |v| allocator.free(v);
+        if (self.invoke_path) |v| allocator.free(v);
+        self.* = undefined;
+    }
+};
+
+const McpEntry = venom_types.McpEntry;
+const WizardMount = venom_types.WizardMount;
+const WizardBind = venom_types.WizardBind;
 
 const FilesystemDirCacheEntry = struct {
     listing: []u8,
@@ -1198,24 +1126,86 @@ fn scanThemePackStamp(path: []const u8) ?i128 {
     return scanThemeDirStamp(&dir) catch null;
 }
 
-const App = struct {
-    allocator: std.mem.Allocator,
-    window: *c.SDL_Window,
-    gpu: zapp.multi_window_renderer.Shared,
-    swapchain: zapp.multi_window_renderer.WindowSwapchain,
+// ── Domain state sub-structs ─────────────────────────────────────────────────
+// Each sub-struct groups the App fields for one functional domain.
+// Fields keep their full names inside the sub-struct for greppability;
+// access sites read e.g. self.mission.records instead of self.mission.records.
 
-    ui_windows: std.ArrayList(*UiWindow) = .empty,
-    main_window_id: u32 = 0,
+const MissionState = struct {
+    records: std.ArrayListUnmanaged(MissionRecordView) = .{},
+    selected_id: ?[]u8 = null,
+    last_error: ?[]u8 = null,
+    last_refresh_ms: i64 = 0,
+};
 
-    // Panel state
-    settings_panel: SettingsPanel,
+const TerminalState = struct {
+    terminal_panel_id: ?workspace.PanelId = null,
+    terminal_backend_kind: terminal_render_backend.Backend.Kind = .plain_text,
+    terminal_backend: terminal_render_backend.Backend, // no default — must be set by App.init
+    terminal_input: std.ArrayList(u8) = .empty,
+    terminal_status: ?[]u8 = null,
+    terminal_error: ?[]u8 = null,
+    terminal_session_id: ?[]u8 = null,
+    terminal_auto_poll: bool = true,
+    terminal_next_poll_at_ms: i64 = 0,
+};
+
+const FilesystemState = struct {
+    // Panel IDs
+    filesystem_panel_id: ?workspace.PanelId = null,
+    filesystem_tools_panel_id: ?workspace.PanelId = null,
+    // Directory listing
+    filesystem_path: std.ArrayList(u8) = .empty,
+    filesystem_entries: std.ArrayListUnmanaged(FilesystemEntry) = .{},
+    filesystem_sort_key: FilesystemSortKey = .name,
+    filesystem_sort_direction: FilesystemSortDirection = .ascending,
+    filesystem_hide_hidden: bool = false,
+    filesystem_hide_directories: bool = false,
+    filesystem_hide_files: bool = false,
+    filesystem_hide_runtime_noise: bool = false,
+    filesystem_selected_path: ?[]u8 = null,
+    filesystem_entry_page: usize = 0,
+    filesystem_last_clicked_entry_index: ?usize = null,
+    filesystem_last_click_ms: i64 = 0,
+    // Column widths (non-zero defaults — set by App.init)
+    filesystem_type_column_width: f32 = 96.0,
+    filesystem_modified_column_width: f32 = 122.0,
+    filesystem_size_column_width: f32 = 72.0,
+    filesystem_column_resize_handle: FilesystemPanel.ColumnResizeHandle = .none,
+    // Preview pane
+    filesystem_preview_split_ratio: f32 = 0.28,
+    filesystem_preview_split_dragging: bool = false,
+    filesystem_preview_path: ?[]u8 = null,
+    filesystem_preview_text: ?[]u8 = null,
+    filesystem_preview_status: ?[]u8 = null,
+    filesystem_preview_mode: FilesystemPreviewMode = .empty,
+    filesystem_preview_kind: FilesystemEntryKind = .unknown,
+    filesystem_preview_size_bytes: ?u64 = null,
+    filesystem_preview_modified_unix_ms: ?i64 = null,
+    // Request tracking
+    filesystem_error: ?[]u8 = null,
+    filesystem_busy: bool = false,
+    filesystem_next_request_id: u64 = 1,
+    filesystem_active_request: ?FilesystemActiveRequest = null,
+    filesystem_pending_path: ?[]u8 = null,
+    filesystem_pending_use_cache: bool = false,
+    filesystem_pending_force_refresh: bool = false,
+    filesystem_pending_retry_at_ms: i64 = 0,
+    filesystem_last_request_duration_ms: f32 = 0.0,
+    filesystem_dir_cache: std.StringHashMapUnmanaged(FilesystemDirCacheEntry) = .{},
+    // fsrpc connection state
+    fsrpc_last_remote_error: ?[]u8 = null,
+    fsrpc_ready: bool = false,
+    next_fsrpc_tag: u32 = 1,
+    next_fsrpc_fid: u32 = 2,
+    // Contract services (filesystem-based RPC schema browser)
+    contract_services: std.ArrayListUnmanaged(ContractServiceEntry) = .{},
+    contract_service_selected_index: usize = 0,
+    contract_invoke_payload: std.ArrayList(u8) = .empty,
+};
+
+const ChatState = struct {
     chat_panel_state: zui.ui.workspace.ChatPanel = .{},
-
-    // Workspace and panel management
-    next_panel_id: workspace.PanelId = 1,
-    manager: panel_manager.PanelManager,
-
-    // Chat state
     chat_input: std.ArrayList(u8) = .empty,
     chat_sessions: std.ArrayList(ChatSession) = .empty,
     session_messages: std.ArrayList(SessionMessageState) = .empty,
@@ -1233,19 +1223,25 @@ const App = struct {
     pending_send_last_resume_attempt_ms: i64 = 0,
     pending_send_started_at_ms: i64 = 0,
     awaiting_reply: bool = false,
+};
+
+const DebugState = struct {
+    // Debug event stream
     debug_stream_enabled: bool = true,
     debug_stream_snapshot_pending: bool = false,
     debug_stream_snapshot_retry_at_ms: i64 = 0,
     debug_stream_snapshot: ?[]u8 = null,
+    // Node-service watch (shares the debug panel)
     node_service_watch_enabled: bool = false,
     node_service_snapshot_pending: bool = false,
     node_service_snapshot_retry_at_ms: i64 = 0,
     node_service_watch_filter: std.ArrayList(u8) = .empty,
     node_service_watch_replay_limit: std.ArrayList(u8) = .empty,
-    debug_search_filter: std.ArrayList(u8) = .empty,
     node_service_latest_reload_diag: ?[]u8 = null,
     node_service_diff_preview: ?[]u8 = null,
     node_service_diff_base_index: ?usize = null,
+    // Debug panel state
+    debug_search_filter: std.ArrayList(u8) = .empty,
     debug_panel_id: ?workspace.PanelId = null,
     debug_events: std.ArrayList(DebugEventEntry) = .empty,
     debug_next_event_id: u64 = 1,
@@ -1255,10 +1251,106 @@ const App = struct {
     debug_filter_cache_query_len: usize = 0,
     debug_filter_cache_events_revision: u64 = 0,
     debug_filtered_indices: std.ArrayList(u32) = .empty,
-    debug_folded_blocks: std.AutoHashMap(DebugFoldKey, void),
+    debug_folded_blocks: std.AutoHashMap(DebugFoldKey, void), // init in App.init
     debug_fold_revision: u64 = 1,
     debug_scroll_y: f32 = 0.0,
     debug_selected_index: ?usize = null,
+    // Node-service cache for selected entry detail
+    debug_selected_node_service_cache_event_id: u64 = 0,
+    debug_selected_node_service_cache_index: ?usize = null,
+    debug_selected_node_service_cache_node_id: ?[]u8 = null,
+    debug_selected_node_service_cache_diagnostics: ?[]u8 = null,
+    // Deduplication fingerprint ring
+    debug_event_fingerprint_set: std.AutoHashMapUnmanaged(u64, void) = .{},
+    debug_event_fingerprint_ring: [DEBUG_EVENT_DEDUPE_WINDOW]u64 = [_]u64{0} ** DEBUG_EVENT_DEDUPE_WINDOW,
+    debug_event_fingerprint_count: usize = 0,
+    debug_event_fingerprint_next: usize = 0,
+    // Layout state
+    debug_output_rect: Rect = Rect.fromXYWH(0, 0, 0, 0),
+    debug_scrollbar_dragging: bool = false,
+    debug_scrollbar_drag_start_y: f32 = 0.0,
+    debug_scrollbar_drag_start_scroll_y: f32 = 0.0,
+};
+
+const WorkspaceState = struct {
+    projects: std.ArrayListUnmanaged(workspace_types.WorkspaceSummary) = .{},
+    nodes: std.ArrayListUnmanaged(workspace_types.NodeInfo) = .{},
+    workspace_state: ?workspace_types.WorkspaceStatus = null,
+    workspace_last_error: ?[]u8 = null,
+    workspace_last_refresh_ms: i64 = 0,
+    selected_workspace_detail: ?workspace_types.WorkspaceDetail = null,
+    workspace_selected_mount_index: ?usize = null,
+    workspace_selected_bind_index: ?usize = null,
+    workspace_op_busy: bool = false,
+    node_browser_open: bool = false,
+    node_browser_selected_index: ?usize = null,
+    workspace_panel_id: ?workspace.PanelId = null,
+    workspace_selector_open: bool = false,
+    dashboard_panel_id: ?workspace.PanelId = null,
+    dashboard_last_refresh_ms: i64 = 0,
+    venom_manager_panel_id: ?workspace.PanelId = null,
+    venom_entries: std.ArrayListUnmanaged(VenomEntry) = .{},
+    venom_selected_index: ?usize = null,
+    venom_last_refresh_ms: i64 = 0,
+    venom_last_error: ?[]u8 = null,
+    venom_refresh_busy: bool = false,
+    node_topology_panel_id: ?workspace.PanelId = null,
+    node_topology_table_view: bool = false,
+    node_topology_selected_index: ?usize = null,
+    mcp_config_panel_id: ?workspace.PanelId = null,
+    mcp_entries: std.ArrayListUnmanaged(McpEntry) = .{},
+    mcp_selected_index: ?usize = null,
+    mcp_selected_runtime: ?[]u8 = null,
+    mcp_last_error: ?[]u8 = null,
+    mcp_last_refresh_ms: i64 = 0,
+    workspace_wizard_open: bool = false,
+    workspace_wizard_step: usize = 0,
+    workspace_wizard_mounts: std.ArrayListUnmanaged(WizardMount) = .{},
+    workspace_wizard_binds: std.ArrayListUnmanaged(WizardBind) = .{},
+    workspace_wizard_error: ?[]u8 = null,
+    workspace_wizard_selected_node_index: ?usize = null,
+    active_workspace_id: ?[]u8 = null,
+    launcher_notice: ?[]u8 = null,
+    launcher_selected_profile_index: usize = 0,
+    launcher_project_filter: std.ArrayList(u8) = .empty,
+    launcher_profile_name: std.ArrayList(u8) = .empty,
+    launcher_profile_metadata: std.ArrayList(u8) = .empty,
+    launcher_connect_token: std.ArrayList(u8) = .empty,
+    launcher_create_modal_open: bool = false,
+    launcher_create_selected_template_index: usize = 0,
+    launcher_create_template_page: usize = 0,
+    launcher_create_templates: std.ArrayListUnmanaged(workspace_types.WorkspaceTemplate) = .{},
+    launcher_create_modal_error: ?[]u8 = null,
+    workspace_recovery_blocked_until: u64 = 0,
+    workspace_recovery_blocked_for_manager: usize = 0,
+    workspace_recovery_suspended_until: u64 = 0,
+    workspace_recovery_suspended_for_manager: usize = 0,
+    workspace_recovery_failures: u8 = 0,
+    workspace_snapshot_restore_cooldown_until: u64 = 0,
+    workspace_snapshot: ?workspace.WorkspaceSnapshot = null,
+    workspace_snapshot_stale: bool = false,
+    workspace_snapshot_restore_attempted: bool = false,
+};
+
+const App = struct {
+    allocator: std.mem.Allocator,
+    window: *c.SDL_Window,
+    gpu: zapp.multi_window_renderer.Shared,
+    swapchain: zapp.multi_window_renderer.WindowSwapchain,
+
+    ui_windows: std.ArrayList(*UiWindow) = .empty,
+    main_window_id: u32 = 0,
+
+    // Panel state
+    settings_panel: SettingsPanel,
+
+    // Workspace and panel management
+    next_panel_id: workspace.PanelId = 1,
+    manager: panel_manager.PanelManager,
+
+    // Chat state
+    chat: ChatState = .{},
+    debug: DebugState,
     perf_benchmark_label_input: std.ArrayList(u8) = .empty,
     perf_benchmark_active: bool = false,
     perf_benchmark_start_sample_index: usize = 0,
@@ -1275,18 +1367,6 @@ const App = struct {
     perf_automation_duration_ms: i64 = PERF_AUTOMATION_DEFAULT_DURATION_MS,
     perf_automation_min_fps: ?f32 = null,
     perf_automation_report_path: ?[]u8 = null,
-    debug_selected_node_service_cache_event_id: u64 = 0,
-    debug_selected_node_service_cache_index: ?usize = null,
-    debug_selected_node_service_cache_node_id: ?[]u8 = null,
-    debug_selected_node_service_cache_diagnostics: ?[]u8 = null,
-    debug_event_fingerprint_set: std.AutoHashMapUnmanaged(u64, void) = .{},
-    debug_event_fingerprint_ring: [DEBUG_EVENT_DEDUPE_WINDOW]u64 = [_]u64{0} ** DEBUG_EVENT_DEDUPE_WINDOW,
-    debug_event_fingerprint_count: usize = 0,
-    debug_event_fingerprint_next: usize = 0,
-    debug_output_rect: Rect = Rect.fromXYWH(0, 0, 0, 0),
-    debug_scrollbar_dragging: bool = false,
-    debug_scrollbar_drag_start_y: f32 = 0.0,
-    debug_scrollbar_drag_start_scroll_y: f32 = 0.0,
     form_scroll_drag_target: FormScrollTarget = .none,
     form_scroll_drag_start_y: f32 = 0.0,
     form_scroll_drag_start_scroll_y: f32 = 0.0,
@@ -1294,70 +1374,10 @@ const App = struct {
     ui_commands: zui.ui.render.command_list.CommandList,
     ui_inbox: ui_command_inbox.UiCommandInbox,
 
-    projects: std.ArrayListUnmanaged(workspace_types.WorkspaceSummary) = .{},
-    nodes: std.ArrayListUnmanaged(workspace_types.NodeInfo) = .{},
-    workspace_state: ?workspace_types.WorkspaceStatus = null,
-    workspace_last_error: ?[]u8 = null,
-    workspace_last_refresh_ms: i64 = 0,
-    mission_records: std.ArrayListUnmanaged(MissionRecordView) = .{},
-    mission_selected_id: ?[]u8 = null,
-    mission_last_error: ?[]u8 = null,
-    mission_last_refresh_ms: i64 = 0,
-    workspace_panel_id: ?workspace.PanelId = null,
-    workspace_selector_open: bool = false,
-    filesystem_panel_id: ?workspace.PanelId = null,
-    filesystem_tools_panel_id: ?workspace.PanelId = null,
-    terminal_panel_id: ?workspace.PanelId = null,
-    filesystem_path: std.ArrayList(u8) = .empty,
-    filesystem_entries: std.ArrayListUnmanaged(FilesystemEntry) = .{},
-    filesystem_sort_key: FilesystemSortKey = .name,
-    filesystem_sort_direction: FilesystemSortDirection = .ascending,
-    filesystem_hide_hidden: bool = false,
-    filesystem_hide_directories: bool = false,
-    filesystem_hide_files: bool = false,
-    filesystem_hide_runtime_noise: bool = false,
-    filesystem_selected_path: ?[]u8 = null,
-    filesystem_entry_scroll_y: f32 = 0,
-    filesystem_entry_scrollbar_dragging: bool = false,
-    filesystem_entry_scrollbar_drag_anchor: f32 = 0,
-    filesystem_entry_scrollbar_drag_scroll: f32 = 0,
-    filesystem_last_clicked_entry_index: ?usize = null,
-    filesystem_last_click_ms: i64 = 0,
-    filesystem_type_column_width: f32 = 96.0,
-    filesystem_modified_column_width: f32 = 122.0,
-    filesystem_size_column_width: f32 = 72.0,
-    filesystem_column_resize_handle: FilesystemPanel.ColumnResizeHandle = .none,
-    filesystem_preview_split_ratio: f32 = 0.28,
-    filesystem_preview_split_dragging: bool = false,
-    filesystem_preview_path: ?[]u8 = null,
-    filesystem_preview_text: ?[]u8 = null,
-    filesystem_preview_status: ?[]u8 = null,
-    filesystem_preview_mode: FilesystemPreviewMode = .empty,
-    filesystem_preview_kind: FilesystemEntryKind = .unknown,
-    filesystem_preview_size_bytes: ?u64 = null,
-    filesystem_preview_modified_unix_ms: ?i64 = null,
-    filesystem_error: ?[]u8 = null,
-    filesystem_busy: bool = false,
-    filesystem_next_request_id: u64 = 1,
-    filesystem_active_request: ?FilesystemActiveRequest = null,
-    filesystem_pending_path: ?[]u8 = null,
-    filesystem_pending_use_cache: bool = false,
-    filesystem_pending_force_refresh: bool = false,
-    filesystem_pending_retry_at_ms: i64 = 0,
-    filesystem_last_request_duration_ms: f32 = 0.0,
-    filesystem_dir_cache: std.StringHashMapUnmanaged(FilesystemDirCacheEntry) = .{},
-    fsrpc_last_remote_error: ?[]u8 = null,
-    contract_services: std.ArrayListUnmanaged(ContractServiceEntry) = .{},
-    contract_service_selected_index: usize = 0,
-    contract_invoke_payload: std.ArrayList(u8) = .empty,
-    terminal_backend_kind: terminal_render_backend.Backend.Kind = .plain_text,
-    terminal_backend: terminal_render_backend.Backend,
-    terminal_input: std.ArrayList(u8) = .empty,
-    terminal_status: ?[]u8 = null,
-    terminal_error: ?[]u8 = null,
-    terminal_session_id: ?[]u8 = null,
-    terminal_auto_poll: bool = true,
-    terminal_next_poll_at_ms: i64 = 0,
+    ws: WorkspaceState = .{},
+    mission: MissionState = .{},
+    fs: FilesystemState = .{},
+    terminal: TerminalState,
     session_attach_state: SessionAttachUiState = .unknown,
     connect_setup_hint: ?ConnectSetupHint = null,
 
@@ -1368,27 +1388,6 @@ const App = struct {
     status_text: []u8,
     ui_stage: UiStage = .launcher,
     active_profile_id: ?[]u8 = null,
-    active_workspace_id: ?[]u8 = null,
-    launcher_notice: ?[]u8 = null,
-    launcher_selected_profile_index: usize = 0,
-    launcher_project_filter: std.ArrayList(u8) = .empty,
-    launcher_profile_name: std.ArrayList(u8) = .empty,
-    launcher_profile_metadata: std.ArrayList(u8) = .empty,
-    launcher_connect_token: std.ArrayList(u8) = .empty,
-    launcher_create_modal_open: bool = false,
-    launcher_create_selected_template_index: usize = 0,
-    launcher_create_template_page: usize = 0,
-    launcher_create_templates: std.ArrayListUnmanaged(workspace_types.WorkspaceTemplate) = .{},
-    launcher_create_modal_error: ?[]u8 = null,
-    package_manager_modal_open: bool = false,
-    package_manager_packages: std.ArrayListUnmanaged(PackageManagerEntry) = .{},
-    package_manager_selected_index: usize = 0,
-    package_manager_install_payload: std.ArrayList(u8) = .empty,
-    package_manager_modal_error: ?[]u8 = null,
-    package_manager_modal_notice: ?[]u8 = null,
-    about_modal_open: bool = false,
-    about_modal_build_label: std.ArrayList(u8) = .empty,
-    about_modal_notice: ?[]u8 = null,
     ide_menu_open: ?IdeMenuDomain = null,
     credential_store: credential_store_mod.CredentialStore,
 
@@ -1433,7 +1432,6 @@ const App = struct {
     pending_close_window_id: ?u32 = null,
 
     message_counter: u64 = 0,
-    mount_control_ready: bool = false,
     debug_frame_counter: u64 = 0,
     perf_frame_panel_ns: PanelDrawFrameNs = .{},
     perf_frame_cmd_stats: RenderCommandFrameStats = .{},
@@ -1485,19 +1483,9 @@ const App = struct {
     perf_last_text_command_share_pct: f32 = 0,
     perf_history: std.ArrayListUnmanaged(PerfSample) = .{},
     frame_clock: zapp.frame_clock.FrameClock,
-    workspace_recovery_blocked_until: u64 = 0,
-    workspace_recovery_blocked_for_manager: usize = 0,
-    workspace_recovery_suspended_until: u64 = 0,
-    workspace_recovery_suspended_for_manager: usize = 0,
-    workspace_recovery_failures: u8 = 0,
-    workspace_snapshot_restore_cooldown_until: u64 = 0,
-
     // UI State for dock
     ui_state: zui.ui.main_window.WindowUiState = .{},
     windows_menu_open_window_id: ?u32 = null,
-    workspace_snapshot: ?workspace.WorkspaceSnapshot = null,
-    workspace_snapshot_stale: bool = false,
-    workspace_snapshot_restore_attempted: bool = false,
     theme_pack_entries: std.ArrayListUnmanaged(ThemePackEntry) = .{},
     theme_pack_watch_next_scan_ms: i64 = 0,
     theme_pack_watch_stamp_ns: i128 = 0,
@@ -1626,25 +1614,25 @@ const App = struct {
         app.swapchain = swapchain;
         app.settings_panel = settings_panel;
         app.next_panel_id = 1;
-        app.debug_stream_enabled = true;
-        app.debug_next_event_id = 1;
-        app.debug_events_revision = 1;
-        app.debug_folded_blocks = std.AutoHashMap(DebugFoldKey, void).init(allocator);
-        app.debug_fold_revision = 1;
+        app.debug.debug_stream_enabled = true;
+        app.debug.debug_next_event_id = 1;
+        app.debug.debug_events_revision = 1;
+        app.debug.debug_folded_blocks = std.AutoHashMap(DebugFoldKey, void).init(allocator);
+        app.debug.debug_fold_revision = 1;
         app.perf_automation_duration_ms = PERF_AUTOMATION_DEFAULT_DURATION_MS;
-        app.filesystem_sort_key = .name;
-        app.filesystem_sort_direction = .ascending;
-        app.filesystem_type_column_width = 96.0;
-        app.filesystem_modified_column_width = 122.0;
-        app.filesystem_size_column_width = 72.0;
-        app.filesystem_column_resize_handle = .none;
-        app.filesystem_preview_split_ratio = 0.28;
-        app.filesystem_preview_mode = .empty;
-        app.filesystem_preview_kind = .unknown;
-        app.filesystem_next_request_id = 1;
-        app.terminal_backend_kind = settings_panel.terminal_backend_kind;
-        app.terminal_backend = initTerminalBackend(settings_panel.terminal_backend_kind);
-        app.terminal_auto_poll = true;
+        app.fs.filesystem_sort_key = .name;
+        app.fs.filesystem_sort_direction = .ascending;
+        app.fs.filesystem_type_column_width = 96.0;
+        app.fs.filesystem_modified_column_width = 122.0;
+        app.fs.filesystem_size_column_width = 72.0;
+        app.fs.filesystem_column_resize_handle = .none;
+        app.fs.filesystem_preview_split_ratio = 0.28;
+        app.fs.filesystem_preview_mode = .empty;
+        app.fs.filesystem_preview_kind = .unknown;
+        app.fs.filesystem_next_request_id = 1;
+        app.terminal.terminal_backend_kind = settings_panel.terminal_backend_kind;
+        app.terminal.terminal_backend = initTerminalBackend(settings_panel.terminal_backend_kind);
+        app.terminal.terminal_auto_poll = true;
         app.session_attach_state = .unknown;
         app.connection_state = .disconnected;
         app.status_text = try allocator.dupe(u8, "Not connected");
@@ -1668,21 +1656,21 @@ const App = struct {
         app.text_edit_history_field = .none;
         app.active_pointer_layer = .base;
         app.frame_dt_seconds = 1.0 / 60.0;
+        app.fs.next_fsrpc_tag = 1;
+        app.fs.next_fsrpc_fid = 2;
         app.credential_store = credential_store;
         app.configurePerfAutomationFromEnv();
-        app.launcher_project_filter.appendSlice(allocator, "") catch {};
-        app.launcher_profile_name.appendSlice(allocator, "") catch {};
-        app.launcher_profile_metadata.appendSlice(allocator, "") catch {};
-        app.launcher_connect_token.appendSlice(allocator, "") catch {};
-        app.package_manager_install_payload.appendSlice(allocator, "") catch {};
-        app.about_modal_build_label.appendSlice(allocator, currentBuildLabel()) catch {};
+        app.ws.launcher_project_filter.appendSlice(allocator, "") catch {};
+        app.ws.launcher_profile_name.appendSlice(allocator, "") catch {};
+        app.ws.launcher_profile_metadata.appendSlice(allocator, "") catch {};
+        app.ws.launcher_connect_token.appendSlice(allocator, "") catch {};
         app.syncLauncherSelectionFromConfig();
         app.applyLauncherSelectedProfile() catch {};
-        app.node_service_watch_filter.appendSlice(allocator, "") catch {};
-        app.node_service_watch_replay_limit.appendSlice(allocator, "25") catch {};
-        app.debug_search_filter.appendSlice(allocator, "") catch {};
+        app.debug.node_service_watch_filter.appendSlice(allocator, "") catch {};
+        app.debug.node_service_watch_replay_limit.appendSlice(allocator, "25") catch {};
+        app.debug.debug_search_filter.appendSlice(allocator, "") catch {};
         app.perf_benchmark_label_input.appendSlice(allocator, "") catch {};
-        app.contract_invoke_payload.appendSlice(allocator, "{}") catch {};
+        app.fs.contract_invoke_payload.appendSlice(allocator, "{}") catch {};
         app.refreshThemePackEntries();
         app.applyThemeSettings(false);
         app.metrics_context = ui_draw_context.DrawContext.init(
@@ -1705,7 +1693,7 @@ const App = struct {
         app.focusSettingsPanel(&app.manager);
 
         app.captureWorkspaceSnapshot(&app.manager);
-        try app.filesystem_path.appendSlice(allocator, "/");
+        try app.fs.filesystem_path.appendSlice(allocator, "/");
 
         if (app.config.default_session) |default_session| {
             const seed = if (default_session.len > 0) default_session else "main";
@@ -1753,49 +1741,59 @@ const App = struct {
         }
         self.disconnect();
         self.clearSessions();
-        self.chat_sessions.deinit(self.allocator);
-        self.session_messages.deinit(self.allocator);
-        workspace_types.deinitWorkspaceList(self.allocator, &self.projects);
-        workspace_types.deinitNodeList(self.allocator, &self.nodes);
-        if (self.workspace_state) |*status| {
+        self.chat.chat_sessions.deinit(self.allocator);
+        self.chat.session_messages.deinit(self.allocator);
+        workspace_types.deinitWorkspaceList(self.allocator, &self.ws.projects);
+        workspace_types.deinitNodeList(self.allocator, &self.ws.nodes);
+        if (self.ws.workspace_state) |*status| {
             status.deinit(self.allocator);
-            self.workspace_state = null;
+            self.ws.workspace_state = null;
         }
-        if (self.workspace_last_error) |value| {
+        if (self.ws.workspace_last_error) |value| {
             self.allocator.free(value);
-            self.workspace_last_error = null;
+            self.ws.workspace_last_error = null;
+        }
+        if (self.ws.selected_workspace_detail) |*detail| {
+            detail.deinit(self.allocator);
+            self.ws.selected_workspace_detail = null;
         }
         self.stopFilesystemWorker();
-        self.filesystem_active_request = null;
+        self.fs.filesystem_active_request = null;
         self.clearPendingFilesystemPathLoad();
         self.clearFsrpcRemoteError();
         self.clearDebugStreamSnapshot();
         self.clearDebugEvents();
-        self.debug_events.deinit(self.allocator);
-        self.debug_filtered_indices.deinit(self.allocator);
-        self.debug_folded_blocks.deinit();
-        self.debug_event_fingerprint_set.deinit(self.allocator);
+        self.debug.debug_events.deinit(self.allocator);
+        self.debug.debug_filtered_indices.deinit(self.allocator);
+        self.debug.debug_folded_blocks.deinit();
+        self.debug.debug_event_fingerprint_set.deinit(self.allocator);
         self.invalidateWorkspaceSnapshot();
-        if (self.pending_send_request_id) |request_id| self.allocator.free(request_id);
-        if (self.pending_send_message_id) |message_id| self.allocator.free(message_id);
-        if (self.pending_send_session_key) |session_key| self.allocator.free(session_key);
-        if (self.pending_send_job_id) |job_id| self.allocator.free(job_id);
-        if (self.pending_send_jobs_root) |jobs_root| self.allocator.free(jobs_root);
-        if (self.pending_send_thoughts_root) |thoughts_root| self.allocator.free(thoughts_root);
-        if (self.pending_send_correlation_id) |corr| self.allocator.free(corr);
-        if (self.pending_send_thought_message_id) |message_id| self.allocator.free(message_id);
-        if (self.pending_send_last_thought_text) |thought| self.allocator.free(thought);
+        if (self.chat.pending_send_request_id) |request_id| self.allocator.free(request_id);
+        if (self.chat.pending_send_message_id) |message_id| self.allocator.free(message_id);
+        if (self.chat.pending_send_session_key) |session_key| self.allocator.free(session_key);
+        if (self.chat.pending_send_job_id) |job_id| self.allocator.free(job_id);
+        if (self.chat.pending_send_jobs_root) |jobs_root| self.allocator.free(jobs_root);
+        if (self.chat.pending_send_thoughts_root) |thoughts_root| self.allocator.free(thoughts_root);
+        if (self.chat.pending_send_correlation_id) |corr| self.allocator.free(corr);
+        if (self.chat.pending_send_thought_message_id) |message_id| self.allocator.free(message_id);
+        if (self.chat.pending_send_last_thought_text) |thought| self.allocator.free(thought);
         self.clearFilesystemData();
         self.clearFilesystemDirCache();
-        self.filesystem_path.deinit(self.allocator);
+        self.fs.filesystem_path.deinit(self.allocator);
         self.clearContractServices();
-        self.contract_invoke_payload.deinit(self.allocator);
+        self.fs.contract_invoke_payload.deinit(self.allocator);
+        self.clearVenomEntries();
+        if (self.ws.venom_last_error) |v| self.allocator.free(v);
+        self.clearMcpEntries();
+        if (self.ws.mcp_last_error) |v| self.allocator.free(v);
+        if (self.ws.mcp_selected_runtime) |v| self.allocator.free(v);
+        self.closeWorkspaceWizard();
         self.clearTerminalState();
-        self.terminal_input.deinit(self.allocator);
-        self.terminal_backend.deinit(self.allocator);
-        self.node_service_watch_filter.deinit(self.allocator);
-        self.node_service_watch_replay_limit.deinit(self.allocator);
-        self.debug_search_filter.deinit(self.allocator);
+        self.terminal.terminal_input.deinit(self.allocator);
+        self.terminal.terminal_backend.deinit(self.allocator);
+        self.debug.node_service_watch_filter.deinit(self.allocator);
+        self.debug.node_service_watch_replay_limit.deinit(self.allocator);
+        self.debug.debug_search_filter.deinit(self.allocator);
         self.perf_benchmark_label_input.deinit(self.allocator);
         if (self.perf_benchmark_active_label) |value| self.allocator.free(value);
         if (self.perf_benchmark_last_label) |value| self.allocator.free(value);
@@ -1807,25 +1805,19 @@ const App = struct {
         self.text_edit_redo_stack.deinit(self.allocator);
         self.perf_history.deinit(self.allocator);
 
-        zui.ChatView(ChatMessage).deinit(&self.chat_panel_state.view, self.allocator);
+        zui.ChatView(ChatMessage).deinit(&self.chat.chat_panel_state.view, self.allocator);
 
         self.settings_panel.deinit(self.allocator);
-        self.chat_input.deinit(self.allocator);
-        self.launcher_project_filter.deinit(self.allocator);
-        self.launcher_profile_name.deinit(self.allocator);
-        self.launcher_profile_metadata.deinit(self.allocator);
-        self.launcher_connect_token.deinit(self.allocator);
-        workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.launcher_create_templates);
-        if (self.launcher_create_modal_error) |value| self.allocator.free(value);
-        if (self.launcher_notice) |value| self.allocator.free(value);
-        self.clearPackageManagerPackages();
-        self.package_manager_install_payload.deinit(self.allocator);
-        if (self.package_manager_modal_error) |value| self.allocator.free(value);
-        if (self.package_manager_modal_notice) |value| self.allocator.free(value);
-        self.about_modal_build_label.deinit(self.allocator);
-        if (self.about_modal_notice) |value| self.allocator.free(value);
+        self.chat.chat_input.deinit(self.allocator);
+        self.ws.launcher_project_filter.deinit(self.allocator);
+        self.ws.launcher_profile_name.deinit(self.allocator);
+        self.ws.launcher_profile_metadata.deinit(self.allocator);
+        self.ws.launcher_connect_token.deinit(self.allocator);
+        workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.ws.launcher_create_templates);
+        if (self.ws.launcher_create_modal_error) |value| self.allocator.free(value);
+        if (self.ws.launcher_notice) |value| self.allocator.free(value);
         if (self.active_profile_id) |value| self.allocator.free(value);
-        if (self.active_workspace_id) |value| self.allocator.free(value);
+        if (self.ws.active_workspace_id) |value| self.allocator.free(value);
         self.credential_store.deinit();
         self.client_context.deinit();
         self.agent_registry.deinit(self.allocator);
@@ -1972,7 +1964,7 @@ const App = struct {
             const terminal_started_ns = std.time.nanoTimestamp();
             self.pollTerminalSession();
             const terminal_elapsed_ns = std.time.nanoTimestamp() - terminal_started_ns;
-            if (self.pending_send_job_id != null and self.ws_client != null and self.pending_send_resume_notified) {
+            if (self.chat.pending_send_job_id != null and self.ws_client != null and self.chat.pending_send_resume_notified) {
                 _ = self.tryResumePendingSendJob() catch {};
             }
             const frame_elapsed_ns = std.time.nanoTimestamp() - frame_started_ns;
@@ -2345,16 +2337,16 @@ const App = struct {
                 .mouse_wheel => |mw| {
                     self.mouse_scroll_y += mw.delta[1];
                     const mouse_pos = .{ self.mouse_x, self.mouse_y };
-                    var handled_debug_scroll = self.debug_output_rect.contains(mouse_pos);
+                    var handled_debug_scroll = self.debug.debug_output_rect.contains(mouse_pos);
                     if (!handled_debug_scroll) {
-                        if (self.debug_panel_id) |panel_id| {
+                        if (self.debug.debug_panel_id) |panel_id| {
                             handled_debug_scroll = self.isPanelFocused(manager, panel_id);
                         }
                     }
                     if (handled_debug_scroll) {
-                        self.debug_scroll_y -= mw.delta[1] * 40.0 * self.ui_scale;
-                        if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
-                        if (self.debug_panel_id) |panel_id| {
+                        self.debug.debug_scroll_y -= mw.delta[1] * 40.0 * self.ui_scale;
+                        if (self.debug.debug_scroll_y < 0.0) self.debug.debug_scroll_y = 0.0;
+                        if (self.debug.debug_panel_id) |panel_id| {
                             manager.focusPanel(panel_id);
                         }
                     }
@@ -2372,7 +2364,7 @@ const App = struct {
         // in the source window.
         if (!self.mouse_down and ui_window.id == self.main_window_id) {
             self.form_scroll_drag_target = .none;
-            self.debug_scrollbar_dragging = false;
+            self.debug.debug_scrollbar_dragging = false;
             self.setDragMouseCapture(false);
         }
         if (self.settings_panel.focused_field == .none) {
@@ -3046,14 +3038,14 @@ const App = struct {
             return false;
         }
 
-        if (self.workspace_recovery_failures >= WORKSPACE_RECOVERY_ATTEMPTS_BEFORE_SUSPEND) {
+        if (self.ws.workspace_recovery_failures >= WORKSPACE_RECOVERY_ATTEMPTS_BEFORE_SUSPEND) {
             if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
                 std.log.warn(
                     "ensureWindowManagerHealthy: recovery attempts exceeded, forcing safe reset",
                     .{},
                 );
             }
-            self.workspace_recovery_failures = 0;
+            self.ws.workspace_recovery_failures = 0;
             self.invalidateWorkspaceSnapshot();
             if (!self.resetManagerToDefaultSafe(manager)) {
                 self.suspendWorkspaceRecovery(manager);
@@ -3089,45 +3081,45 @@ const App = struct {
                 );
             }
 
-            if (!self.workspace_snapshot_stale and self.workspace_snapshot != null and !self.workspace_snapshot_restore_attempted) {
+            if (!self.ws.workspace_snapshot_stale and self.ws.workspace_snapshot != null and !self.ws.workspace_snapshot_restore_attempted) {
                 if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
                     std.log.info("ensureWindowManagerHealthy: trying snapshot restore during recovery", .{});
                 }
-                if (self.debug_frame_counter >= self.workspace_snapshot_restore_cooldown_until and
+                if (self.debug_frame_counter >= self.ws.workspace_snapshot_restore_cooldown_until and
                     self.restoreWorkspaceFromSnapshot(manager))
                 {
-                    self.workspace_snapshot_stale = false;
-                    self.workspace_snapshot_restore_attempted = false;
-                    self.workspace_recovery_failures = 0;
+                    self.ws.workspace_snapshot_stale = false;
+                    self.ws.workspace_snapshot_restore_attempted = false;
+                    self.ws.workspace_recovery_failures = 0;
                     self.clearWorkspaceRecoveryCooldown();
                     self.clearWorkspaceRecoverySuspend();
-                    self.workspace_snapshot_restore_cooldown_until = self.debug_frame_counter + WORKSPACE_RECOVERY_COOLDOWN_FRAMES;
+                    self.ws.workspace_snapshot_restore_cooldown_until = self.debug_frame_counter + WORKSPACE_RECOVERY_COOLDOWN_FRAMES;
                     return true;
                 }
                 self.invalidateWorkspaceSnapshot();
-                self.workspace_snapshot_stale = true;
-                self.workspace_snapshot_restore_attempted = true;
-                self.workspace_snapshot_restore_cooldown_until = self.debug_frame_counter + WORKSPACE_RECOVERY_COOLDOWN_FRAMES;
-                if (self.workspace_recovery_failures < 250) self.workspace_recovery_failures +%= 1;
+                self.ws.workspace_snapshot_stale = true;
+                self.ws.workspace_snapshot_restore_attempted = true;
+                self.ws.workspace_snapshot_restore_cooldown_until = self.debug_frame_counter + WORKSPACE_RECOVERY_COOLDOWN_FRAMES;
+                if (self.ws.workspace_recovery_failures < 250) self.ws.workspace_recovery_failures +%= 1;
                 if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
                     std.log.warn("ensureWindowManagerHealthy: snapshot restore failed; disabling repeated restore", .{});
                 }
-            } else if (self.workspace_snapshot_stale) {
+            } else if (self.ws.workspace_snapshot_stale) {
                 if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
                     std.log.warn(
                         "ensureWindowManagerHealthy: skipping restore because workspace snapshot is stale",
                         .{},
                     );
                 }
-                if (self.workspace_recovery_failures < 250) self.workspace_recovery_failures +%= 1;
-            } else if (self.debug_frame_counter < self.workspace_snapshot_restore_cooldown_until) {
+                if (self.ws.workspace_recovery_failures < 250) self.ws.workspace_recovery_failures +%= 1;
+            } else if (self.debug_frame_counter < self.ws.workspace_snapshot_restore_cooldown_until) {
                 if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
                     std.log.warn(
                         "ensureWindowManagerHealthy: snapshot restore cooldown active (frame {} < {})",
-                        .{ self.debug_frame_counter, self.workspace_snapshot_restore_cooldown_until },
+                        .{ self.debug_frame_counter, self.ws.workspace_snapshot_restore_cooldown_until },
                     );
                 }
-                if (self.workspace_recovery_failures < 250) self.workspace_recovery_failures +%= 1;
+                if (self.ws.workspace_recovery_failures < 250) self.ws.workspace_recovery_failures +%= 1;
             }
 
             if (!self.resetManagerToDefaultSafe(manager)) {
@@ -3138,21 +3130,21 @@ const App = struct {
                         .{},
                     );
                 }
-                self.workspace_recovery_failures +%= 1;
+                self.ws.workspace_recovery_failures +%= 1;
                 self.suspendWorkspaceRecovery(manager);
                 return false;
             }
 
             if (!self.isWorkspaceStateReasonable(manager) or manager.workspace.panels.items.len == 0) {
                 self.logWorkspaceState(manager, "invalid-after-reset-verify", self.debug_frame_counter);
-                self.workspace_recovery_failures +%= 1;
+                self.ws.workspace_recovery_failures +%= 1;
                 self.suspendWorkspaceRecovery(manager);
                 self.resetWorkspaceToSafeEmpty(manager);
                 return false;
             }
 
             self.captureWorkspaceSnapshot(manager);
-            self.workspace_recovery_failures = 0;
+            self.ws.workspace_recovery_failures = 0;
             self.clearWorkspaceRecoveryCooldown();
             self.clearWorkspaceRecoverySuspend();
             return true;
@@ -3232,56 +3224,56 @@ const App = struct {
         if (self.isWorkspaceStateReasonable(manager)) {
             self.clearWorkspaceRecoveryCooldown();
             self.clearWorkspaceRecoverySuspend();
-            if (self.workspace_snapshot_stale and self.shouldLogDebug(600)) {
+            if (self.ws.workspace_snapshot_stale and self.shouldLogDebug(600)) {
                 std.log.warn("ensureWindowManagerHealthy: skipping snapshot capture while snapshot is stale", .{});
             }
         } else {
             self.suspendWorkspaceRecovery(manager);
         }
 
-        if (self.isWorkspaceStateReasonable(manager) and self.workspace_snapshot == null) {
+        if (self.isWorkspaceStateReasonable(manager) and self.ws.workspace_snapshot == null) {
             self.captureWorkspaceSnapshot(manager);
-            self.workspace_snapshot_restore_attempted = false;
+            self.ws.workspace_snapshot_restore_attempted = false;
         }
 
         return self.isWorkspaceStateReasonable(manager) and manager.workspace.panels.items.len > 0;
     }
 
     fn canRecoverManagerWorkspace(self: *App, manager: *panel_manager.PanelManager) bool {
-        if (self.workspace_recovery_blocked_until == 0) return true;
-        if (self.workspace_recovery_blocked_for_manager != @intFromPtr(manager)) return true;
-        if (self.debug_frame_counter < self.workspace_recovery_blocked_until) return false;
-        self.workspace_recovery_blocked_until = 0;
-        self.workspace_recovery_blocked_for_manager = 0;
+        if (self.ws.workspace_recovery_blocked_until == 0) return true;
+        if (self.ws.workspace_recovery_blocked_for_manager != @intFromPtr(manager)) return true;
+        if (self.debug_frame_counter < self.ws.workspace_recovery_blocked_until) return false;
+        self.ws.workspace_recovery_blocked_until = 0;
+        self.ws.workspace_recovery_blocked_for_manager = 0;
         return true;
     }
 
     fn blockWorkspaceRecovery(self: *App, manager: *panel_manager.PanelManager) void {
-        self.workspace_recovery_blocked_for_manager = @intFromPtr(manager);
-        self.workspace_recovery_blocked_until = self.debug_frame_counter + WORKSPACE_RECOVERY_COOLDOWN_FRAMES;
+        self.ws.workspace_recovery_blocked_for_manager = @intFromPtr(manager);
+        self.ws.workspace_recovery_blocked_until = self.debug_frame_counter + WORKSPACE_RECOVERY_COOLDOWN_FRAMES;
     }
 
     fn isWorkspaceRecoverySuspended(self: *App, manager: *panel_manager.PanelManager) bool {
-        if (self.workspace_recovery_suspended_for_manager != @intFromPtr(manager)) return false;
-        if (self.workspace_recovery_suspended_until == 0) return true;
-        if (self.debug_frame_counter < self.workspace_recovery_suspended_until) return true;
-        self.workspace_recovery_suspended_for_manager = 0;
-        self.workspace_recovery_suspended_until = 0;
+        if (self.ws.workspace_recovery_suspended_for_manager != @intFromPtr(manager)) return false;
+        if (self.ws.workspace_recovery_suspended_until == 0) return true;
+        if (self.debug_frame_counter < self.ws.workspace_recovery_suspended_until) return true;
+        self.ws.workspace_recovery_suspended_for_manager = 0;
+        self.ws.workspace_recovery_suspended_until = 0;
         return false;
     }
 
     fn suspendWorkspaceRecovery(self: *App, manager: *panel_manager.PanelManager) void {
-        if (self.workspace_recovery_suspended_for_manager == 0) {
-            self.workspace_recovery_suspended_for_manager = @intFromPtr(manager);
+        if (self.ws.workspace_recovery_suspended_for_manager == 0) {
+            self.ws.workspace_recovery_suspended_for_manager = @intFromPtr(manager);
         }
-        self.workspace_recovery_suspended_until = self.debug_frame_counter + WORKSPACE_RECOVERY_SUSPEND_FRAMES;
+        self.ws.workspace_recovery_suspended_until = self.debug_frame_counter + WORKSPACE_RECOVERY_SUSPEND_FRAMES;
         self.blockWorkspaceRecovery(manager);
     }
 
     fn clearWorkspaceRecoverySuspend(self: *App) void {
-        if (self.workspace_recovery_suspended_until != 0) {
-            self.workspace_recovery_suspended_until = 0;
-            self.workspace_recovery_suspended_for_manager = 0;
+        if (self.ws.workspace_recovery_suspended_until != 0) {
+            self.ws.workspace_recovery_suspended_until = 0;
+            self.ws.workspace_recovery_suspended_for_manager = 0;
         }
     }
 
@@ -3292,8 +3284,8 @@ const App = struct {
     }
 
     fn clearWorkspaceRecoveryCooldown(self: *App) void {
-        self.workspace_recovery_blocked_until = 0;
-        self.workspace_recovery_blocked_for_manager = 0;
+        self.ws.workspace_recovery_blocked_until = 0;
+        self.ws.workspace_recovery_blocked_for_manager = 0;
     }
 
     fn captureWorkspaceSnapshot(self: *App, manager: *panel_manager.PanelManager) void {
@@ -3305,21 +3297,21 @@ const App = struct {
             }
             return;
         };
-        if (self.workspace_snapshot) |*previous| {
+        if (self.ws.workspace_snapshot) |*previous| {
             previous.deinit(self.allocator);
         }
-        self.workspace_snapshot = snapshot;
-        self.workspace_snapshot_stale = false;
-        self.workspace_snapshot_restore_attempted = false;
+        self.ws.workspace_snapshot = snapshot;
+        self.ws.workspace_snapshot_stale = false;
+        self.ws.workspace_snapshot_restore_attempted = false;
     }
 
     fn invalidateWorkspaceSnapshot(self: *App) void {
-        if (self.workspace_snapshot) |*snapshot| {
+        if (self.ws.workspace_snapshot) |*snapshot| {
             snapshot.deinit(self.allocator);
-            self.workspace_snapshot = null;
+            self.ws.workspace_snapshot = null;
         }
-        self.workspace_snapshot_stale = true;
-        self.workspace_snapshot_restore_attempted = true;
+        self.ws.workspace_snapshot_stale = true;
+        self.ws.workspace_snapshot_restore_attempted = true;
     }
 
     fn bindNextPanelId(self: *App, manager: *panel_manager.PanelManager) void {
@@ -3336,7 +3328,7 @@ const App = struct {
 
     fn restoreWorkspaceFromSnapshot(self: *App, manager: *panel_manager.PanelManager) bool {
         if (!platformSupportsWorkspaceSnapshots()) return false;
-        const snapshot = self.workspace_snapshot orelse return false;
+        const snapshot = self.ws.workspace_snapshot orelse return false;
         if (!self.isWorkspaceSnapshotReasonable(snapshot)) {
             if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
                 std.log.warn("restoreWorkspaceFromSnapshot: snapshot failed sanity checks", .{});
@@ -3862,14 +3854,14 @@ const App = struct {
         self.perf_last_frame_ms = nsToMs(self.perf_sample_total_frame_ns) / frames;
         self.perf_last_ws_ms = nsToMs(self.perf_sample_total_ws_ns) / frames;
         self.perf_last_fs_ms = nsToMs(self.perf_sample_total_fs_ns) / frames;
-        self.perf_last_ws_wait_ms = if (self.awaiting_reply and self.pending_send_started_at_ms > 0)
-            @as(f32, @floatFromInt(@max(0, now_ms - self.pending_send_started_at_ms)))
+        self.perf_last_ws_wait_ms = if (self.chat.awaiting_reply and self.chat.pending_send_started_at_ms > 0)
+            @as(f32, @floatFromInt(@max(0, now_ms - self.chat.pending_send_started_at_ms)))
         else
             0.0;
-        self.perf_last_fs_request_ms = if (self.filesystem_active_request) |active|
+        self.perf_last_fs_request_ms = if (self.fs.filesystem_active_request) |active|
             @as(f32, @floatFromInt(@max(0, now_ms - active.started_at_ms)))
         else
-            self.filesystem_last_request_duration_ms;
+            self.fs.filesystem_last_request_duration_ms;
         self.perf_last_debug_ms = nsToMs(self.perf_sample_total_debug_ns) / frames;
         self.perf_last_terminal_ms = nsToMs(self.perf_sample_total_terminal_ns) / frames;
         self.perf_last_draw_ms = nsToMs(self.perf_sample_total_draw_ns) / frames;
@@ -4045,9 +4037,9 @@ const App = struct {
     fn pollWebSocket(self: *App) !void {
         if (self.ws_client) |*client| {
             if (!client.isAlive()) {
-                const has_pending_send = self.pending_send_message_id != null;
-                self.debug_stream_snapshot_pending = true;
-                self.debug_stream_snapshot_retry_at_ms = 0;
+                const has_pending_send = self.chat.pending_send_message_id != null;
+                self.debug.debug_stream_snapshot_pending = true;
+                self.debug.debug_stream_snapshot_retry_at_ms = 0;
                 self.clearDebugStreamSnapshot();
                 self.stopFilesystemWorker();
                 self.clearTerminalState();
@@ -4061,8 +4053,8 @@ const App = struct {
                     self.returnToLauncher(.connection_lost);
                 }
                 if (has_pending_send) {
-                    if (!self.pending_send_resume_notified) {
-                        if (self.pending_send_job_id) |job_id| {
+                    if (!self.chat.pending_send_resume_notified) {
+                        if (self.chat.pending_send_job_id) |job_id| {
                             const msg = try std.fmt.allocPrint(
                                 self.allocator,
                                 "Connection lost while waiting for job {s}. Reconnect to resume.",
@@ -4073,7 +4065,7 @@ const App = struct {
                         } else {
                             try self.appendMessage("system", "Connection lost while waiting for assistant response. Reconnect to resume.", null);
                         }
-                        self.pending_send_resume_notified = true;
+                        self.chat.pending_send_resume_notified = true;
                     }
                 } else {
                     try self.appendMessage("system", "Connection lost. Please reconnect.", null);
@@ -4106,17 +4098,17 @@ const App = struct {
     }
 
     fn pollFilesystemWorker(self: *App) void {
-        if (self.filesystem_active_request != null) return;
+        if (self.fs.filesystem_active_request != null) return;
         if (self.connection_state != .connected) return;
-        const pending_path = self.filesystem_pending_path orelse return;
+        const pending_path = self.fs.filesystem_pending_path orelse return;
 
         const now = std.time.milliTimestamp();
-        if (now < self.filesystem_pending_retry_at_ms) return;
+        if (now < self.fs.filesystem_pending_retry_at_ms) return;
 
         const path = self.allocator.dupe(u8, pending_path) catch return;
         defer self.allocator.free(path);
-        const use_cache = self.filesystem_pending_use_cache;
-        const force_refresh = self.filesystem_pending_force_refresh;
+        const use_cache = self.fs.filesystem_pending_use_cache;
+        const force_refresh = self.fs.filesystem_pending_force_refresh;
         self.clearPendingFilesystemPathLoad();
         self.queueFilesystemPathLoad(path, use_cache, force_refresh) catch |err| {
             if (err != error.Busy and err != error.NotConnected) {
@@ -4126,85 +4118,85 @@ const App = struct {
     }
 
     fn pollDebugStream(self: *App) void {
-        if (!self.debug_stream_enabled) return;
+        if (!self.debug.debug_stream_enabled) return;
         if (self.connection_state != .connected) return;
-        if (self.filesystem_active_request != null) return;
-        if (self.awaiting_reply or self.pending_send_job_id != null) return;
-        if (!self.debug_stream_snapshot_pending) return;
+        if (self.fs.filesystem_active_request != null) return;
+        if (self.chat.awaiting_reply or self.chat.pending_send_job_id != null) return;
+        if (!self.debug.debug_stream_snapshot_pending) return;
 
         const now = std.time.milliTimestamp();
-        if (now < self.debug_stream_snapshot_retry_at_ms) return;
+        if (now < self.debug.debug_stream_snapshot_retry_at_ms) return;
 
         self.submitFilesystemRequestWithMode(.read_file, DEBUG_STREAM_PATH, false, true) catch |err| {
             if (err != error.Busy and err != error.NotConnected) {
                 std.log.debug("debug stream poll skipped: {s}", .{@errorName(err)});
             }
-            self.debug_stream_snapshot_pending = true;
-            self.debug_stream_snapshot_retry_at_ms = now + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
+            self.debug.debug_stream_snapshot_pending = true;
+            self.debug.debug_stream_snapshot_retry_at_ms = now + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
             return;
         };
     }
 
     fn pollNodeServiceSnapshot(self: *App) void {
-        if (!self.node_service_watch_enabled) return;
+        if (!self.debug.node_service_watch_enabled) return;
         if (self.connection_state != .connected) return;
-        if (self.filesystem_active_request != null) return;
-        if (self.awaiting_reply or self.pending_send_job_id != null) return;
-        if (!self.node_service_snapshot_pending) return;
+        if (self.fs.filesystem_active_request != null) return;
+        if (self.chat.awaiting_reply or self.chat.pending_send_job_id != null) return;
+        if (!self.debug.node_service_snapshot_pending) return;
 
         const now = std.time.milliTimestamp();
-        if (now < self.node_service_snapshot_retry_at_ms) return;
+        if (now < self.debug.node_service_snapshot_retry_at_ms) return;
 
         self.submitFilesystemRequestWithMode(.read_file, NODE_SERVICE_EVENTS_PATH, false, true) catch |err| {
             if (err != error.Busy and err != error.NotConnected) {
                 std.log.debug("node service snapshot poll skipped: {s}", .{@errorName(err)});
             }
-            self.node_service_snapshot_pending = true;
-            self.node_service_snapshot_retry_at_ms = now + NODE_SERVICE_SNAPSHOT_RETRY_MS;
+            self.debug.node_service_snapshot_pending = true;
+            self.debug.node_service_snapshot_retry_at_ms = now + NODE_SERVICE_SNAPSHOT_RETRY_MS;
             return;
         };
     }
 
     fn requestDebugStreamSnapshot(self: *App, immediate: bool) void {
-        self.debug_stream_snapshot_pending = true;
+        self.debug.debug_stream_snapshot_pending = true;
         if (immediate) {
-            self.debug_stream_snapshot_retry_at_ms = 0;
-        } else if (self.debug_stream_snapshot_retry_at_ms == 0) {
-            self.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
+            self.debug.debug_stream_snapshot_retry_at_ms = 0;
+        } else if (self.debug.debug_stream_snapshot_retry_at_ms == 0) {
+            self.debug.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
         }
     }
 
     fn requestNodeServiceSnapshot(self: *App, immediate: bool) void {
-        self.node_service_snapshot_pending = true;
+        self.debug.node_service_snapshot_pending = true;
         if (immediate) {
-            self.node_service_snapshot_retry_at_ms = 0;
-        } else if (self.node_service_snapshot_retry_at_ms == 0) {
-            self.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
+            self.debug.node_service_snapshot_retry_at_ms = 0;
+        } else if (self.debug.node_service_snapshot_retry_at_ms == 0) {
+            self.debug.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
         }
     }
 
     fn handleFilesystemWorkerResult(self: *App, result: *const FilesystemRequestResult) void {
-        const active = self.filesystem_active_request orelse return;
+        const active = self.fs.filesystem_active_request orelse return;
         if (active.id != result.id) return;
         const request_finished_ms = std.time.milliTimestamp();
         const request_duration_ms: f32 = @as(f32, @floatFromInt(@max(0, request_finished_ms - active.started_at_ms)));
 
-        self.filesystem_active_request = null;
-        if (!active.is_background) self.filesystem_busy = false;
+        self.fs.filesystem_active_request = null;
+        if (!active.is_background) self.fs.filesystem_busy = false;
         if (!active.is_background) {
-            self.filesystem_last_request_duration_ms = request_duration_ms;
+            self.fs.filesystem_last_request_duration_ms = request_duration_ms;
         }
 
         const is_debug_stream_result = std.mem.eql(u8, result.path, DEBUG_STREAM_PATH);
         if (is_debug_stream_result) {
             if (result.error_text) |_| {
-                self.debug_stream_snapshot_pending = true;
-                self.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
+                self.debug.debug_stream_snapshot_pending = true;
+                self.debug.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
                 return;
             }
             const content = result.content orelse {
-                self.debug_stream_snapshot_pending = true;
-                self.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
+                self.debug.debug_stream_snapshot_pending = true;
+                self.debug.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
                 return;
             };
             self.mergeDebugStreamSnapshot(content) catch |err| {
@@ -4212,33 +4204,33 @@ const App = struct {
             };
             // Keep polling while debug stream is enabled so new events arrive
             // without requiring manual refresh.
-            self.debug_stream_snapshot_pending = true;
-            self.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
+            self.debug.debug_stream_snapshot_pending = true;
+            self.debug.debug_stream_snapshot_retry_at_ms = std.time.milliTimestamp() + DEBUG_STREAM_SNAPSHOT_RETRY_MS;
             return;
         }
 
         const is_node_service_snapshot = std.mem.eql(u8, result.path, NODE_SERVICE_EVENTS_PATH);
         if (is_node_service_snapshot) {
             if (result.error_text) |_| {
-                if (self.node_service_watch_enabled) {
-                    self.node_service_snapshot_pending = true;
-                    self.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
+                if (self.debug.node_service_watch_enabled) {
+                    self.debug.node_service_snapshot_pending = true;
+                    self.debug.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
                 }
                 return;
             }
             const content = result.content orelse {
-                if (self.node_service_watch_enabled) {
-                    self.node_service_snapshot_pending = true;
-                    self.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
+                if (self.debug.node_service_watch_enabled) {
+                    self.debug.node_service_snapshot_pending = true;
+                    self.debug.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
                 }
                 return;
             };
             self.ingestNodeServiceSnapshotLines(content) catch |err| {
                 std.log.warn("node service snapshot merge failed: {s}", .{@errorName(err)});
             };
-            if (self.node_service_watch_enabled) {
-                self.node_service_snapshot_pending = true;
-                self.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
+            if (self.debug.node_service_watch_enabled) {
+                self.debug.node_service_snapshot_pending = true;
+                self.debug.node_service_snapshot_retry_at_ms = std.time.milliTimestamp() + NODE_SERVICE_SNAPSHOT_RETRY_MS;
             }
             return;
         }
@@ -4284,7 +4276,7 @@ const App = struct {
                 const resolved_kind: FilesystemEntryKind = if (is_dir) .directory else .file;
                 self.updateFilesystemEntryKind(result.path, resolved_kind);
                 if (!active.open_after_resolve) {
-                    if (self.filesystem_selected_path) |selected| {
+                    if (self.fs.filesystem_selected_path) |selected| {
                         if (std.mem.eql(u8, selected, result.path)) {
                             self.refreshSelectedFilesystemPreview() catch |err| {
                                 const msg = std.fmt.allocPrint(self.allocator, "Filesystem preview failed: {s}", .{@errorName(err)}) catch null;
@@ -4357,10 +4349,10 @@ const App = struct {
         return switch (self.settings_panel.focused_field) {
             .server_url => &self.settings_panel.server_url,
             .project_id => &self.settings_panel.project_id,
-            .launcher_project_filter => &self.launcher_project_filter,
-            .launcher_profile_name => &self.launcher_profile_name,
-            .launcher_profile_metadata => &self.launcher_profile_metadata,
-            .launcher_connect_token => &self.launcher_connect_token,
+            .launcher_project_filter => &self.ws.launcher_project_filter,
+            .launcher_profile_name => &self.ws.launcher_profile_name,
+            .launcher_profile_metadata => &self.ws.launcher_profile_metadata,
+            .launcher_connect_token => &self.ws.launcher_connect_token,
             .project_token => &self.settings_panel.project_token,
             .project_create_name => &self.settings_panel.project_create_name,
             .project_create_vision => &self.settings_panel.project_create_vision,
@@ -4374,14 +4366,12 @@ const App = struct {
             .default_session => &self.settings_panel.default_session,
             .default_agent => &self.settings_panel.default_agent,
             .theme_pack => &self.settings_panel.theme_pack,
-            .node_watch_filter => &self.node_service_watch_filter,
-            .node_watch_replay_limit => &self.node_service_watch_replay_limit,
-            .debug_search_filter => &self.debug_search_filter,
+            .node_watch_filter => &self.debug.node_service_watch_filter,
+            .node_watch_replay_limit => &self.debug.node_service_watch_replay_limit,
+            .debug_search_filter => &self.debug.debug_search_filter,
             .perf_benchmark_label => &self.perf_benchmark_label_input,
-            .filesystem_contract_payload => &self.contract_invoke_payload,
-            .package_manager_install_payload => &self.package_manager_install_payload,
-            .about_modal_build_label => &self.about_modal_build_label,
-            .terminal_command_input => &self.terminal_input,
+            .filesystem_contract_payload => &self.fs.contract_invoke_payload,
+            .terminal_command_input => &self.terminal.terminal_input,
             .none => null,
         };
     }
@@ -4753,19 +4743,19 @@ const App = struct {
                 }
             },
             .c => {
-                if (key_evt.mods.ctrl and !key_evt.repeat and self.debug_selected_index != null) {
+                if (key_evt.mods.ctrl and !key_evt.repeat and self.debug.debug_selected_index != null) {
                     var allow_copy = false;
-                    if (self.debug_panel_id != null and self.isPanelFocused(manager, self.debug_panel_id.?)) {
+                    if (self.debug.debug_panel_id != null and self.isPanelFocused(manager, self.debug.debug_panel_id.?)) {
                         allow_copy = true;
                     }
                     // Also allow Ctrl+C when mouse is over the debug output area
-                    if (self.debug_output_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+                    if (self.debug.debug_output_rect.contains(.{ self.mouse_x, self.mouse_y })) {
                         allow_copy = true;
                     }
                     if (allow_copy) {
-                        if (self.debug_selected_index) |sel_idx| {
-                            if (sel_idx < self.debug_events.items.len) {
-                                const entry = self.debug_events.items[sel_idx];
+                        if (self.debug.debug_selected_index) |sel_idx| {
+                            if (sel_idx < self.debug.debug_events.items.len) {
+                                const entry = self.debug.debug_events.items[sel_idx];
                                 const to_copy = std.fmt.allocPrint(
                                     self.allocator,
                                     "{d} {s} {s}",
@@ -4789,10 +4779,10 @@ const App = struct {
                 }
             },
             .page_up => {
-                if (self.debug_panel_id) |panel_id| {
+                if (self.debug.debug_panel_id) |panel_id| {
                     if (self.isPanelFocused(manager, panel_id)) {
-                        self.debug_scroll_y -= 200.0 * self.ui_scale;
-                        if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
+                        self.debug.debug_scroll_y -= 200.0 * self.ui_scale;
+                        if (self.debug.debug_scroll_y < 0.0) self.debug.debug_scroll_y = 0.0;
                     }
                 }
                 if (self.focusedFormScrollY(manager)) |scroll_y| {
@@ -4801,9 +4791,9 @@ const App = struct {
                 }
             },
             .page_down => {
-                if (self.debug_panel_id) |panel_id| {
+                if (self.debug.debug_panel_id) |panel_id| {
                     if (self.isPanelFocused(manager, panel_id)) {
-                        self.debug_scroll_y += 200.0 * self.ui_scale;
+                        self.debug.debug_scroll_y += 200.0 * self.ui_scale;
                     }
                 }
                 if (self.focusedFormScrollY(manager)) |scroll_y| {
@@ -4811,9 +4801,9 @@ const App = struct {
                 }
             },
             .home => {
-                if (self.debug_panel_id) |panel_id| {
+                if (self.debug.debug_panel_id) |panel_id| {
                     if (self.isPanelFocused(manager, panel_id)) {
-                        self.debug_scroll_y = 0.0;
+                        self.debug.debug_scroll_y = 0.0;
                     }
                 }
                 if (self.focusedFormScrollY(manager)) |scroll_y| {
@@ -4821,10 +4811,10 @@ const App = struct {
                 }
             },
             .end => {
-                if (self.debug_panel_id) |panel_id| {
+                if (self.debug.debug_panel_id) |panel_id| {
                     if (self.isPanelFocused(manager, panel_id)) {
                         // Move far down; clamped during render
-                        self.debug_scroll_y += 1_000_000.0;
+                        self.debug.debug_scroll_y += 1_000_000.0;
                     }
                 }
                 if (self.focusedFormScrollY(manager)) |scroll_y| {
@@ -4833,10 +4823,10 @@ const App = struct {
                 }
             },
             .up_arrow => {
-                if (self.debug_panel_id) |panel_id| {
+                if (self.debug.debug_panel_id) |panel_id| {
                     if (self.isPanelFocused(manager, panel_id)) {
-                        self.debug_scroll_y -= 40.0 * self.ui_scale;
-                        if (self.debug_scroll_y < 0.0) self.debug_scroll_y = 0.0;
+                        self.debug.debug_scroll_y -= 40.0 * self.ui_scale;
+                        if (self.debug.debug_scroll_y < 0.0) self.debug.debug_scroll_y = 0.0;
                     }
                 }
                 if (self.focusedFormScrollY(manager)) |scroll_y| {
@@ -4845,9 +4835,9 @@ const App = struct {
                 }
             },
             .down_arrow => {
-                if (self.debug_panel_id) |panel_id| {
+                if (self.debug.debug_panel_id) |panel_id| {
                     if (self.isPanelFocused(manager, panel_id)) {
-                        self.debug_scroll_y += 40.0 * self.ui_scale;
+                        self.debug.debug_scroll_y += 40.0 * self.ui_scale;
                     }
                 }
                 if (self.focusedFormScrollY(manager)) |scroll_y| {
@@ -4926,43 +4916,49 @@ const App = struct {
     }
 
     fn clearWorkspaceData(self: *App) void {
-        workspace_types.deinitWorkspaceList(self.allocator, &self.projects);
-        workspace_types.deinitNodeList(self.allocator, &self.nodes);
-        self.workspace_selector_open = false;
-        self.launcher_create_modal_open = false;
-        self.launcher_create_selected_template_index = 0;
-        self.launcher_create_template_page = 0;
-        workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.launcher_create_templates);
-        if (self.launcher_create_modal_error) |value| {
+        workspace_types.deinitWorkspaceList(self.allocator, &self.ws.projects);
+        workspace_types.deinitNodeList(self.allocator, &self.ws.nodes);
+        self.ws.workspace_selector_open = false;
+        self.ws.launcher_create_modal_open = false;
+        self.ws.launcher_create_selected_template_index = 0;
+        self.ws.launcher_create_template_page = 0;
+        workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.ws.launcher_create_templates);
+        if (self.ws.launcher_create_modal_error) |value| {
             self.allocator.free(value);
-            self.launcher_create_modal_error = null;
+            self.ws.launcher_create_modal_error = null;
         }
         self.clearConnectSetupHint();
-        if (self.workspace_state) |*status| {
+        if (self.ws.workspace_state) |*status| {
             status.deinit(self.allocator);
-            self.workspace_state = null;
+            self.ws.workspace_state = null;
         }
-        if (self.workspace_last_error) |value| {
+        if (self.ws.workspace_last_error) |value| {
             self.allocator.free(value);
-            self.workspace_last_error = null;
+            self.ws.workspace_last_error = null;
         }
-        self.workspace_last_refresh_ms = 0;
+        self.ws.workspace_last_refresh_ms = 0;
+        if (self.ws.selected_workspace_detail) |*detail| {
+            detail.deinit(self.allocator);
+            self.ws.selected_workspace_detail = null;
+        }
+        self.ws.workspace_selected_mount_index = null;
+        self.ws.workspace_selected_bind_index = null;
         self.clearMissionDashboardData();
     }
 
     fn clearMissionDashboardData(self: *App) void {
-        for (self.mission_records.items) |*mission| mission.deinit(self.allocator);
-        self.mission_records.deinit(self.allocator);
-        self.mission_records = .{};
-        if (self.mission_selected_id) |value| {
+        for (self.mission.records.items) |*mission| mission.deinit(self.allocator);
+        self.mission.records.deinit(self.allocator);
+        self.mission.records = .{};
+        if (self.mission.selected_id) |value| {
             self.allocator.free(value);
-            self.mission_selected_id = null;
+            self.mission.selected_id = null;
         }
-        if (self.mission_last_error) |value| {
+        if (self.mission.last_error) |value| {
             self.allocator.free(value);
-            self.mission_last_error = null;
+            self.mission.last_error = null;
         }
-        self.mission_last_refresh_ms = 0;
+        self.mission.last_refresh_ms = 0;
         self.client_context.clearWorkboardItems();
         self.client_context.clearApprovals();
         self.client_context.clearPendingWorkboardRequest();
@@ -4970,194 +4966,191 @@ const App = struct {
     }
 
     fn setMissionDashboardError(self: *App, message: []const u8) void {
-        if (self.mission_last_error) |value| {
+        if (self.mission.last_error) |value| {
             self.allocator.free(value);
-            self.mission_last_error = null;
+            self.mission.last_error = null;
         }
-        self.mission_last_error = self.allocator.dupe(u8, message) catch null;
+        self.mission.last_error = self.allocator.dupe(u8, message) catch null;
     }
 
     fn clearMissionDashboardError(self: *App) void {
-        if (self.mission_last_error) |value| {
+        if (self.mission.last_error) |value| {
             self.allocator.free(value);
-            self.mission_last_error = null;
+            self.mission.last_error = null;
         }
     }
 
     fn clearFilesystemEntries(self: *App) void {
-        for (self.filesystem_entries.items) |*entry| entry.deinit(self.allocator);
-        self.filesystem_entries.deinit(self.allocator);
-        self.filesystem_entries = .{};
+        for (self.fs.filesystem_entries.items) |*entry| entry.deinit(self.allocator);
+        self.fs.filesystem_entries.deinit(self.allocator);
+        self.fs.filesystem_entries = .{};
     }
 
     fn setFilesystemSelectedPath(self: *App, path: ?[]const u8) void {
-        if (self.filesystem_selected_path) |value| {
+        if (self.fs.filesystem_selected_path) |value| {
             self.allocator.free(value);
-            self.filesystem_selected_path = null;
+            self.fs.filesystem_selected_path = null;
         }
         if (path) |value| {
-            self.filesystem_selected_path = self.allocator.dupe(u8, value) catch null;
+            self.fs.filesystem_selected_path = self.allocator.dupe(u8, value) catch null;
         }
     }
 
     fn clearFilesystemPreviewState(self: *App) void {
-        if (self.filesystem_preview_path) |value| {
+        if (self.fs.filesystem_preview_path) |value| {
             self.allocator.free(value);
-            self.filesystem_preview_path = null;
+            self.fs.filesystem_preview_path = null;
         }
-        if (self.filesystem_preview_text) |value| {
+        if (self.fs.filesystem_preview_text) |value| {
             self.allocator.free(value);
-            self.filesystem_preview_text = null;
+            self.fs.filesystem_preview_text = null;
         }
-        if (self.filesystem_preview_status) |value| {
+        if (self.fs.filesystem_preview_status) |value| {
             self.allocator.free(value);
-            self.filesystem_preview_status = null;
+            self.fs.filesystem_preview_status = null;
         }
-        self.filesystem_preview_mode = .empty;
-        self.filesystem_preview_kind = .unknown;
-        self.filesystem_preview_size_bytes = null;
-        self.filesystem_preview_modified_unix_ms = null;
+        self.fs.filesystem_preview_mode = .empty;
+        self.fs.filesystem_preview_kind = .unknown;
+        self.fs.filesystem_preview_size_bytes = null;
+        self.fs.filesystem_preview_modified_unix_ms = null;
     }
 
     fn clearFilesystemData(self: *App) void {
         self.clearFilesystemEntries();
         self.setFilesystemSelectedPath(null);
         self.clearFilesystemPreviewState();
-        self.filesystem_entry_scroll_y = 0;
-        self.filesystem_entry_scrollbar_dragging = false;
-        self.filesystem_entry_scrollbar_drag_anchor = 0;
-        self.filesystem_entry_scrollbar_drag_scroll = 0;
-        self.filesystem_last_clicked_entry_index = null;
-        self.filesystem_last_click_ms = 0;
-        if (self.filesystem_error) |value| {
+        self.fs.filesystem_entry_page = 0;
+        self.fs.filesystem_last_clicked_entry_index = null;
+        self.fs.filesystem_last_click_ms = 0;
+        if (self.fs.filesystem_error) |value| {
             self.allocator.free(value);
-            self.filesystem_error = null;
+            self.fs.filesystem_error = null;
         }
     }
 
     fn clearContractServices(self: *App) void {
-        for (self.contract_services.items) |*entry| entry.deinit(self.allocator);
-        self.contract_services.deinit(self.allocator);
-        self.contract_services = .{};
-        self.contract_service_selected_index = 0;
+        for (self.fs.contract_services.items) |*entry| entry.deinit(self.allocator);
+        self.fs.contract_services.deinit(self.allocator);
+        self.fs.contract_services = .{};
+        self.fs.contract_service_selected_index = 0;
     }
 
     fn setFilesystemError(self: *App, message: []const u8) void {
-        if (self.filesystem_error) |value| {
+        if (self.fs.filesystem_error) |value| {
             self.allocator.free(value);
-            self.filesystem_error = null;
+            self.fs.filesystem_error = null;
         }
-        self.filesystem_error = self.allocator.dupe(u8, message) catch null;
+        self.fs.filesystem_error = self.allocator.dupe(u8, message) catch null;
     }
 
     fn clearFilesystemError(self: *App) void {
-        if (self.filesystem_error) |value| {
+        if (self.fs.filesystem_error) |value| {
             self.allocator.free(value);
-            self.filesystem_error = null;
+            self.fs.filesystem_error = null;
         }
     }
 
     fn setTerminalStatus(self: *App, message: []const u8) void {
-        if (self.terminal_status) |value| {
+        if (self.terminal.terminal_status) |value| {
             self.allocator.free(value);
-            self.terminal_status = null;
+            self.terminal.terminal_status = null;
         }
-        self.terminal_status = self.allocator.dupe(u8, message) catch null;
+        self.terminal.terminal_status = self.allocator.dupe(u8, message) catch null;
     }
 
     fn clearTerminalStatus(self: *App) void {
-        if (self.terminal_status) |value| {
+        if (self.terminal.terminal_status) |value| {
             self.allocator.free(value);
-            self.terminal_status = null;
+            self.terminal.terminal_status = null;
         }
     }
 
     fn setTerminalError(self: *App, message: []const u8) void {
-        if (self.terminal_error) |value| {
+        if (self.terminal.terminal_error) |value| {
             self.allocator.free(value);
-            self.terminal_error = null;
+            self.terminal.terminal_error = null;
         }
-        self.terminal_error = self.allocator.dupe(u8, message) catch null;
+        self.terminal.terminal_error = self.allocator.dupe(u8, message) catch null;
     }
 
     fn clearTerminalError(self: *App) void {
-        if (self.terminal_error) |value| {
+        if (self.terminal.terminal_error) |value| {
             self.allocator.free(value);
-            self.terminal_error = null;
+            self.terminal.terminal_error = null;
         }
     }
 
     fn clearTerminalState(self: *App) void {
-        if (self.terminal_session_id) |value| {
+        if (self.terminal.terminal_session_id) |value| {
             self.allocator.free(value);
-            self.terminal_session_id = null;
+            self.terminal.terminal_session_id = null;
         }
-        self.terminal_next_poll_at_ms = 0;
+        self.terminal.terminal_next_poll_at_ms = 0;
         self.clearTerminalStatus();
         self.clearTerminalError();
     }
 
     fn applySelectedTerminalBackend(self: *App) void {
         const next_kind = self.settings_panel.terminal_backend_kind;
-        if (self.terminal_backend_kind == next_kind) return;
+        if (self.terminal.terminal_backend_kind == next_kind) return;
 
-        const snapshot = self.allocator.dupe(u8, self.terminal_backend.text()) catch null;
+        const snapshot = self.allocator.dupe(u8, self.terminal.terminal_backend.text()) catch null;
         defer if (snapshot) |value| self.allocator.free(value);
 
-        self.terminal_backend.deinit(self.allocator);
-        self.terminal_backend = initTerminalBackend(next_kind);
-        self.terminal_backend_kind = next_kind;
+        self.terminal.terminal_backend.deinit(self.allocator);
+        self.terminal.terminal_backend = initTerminalBackend(next_kind);
+        self.terminal.terminal_backend_kind = next_kind;
 
         if (snapshot) |value| {
-            _ = self.terminal_backend.appendBytes(self.allocator, value) catch {};
+            _ = self.terminal.terminal_backend.appendBytes(self.allocator, value) catch {};
         }
 
         const status = std.fmt.allocPrint(
             self.allocator,
             "Terminal backend switched to {s}",
-            .{terminal_render_backend.Backend.kindName(self.terminal_backend_kind)},
+            .{terminal_render_backend.Backend.kindName(self.terminal.terminal_backend_kind)},
         ) catch null;
         defer if (status) |value| self.allocator.free(value);
         self.setTerminalStatus(status orelse "Terminal backend switched");
     }
 
     fn clearFilesystemDirCache(self: *App) void {
-        var it = self.filesystem_dir_cache.iterator();
+        var it = self.fs.filesystem_dir_cache.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
             entry.value_ptr.deinit(self.allocator);
         }
-        self.filesystem_dir_cache.deinit(self.allocator);
-        self.filesystem_dir_cache = .{};
+        self.fs.filesystem_dir_cache.deinit(self.allocator);
+        self.fs.filesystem_dir_cache = .{};
     }
 
     fn clearPendingFilesystemPathLoad(self: *App) void {
-        if (self.filesystem_pending_path) |value| {
+        if (self.fs.filesystem_pending_path) |value| {
             self.allocator.free(value);
-            self.filesystem_pending_path = null;
+            self.fs.filesystem_pending_path = null;
         }
-        self.filesystem_pending_use_cache = false;
-        self.filesystem_pending_force_refresh = false;
-        self.filesystem_pending_retry_at_ms = 0;
+        self.fs.filesystem_pending_use_cache = false;
+        self.fs.filesystem_pending_force_refresh = false;
+        self.fs.filesystem_pending_retry_at_ms = 0;
     }
 
     fn schedulePendingFilesystemPathLoad(self: *App, path: []const u8, use_cache: bool, force_refresh: bool) void {
         self.clearPendingFilesystemPathLoad();
-        self.filesystem_pending_path = self.allocator.dupe(u8, path) catch null;
-        self.filesystem_pending_use_cache = use_cache;
-        self.filesystem_pending_force_refresh = force_refresh;
-        self.filesystem_pending_retry_at_ms = std.time.milliTimestamp() + 50;
+        self.fs.filesystem_pending_path = self.allocator.dupe(u8, path) catch null;
+        self.fs.filesystem_pending_use_cache = use_cache;
+        self.fs.filesystem_pending_force_refresh = force_refresh;
+        self.fs.filesystem_pending_retry_at_ms = std.time.milliTimestamp() + 50;
     }
 
     fn requestFilesystemBrowserRefresh(self: *App, force_refresh: bool) void {
-        const current_path = if (self.filesystem_path.items.len > 0) self.filesystem_path.items else "/";
+        const current_path = if (self.fs.filesystem_path.items.len > 0) self.fs.filesystem_path.items else "/";
         self.schedulePendingFilesystemPathLoad(current_path, false, force_refresh);
-        self.filesystem_pending_retry_at_ms = 0;
+        self.fs.filesystem_pending_retry_at_ms = 0;
         self.pollFilesystemWorker();
     }
 
     fn invalidateFilesystemDirCachePath(self: *App, path: []const u8) void {
-        if (self.filesystem_dir_cache.fetchRemove(path)) |removed| {
+        if (self.fs.filesystem_dir_cache.fetchRemove(path)) |removed| {
             self.allocator.free(removed.key);
             var value = removed.value;
             value.deinit(self.allocator);
@@ -5165,7 +5158,7 @@ const App = struct {
     }
 
     fn putFilesystemDirCache(self: *App, path: []const u8, listing: []const u8) !void {
-        if (self.filesystem_dir_cache.getEntry(path)) |entry| {
+        if (self.fs.filesystem_dir_cache.getEntry(path)) |entry| {
             entry.value_ptr.deinit(self.allocator);
             entry.value_ptr.* = .{
                 .listing = try self.allocator.dupe(u8, listing),
@@ -5176,7 +5169,7 @@ const App = struct {
 
         const key_copy = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(key_copy);
-        try self.filesystem_dir_cache.put(self.allocator, key_copy, .{
+        try self.fs.filesystem_dir_cache.put(self.allocator, key_copy, .{
             .listing = try self.allocator.dupe(u8, listing),
             .cached_at_ms = std.time.milliTimestamp(),
         });
@@ -5184,7 +5177,7 @@ const App = struct {
 
     fn cachedFilesystemListing(self: *App, path: []const u8) ?[]const u8 {
         const now_ms = std.time.milliTimestamp();
-        if (self.filesystem_dir_cache.getEntry(path)) |entry| {
+        if (self.fs.filesystem_dir_cache.getEntry(path)) |entry| {
             if (now_ms - entry.value_ptr.cached_at_ms <= FILESYSTEM_DIR_CACHE_TTL_MS) {
                 return entry.value_ptr.listing;
             }
@@ -5209,21 +5202,25 @@ const App = struct {
         _ = project_id;
         _ = project_token;
         self.stopFilesystemWorker();
-        self.filesystem_busy = false;
-        self.filesystem_active_request = null;
+        self.fs.filesystem_busy = false;
+        self.fs.filesystem_active_request = null;
         self.clearFilesystemError();
     }
 
     fn stopFilesystemWorker(self: *App) void {
-        self.filesystem_busy = false;
-        self.filesystem_active_request = null;
+        self.fs.filesystem_busy = false;
+        self.fs.filesystem_active_request = null;
     }
 
     fn resetFsrpcConnectionState(self: *App) void {
+        self.fs.fsrpc_ready = false;
+        self.fs.next_fsrpc_tag = 1;
+        self.fs.next_fsrpc_fid = 2;
         self.clearFsrpcRemoteError();
     }
 
     fn invalidateFsrpcAttachment(self: *App) void {
+        self.fs.fsrpc_ready = false;
         self.clearFsrpcRemoteError();
     }
 
@@ -5243,29 +5240,29 @@ const App = struct {
         open_after_resolve: bool,
         is_background: bool,
     ) !void {
-        if (is_background and (self.awaiting_reply or self.pending_send_job_id != null)) {
+        if (is_background and (self.chat.awaiting_reply or self.chat.pending_send_job_id != null)) {
             return error.Busy;
         }
-        if (self.filesystem_active_request != null) return error.Busy;
+        if (self.fs.filesystem_active_request != null) return error.Busy;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        const request_id = self.filesystem_next_request_id;
-        self.filesystem_next_request_id +%= 1;
-        if (self.filesystem_next_request_id == 0) self.filesystem_next_request_id = 1;
+        const request_id = self.fs.filesystem_next_request_id;
+        self.fs.filesystem_next_request_id +%= 1;
+        if (self.fs.filesystem_next_request_id == 0) self.fs.filesystem_next_request_id = 1;
 
-        self.filesystem_active_request = .{
+        self.fs.filesystem_active_request = .{
             .id = request_id,
             .kind = kind,
             .open_after_resolve = open_after_resolve,
             .is_background = is_background,
             .started_at_ms = std.time.milliTimestamp(),
         };
-        if (!is_background) self.filesystem_busy = true;
+        if (!is_background) self.fs.filesystem_busy = true;
 
         var request_completed = false;
         errdefer {
             if (!request_completed) {
-                self.filesystem_active_request = null;
-                if (!is_background) self.filesystem_busy = false;
+                self.fs.filesystem_active_request = null;
+                if (!is_background) self.fs.filesystem_busy = false;
             }
         }
 
@@ -5441,14 +5438,14 @@ const App = struct {
     }
 
     fn findFilesystemEntryByPath(self: *App, path: []const u8) ?*FilesystemEntry {
-        for (self.filesystem_entries.items) |*entry| {
+        for (self.fs.filesystem_entries.items) |*entry| {
             if (std.mem.eql(u8, entry.path, path)) return entry;
         }
         return null;
     }
 
     fn selectedFilesystemEntry(self: *App) ?*FilesystemEntry {
-        const selected = self.filesystem_selected_path orelse return null;
+        const selected = self.fs.filesystem_selected_path orelse return null;
         return self.findFilesystemEntryByPath(selected);
     }
 
@@ -5504,12 +5501,12 @@ const App = struct {
         status: []const u8,
     ) !void {
         self.clearFilesystemPreviewState();
-        self.filesystem_preview_path = try self.allocator.dupe(u8, path);
-        self.filesystem_preview_kind = kind;
-        self.filesystem_preview_size_bytes = size_bytes;
-        self.filesystem_preview_modified_unix_ms = modified_unix_ms;
-        self.filesystem_preview_mode = mode;
-        self.filesystem_preview_status = try self.allocator.dupe(u8, status);
+        self.fs.filesystem_preview_path = try self.allocator.dupe(u8, path);
+        self.fs.filesystem_preview_kind = kind;
+        self.fs.filesystem_preview_size_bytes = size_bytes;
+        self.fs.filesystem_preview_modified_unix_ms = modified_unix_ms;
+        self.fs.filesystem_preview_mode = mode;
+        self.fs.filesystem_preview_status = try self.allocator.dupe(u8, status);
     }
 
     fn refreshSelectedFilesystemPreview(self: *App) !void {
@@ -5564,7 +5561,7 @@ const App = struct {
     }
 
     fn applyFilesystemListing(self: *App, path: []const u8, listing: []const u8) !void {
-        const previous_selected_path = if (self.filesystem_selected_path) |value|
+        const previous_selected_path = if (self.fs.filesystem_selected_path) |value|
             self.allocator.dupe(u8, value) catch null
         else
             null;
@@ -5604,7 +5601,7 @@ const App = struct {
                 }
             }
 
-            try self.filesystem_entries.append(self.allocator, entry);
+            try self.fs.filesystem_entries.append(self.allocator, entry);
         }
 
         if (previous_selected_path) |selected_path| {
@@ -5617,33 +5614,33 @@ const App = struct {
 
     fn applyFilesystemPreview(self: *App, path: []const u8, content: []const u8) !void {
         self.clearFilesystemPreviewState();
-        self.filesystem_preview_path = try self.allocator.dupe(u8, path);
+        self.fs.filesystem_preview_path = try self.allocator.dupe(u8, path);
 
         if (self.findFilesystemEntryByPath(path)) |entry| {
-            self.filesystem_preview_kind = entry.kind;
-            self.filesystem_preview_size_bytes = entry.size_bytes orelse content.len;
-            self.filesystem_preview_modified_unix_ms = entry.modified_unix_ms;
+            self.fs.filesystem_preview_kind = entry.kind;
+            self.fs.filesystem_preview_size_bytes = entry.size_bytes orelse content.len;
+            self.fs.filesystem_preview_modified_unix_ms = entry.modified_unix_ms;
         } else {
-            self.filesystem_preview_kind = .file;
-            self.filesystem_preview_size_bytes = content.len;
+            self.fs.filesystem_preview_kind = .file;
+            self.fs.filesystem_preview_size_bytes = content.len;
         }
 
         const preview_mode = inferFilesystemPreviewMode(path, content);
-        self.filesystem_preview_mode = preview_mode;
+        self.fs.filesystem_preview_mode = preview_mode;
         switch (preview_mode) {
             .text => {
-                self.filesystem_preview_status = try self.allocator.dupe(u8, "Text preview");
-                self.filesystem_preview_text = try self.truncateFilesystemPreviewText(content);
+                self.fs.filesystem_preview_status = try self.allocator.dupe(u8, "Text preview");
+                self.fs.filesystem_preview_text = try self.truncateFilesystemPreviewText(content);
             },
             .json => {
-                self.filesystem_preview_status = try self.allocator.dupe(u8, "JSON preview");
-                self.filesystem_preview_text = try self.truncateFilesystemPreviewText(content);
+                self.fs.filesystem_preview_status = try self.allocator.dupe(u8, "JSON preview");
+                self.fs.filesystem_preview_text = try self.truncateFilesystemPreviewText(content);
             },
             .empty => {
-                self.filesystem_preview_status = try self.allocator.dupe(u8, "Empty file");
+                self.fs.filesystem_preview_status = try self.allocator.dupe(u8, "Empty file");
             },
             .unsupported => {
-                self.filesystem_preview_status = try self.allocator.dupe(u8, "Preview unavailable for binary or unsupported content.");
+                self.fs.filesystem_preview_status = try self.allocator.dupe(u8, "Preview unavailable for binary or unsupported content.");
             },
             .loading => {},
         }
@@ -5651,19 +5648,19 @@ const App = struct {
 
     fn setFsrpcRemoteError(self: *App, message: []const u8) void {
         self.clearFsrpcRemoteError();
-        self.fsrpc_last_remote_error = self.allocator.dupe(u8, message) catch null;
+        self.fs.fsrpc_last_remote_error = self.allocator.dupe(u8, message) catch null;
     }
 
     fn clearFsrpcRemoteError(self: *App) void {
-        if (self.fsrpc_last_remote_error) |value| {
+        if (self.fs.fsrpc_last_remote_error) |value| {
             self.allocator.free(value);
-            self.fsrpc_last_remote_error = null;
+            self.fs.fsrpc_last_remote_error = null;
         }
     }
 
     fn formatFilesystemOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
         if (err == error.RemoteError or err == error.RuntimeWarming) {
-            if (self.fsrpc_last_remote_error) |remote| {
+            if (self.fs.fsrpc_last_remote_error) |remote| {
                 return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
             }
         }
@@ -5821,17 +5818,17 @@ const App = struct {
     }
 
     fn setWorkspaceError(self: *App, message: []const u8) void {
-        if (self.workspace_last_error) |value| {
+        if (self.ws.workspace_last_error) |value| {
             self.allocator.free(value);
-            self.workspace_last_error = null;
+            self.ws.workspace_last_error = null;
         }
-        self.workspace_last_error = self.allocator.dupe(u8, message) catch null;
+        self.ws.workspace_last_error = self.allocator.dupe(u8, message) catch null;
     }
 
     fn clearWorkspaceError(self: *App) void {
-        if (self.workspace_last_error) |value| {
+        if (self.ws.workspace_last_error) |value| {
             self.allocator.free(value);
-            self.workspace_last_error = null;
+            self.ws.workspace_last_error = null;
         }
     }
 
@@ -5912,7 +5909,7 @@ const App = struct {
 
     fn selectedWorkspaceSummary(self: *const App) ?*const workspace_types.WorkspaceSummary {
         const workspace_id = self.selectedWorkspaceId() orelse return null;
-        for (self.projects.items) |*project| {
+        for (self.ws.projects.items) |*project| {
             if (std.mem.eql(u8, project.id, workspace_id)) return project;
         }
         return null;
@@ -5936,7 +5933,7 @@ const App = struct {
     fn selectWorkspaceInSettings(self: *App, workspace_id: []const u8) !void {
         self.settings_panel.project_id.clearRetainingCapacity();
         try self.settings_panel.project_id.appendSlice(self.allocator, workspace_id);
-        self.workspace_selector_open = false;
+        self.ws.workspace_selector_open = false;
         self.settings_panel.project_token.clearRetainingCapacity();
         if (!isSystemWorkspaceId(workspace_id)) {
             if (self.config.getWorkspaceToken(workspace_id)) |token| {
@@ -5944,6 +5941,12 @@ const App = struct {
             }
         }
         self.session_attach_state = .unknown;
+        if (self.ws.selected_workspace_detail) |*detail| {
+            detail.deinit(self.allocator);
+            self.ws.selected_workspace_detail = null;
+        }
+        self.ws.workspace_selected_mount_index = null;
+        self.ws.workspace_selected_bind_index = null;
         try self.syncSettingsToConfig();
     }
 
@@ -5992,18 +5995,52 @@ const App = struct {
         };
         errdefer workspace_status.deinit(self.allocator);
 
-        workspace_types.deinitWorkspaceList(self.allocator, &self.projects);
-        workspace_types.deinitNodeList(self.allocator, &self.nodes);
-        if (self.workspace_state) |*status| status.deinit(self.allocator);
+        workspace_types.deinitWorkspaceList(self.allocator, &self.ws.projects);
+        workspace_types.deinitNodeList(self.allocator, &self.ws.nodes);
+        if (self.ws.workspace_state) |*status| status.deinit(self.allocator);
 
-        self.projects = projects;
-        self.nodes = nodes;
-        self.workspace_state = workspace_status;
-        self.workspace_last_refresh_ms = std.time.milliTimestamp();
+        self.ws.projects = projects;
+        self.ws.nodes = nodes;
+        self.ws.workspace_state = workspace_status;
+        self.ws.workspace_last_refresh_ms = std.time.milliTimestamp();
         if (selected_workspace_warning) |message| {
             self.setWorkspaceError(message);
         } else {
             self.clearWorkspaceError();
+        }
+
+        if (selected_workspace_id) |ws_id| {
+            const new_detail = control_plane.getWorkspace(
+                self.allocator,
+                client,
+                &self.message_counter,
+                ws_id,
+            ) catch null;
+            if (self.ws.selected_workspace_detail) |*old_detail| {
+                old_detail.deinit(self.allocator);
+            }
+            self.ws.selected_workspace_detail = new_detail;
+            // Validate selection indices against the refreshed arrays so a
+            // stale index cannot target the wrong row or enable remove actions
+            // for entries that no longer exist.
+            if (new_detail) |*d| {
+                if (self.ws.workspace_selected_mount_index) |mi| {
+                    if (mi >= d.mounts.items.len) self.ws.workspace_selected_mount_index = null;
+                }
+                if (self.ws.workspace_selected_bind_index) |bi| {
+                    if (bi >= d.binds.items.len) self.ws.workspace_selected_bind_index = null;
+                }
+            } else {
+                self.ws.workspace_selected_mount_index = null;
+                self.ws.workspace_selected_bind_index = null;
+            }
+        } else {
+            if (self.ws.selected_workspace_detail) |*old_detail| {
+                old_detail.deinit(self.allocator);
+                self.ws.selected_workspace_detail = null;
+            }
+            self.ws.workspace_selected_mount_index = null;
+            self.ws.workspace_selected_bind_index = null;
         }
 
         self.refreshMissionDashboardData() catch |err| {
@@ -6058,7 +6095,7 @@ const App = struct {
 
         self.client_context.setWorkboardItemsOwned(workboard_items);
         self.replaceMissionRecordsOwned(missions);
-        self.mission_last_refresh_ms = std.time.milliTimestamp();
+        self.mission.last_refresh_ms = std.time.milliTimestamp();
         self.clearMissionDashboardError();
     }
 
@@ -6066,7 +6103,7 @@ const App = struct {
         if (self.connection_state != .connected) return;
         if (self.client_context.pending_workboard_request_id != null) return;
         const now = std.time.milliTimestamp();
-        if (!force and self.mission_last_refresh_ms != 0 and now - self.mission_last_refresh_ms < MISSION_REFRESH_INTERVAL_MS) return;
+        if (!force and self.mission.last_refresh_ms != 0 and now - self.mission.last_refresh_ms < MISSION_REFRESH_INTERVAL_MS) return;
         self.refreshMissionDashboardData() catch |err| {
             if (self.formatMissionDashboardOpError("Refresh missions", err)) |message| {
                 defer self.allocator.free(message);
@@ -6078,31 +6115,31 @@ const App = struct {
     }
 
     fn replaceMissionRecordsOwned(self: *App, missions: std.ArrayListUnmanaged(MissionRecordView)) void {
-        for (self.mission_records.items) |*mission| mission.deinit(self.allocator);
-        self.mission_records.deinit(self.allocator);
-        self.mission_records = missions;
+        for (self.mission.records.items) |*mission| mission.deinit(self.allocator);
+        self.mission.records.deinit(self.allocator);
+        self.mission.records = missions;
         self.syncMissionSelection();
     }
 
     fn syncMissionSelection(self: *App) void {
-        if (self.mission_selected_id) |selected_id| {
-            for (self.mission_records.items) |*mission| {
+        if (self.mission.selected_id) |selected_id| {
+            for (self.mission.records.items) |*mission| {
                 if (std.mem.eql(u8, mission.mission_id, selected_id)) return;
             }
             self.allocator.free(selected_id);
-            self.mission_selected_id = null;
+            self.mission.selected_id = null;
         }
-        if (self.mission_selected_id == null and self.mission_records.items.len > 0) {
-            self.mission_selected_id = self.allocator.dupe(u8, self.mission_records.items[0].mission_id) catch null;
+        if (self.mission.selected_id == null and self.mission.records.items.len > 0) {
+            self.mission.selected_id = self.allocator.dupe(u8, self.mission.records.items[0].mission_id) catch null;
         }
     }
 
     fn selectedMission(self: *App) ?*MissionRecordView {
-        const selected_id = self.mission_selected_id orelse return if (self.mission_records.items.len > 0) &self.mission_records.items[0] else null;
-        for (self.mission_records.items) |*mission| {
+        const selected_id = self.mission.selected_id orelse return if (self.mission.records.items.len > 0) &self.mission.records.items[0] else null;
+        for (self.mission.records.items) |*mission| {
             if (std.mem.eql(u8, mission.mission_id, selected_id)) return mission;
         }
-        return if (self.mission_records.items.len > 0) &self.mission_records.items[0] else null;
+        return if (self.mission.records.items.len > 0) &self.mission.records.items[0] else null;
     }
 
     fn loadMissionAgentPacks(self: *App, client: *ws_client_mod.WebSocketClient) !std.ArrayListUnmanaged(MissionAgentPackView) {
@@ -6361,7 +6398,7 @@ const App = struct {
     }
 
     fn findMissionForApprovalId(self: *App, approval_id: []const u8) ?*MissionRecordView {
-        for (self.mission_records.items) |*mission| {
+        for (self.mission.records.items) |*mission| {
             if (mission.pending_approval) |approval| {
                 if (std.mem.eql(u8, approval.approval_id, approval_id)) return mission;
             }
@@ -6370,7 +6407,7 @@ const App = struct {
     }
 
     fn formatMissionDashboardOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
-        if (self.mission_last_error) |message| {
+        if (self.mission.last_error) |message| {
             return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, message }) catch null;
         }
         if (err == error.RemoteError) {
@@ -6378,7 +6415,7 @@ const App = struct {
                 return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
             }
         }
-        if (self.fsrpc_last_remote_error) |remote| {
+        if (self.fs.fsrpc_last_remote_error) |remote| {
             return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
         }
         return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, @errorName(err) }) catch null;
@@ -6399,9 +6436,9 @@ const App = struct {
         );
         errdefer status.deinit(self.allocator);
 
-        if (self.workspace_state) |*existing| existing.deinit(self.allocator);
-        self.workspace_state = status;
-        self.workspace_last_refresh_ms = std.time.milliTimestamp();
+        if (self.ws.workspace_state) |*existing| existing.deinit(self.allocator);
+        self.ws.workspace_state = status;
+        self.ws.workspace_last_refresh_ms = std.time.milliTimestamp();
         self.clearWorkspaceError();
         self.session_attach_state = .unknown;
         self.refreshMissionDashboardData() catch {};
@@ -6458,15 +6495,15 @@ const App = struct {
     }
 
     fn syncLauncherConnectTokenFromConfig(self: *App) !void {
-        self.launcher_connect_token.clearRetainingCapacity();
+        self.ws.launcher_connect_token.clearRetainingCapacity();
         const token = self.config.activeRoleToken();
         if (token.len > 0) {
-            try self.launcher_connect_token.appendSlice(self.allocator, token);
+            try self.ws.launcher_connect_token.appendSlice(self.allocator, token);
         }
     }
 
     fn persistLauncherConnectToken(self: *App) !void {
-        const token = std.mem.trim(u8, self.launcher_connect_token.items, " \t\r\n");
+        const token = std.mem.trim(u8, self.ws.launcher_connect_token.items, " \t\r\n");
         try self.setRoleToken(.admin, token, false);
         try self.setRoleToken(.user, token, false);
     }
@@ -6882,6 +6919,98 @@ const App = struct {
         self.clearWorkspaceError();
     }
 
+    fn buildLocalNodeTtlText(allocator: std.mem.Allocator, nodes: []const workspace_types.NodeInfo, node_id: []const u8) ![]u8 {
+        const now_ms = std.time.milliTimestamp();
+        for (nodes) |*node| {
+            if (!std.mem.eql(u8, node.node_id, node_id)) continue;
+            const remaining_ms = node.lease_expires_at_ms - now_ms;
+            if (remaining_ms <= 0) {
+                return allocator.dupe(u8, "expired");
+            }
+            const remaining_sec = @divTrunc(remaining_ms, 1000);
+            const remaining_min = @divTrunc(remaining_sec, 60);
+            if (remaining_min > 0) {
+                return std.fmt.allocPrint(allocator, "{d}m {d}s", .{ remaining_min, @mod(remaining_sec, 60) });
+            }
+            return std.fmt.allocPrint(allocator, "{d}s", .{remaining_sec});
+        }
+        return allocator.dupe(u8, "offline");
+    }
+
+    fn removeWorkspaceMountByView(self: *App, idx: usize) !void {
+        const detail = if (self.ws.selected_workspace_detail) |*d| d else return error.MissingField;
+        if (idx >= detail.mounts.items.len) return error.MissingField;
+        const mount = detail.mounts.items[idx];
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedWorkspaceId() orelse return error.MissingField;
+        const project_token = self.selectedWorkspaceToken(project_id);
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+        // Pass node_id and export_name as filters so that in workspaces with
+        // multiple mounts on the same path we remove only the selected row,
+        // not every mount that shares the path.
+        const node_id_filter: ?[]const u8 = if (mount.node_id.len > 0) mount.node_id else null;
+        const export_name_filter: ?[]const u8 = if (mount.export_name.len > 0) mount.export_name else null;
+        var result = try control_plane.removeWorkspaceMount(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            project_token,
+            mount.mount_path,
+            node_id_filter,
+            export_name_filter,
+        );
+        defer result.deinit(self.allocator);
+        self.ws.workspace_selected_mount_index = null;
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn removeWorkspaceBindByView(self: *App, idx: usize) !void {
+        const detail = if (self.ws.selected_workspace_detail) |*d| d else return error.MissingField;
+        if (idx >= detail.binds.items.len) return error.MissingField;
+        const bind = detail.binds.items[idx];
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedWorkspaceId() orelse return error.MissingField;
+        const project_token = self.selectedWorkspaceToken(project_id);
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+        var result = try control_plane.removeWorkspaceBind(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            project_token,
+            bind.bind_path,
+        );
+        defer result.deinit(self.allocator);
+        self.ws.workspace_selected_bind_index = null;
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
+    fn rotateWorkspaceTokenFromPanel(self: *App) !void {
+        const client = if (self.ws_client) |*value| value else return error.NotConnected;
+        const project_id = self.selectedWorkspaceId() orelse return error.MissingField;
+        const current_token = self.selectedWorkspaceToken(project_id);
+        try control_plane.ensureUnifiedV2Connection(self.allocator, client, &self.message_counter);
+        var result = try control_plane.rotateWorkspaceToken(
+            self.allocator,
+            client,
+            &self.message_counter,
+            project_id,
+            current_token,
+        );
+        defer result.deinit(self.allocator);
+        const next_token = result.workspace_token orelse return error.InvalidResponse;
+        try self.ensureSelectedWorkspaceInSettings(project_id);
+        self.settings_panel.project_token.clearRetainingCapacity();
+        try self.settings_panel.project_token.appendSlice(self.allocator, next_token);
+        try self.config.setWorkspaceToken(project_id, next_token);
+        try self.config.save();
+        self.refreshWorkspaceData() catch {};
+        self.clearWorkspaceError();
+    }
+
     fn rawThemePackPath(self: *const App) ?[]const u8 {
         return if (self.settings_panel.theme_pack.items.len > 0)
             self.settings_panel.theme_pack.items
@@ -7152,12 +7281,12 @@ const App = struct {
         for (&self.ascii_glyph_width_cache) |*value| {
             value.* = -1.0;
         }
-        for (self.debug_events.items) |*entry| {
+        for (self.debug.debug_events.items) |*entry| {
             entry.payload_wrap_rows_valid = false;
             entry.cached_visible_rows_valid = false;
         }
-        self.debug_fold_revision +%= 1;
-        if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
+        self.debug.debug_fold_revision +%= 1;
+        if (self.debug.debug_fold_revision == 0) self.debug.debug_fold_revision = 1;
     }
 
     fn resolvedTextInputContextMenuRect(self: *App, fb_width: u32, fb_height: u32) Rect {
@@ -7336,8 +7465,7 @@ const App = struct {
         );
         if (shell.dock_border) |dock_border| self.drawRect(content_rect, dock_border);
 
-        const launcher_modal_open = self.launcher_create_modal_open;
-        const about_modal_open = self.about_modal_open;
+        const launcher_modal_open = self.ws.launcher_create_modal_open;
         const saved_mouse_down = self.mouse_down;
         const saved_mouse_clicked = self.mouse_clicked;
         const saved_mouse_released = self.mouse_released;
@@ -7393,7 +7521,7 @@ const App = struct {
         self.drawRect(profiles_rect, self.theme.colors.border);
 
         const selected_index = @min(
-            self.launcher_selected_profile_index,
+            self.ws.launcher_selected_profile_index,
             if (self.config.connection_profiles.len > 0) self.config.connection_profiles.len - 1 else 0,
         );
         var profile_row_y = profiles_rect.min[1] + layout.inner_inset;
@@ -7422,7 +7550,7 @@ const App = struct {
                     label,
                     .{ .variant = if (idx == selected_index) .primary else .secondary },
                 )) {
-                    self.launcher_selected_profile_index = idx;
+                    self.ws.launcher_selected_profile_index = idx;
                     self.applyLauncherSelectedProfile() catch |err| {
                         std.log.warn("Failed to apply selected profile: {s}", .{@errorName(err)});
                     };
@@ -7436,7 +7564,7 @@ const App = struct {
         left_y += layout.line_height + layout.row_gap * 0.25;
         const profile_name_focused = self.drawTextInputWidget(
             Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
-            self.launcher_profile_name.items,
+            self.ws.launcher_profile_name.items,
             self.settings_panel.focused_field == .launcher_profile_name,
             .{ .placeholder = "Display name" },
         );
@@ -7458,7 +7586,7 @@ const App = struct {
         left_y += layout.line_height + layout.row_gap * 0.25;
         const metadata_focused = self.drawTextInputWidget(
             Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
-            self.launcher_profile_metadata.items,
+            self.ws.launcher_profile_metadata.items,
             self.settings_panel.focused_field == .launcher_profile_metadata,
             .{ .placeholder = "Optional notes" },
         );
@@ -7493,7 +7621,7 @@ const App = struct {
         left_y += layout.line_height + layout.row_gap * 0.25;
         const connect_token_focused = self.drawTextInputWidget(
             Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
-            self.launcher_connect_token.items,
+            self.ws.launcher_connect_token.items,
             self.settings_panel.focused_field == .launcher_connect_token,
             .{
                 .placeholder = "Spiderweb access token",
@@ -7562,7 +7690,7 @@ const App = struct {
         var right_y = right_rect.min[1] + pad;
         self.drawLabel(right_rect.min[0] + pad, right_y, "Workspaces", self.theme.colors.text_primary);
         right_y += layout.line_height + layout.row_gap * 0.6;
-        if (self.launcher_notice) |notice| {
+        if (self.ws.launcher_notice) |notice| {
             self.drawTextTrimmed(
                 right_rect.min[0] + pad,
                 right_y,
@@ -7581,7 +7709,7 @@ const App = struct {
         );
         const filter_focused = self.drawTextInputWidget(
             filter_rect,
-            self.launcher_project_filter.items,
+            self.ws.launcher_project_filter.items,
             self.settings_panel.focused_field == .launcher_project_filter,
             .{ .placeholder = "Search workspaces" },
         );
@@ -7595,11 +7723,11 @@ const App = struct {
         self.drawRect(list_rect, self.theme.colors.border);
 
         var project_row_y = list_rect.min[1] + layout.inner_inset;
-        for (self.projects.items) |project| {
+        for (self.ws.projects.items) |project| {
             if (project_row_y + project_row_h > list_rect.max[1] - layout.inner_inset) break;
-            const matches_filter = self.launcher_project_filter.items.len == 0 or
-                containsCaseInsensitive(project.name, self.launcher_project_filter.items) or
-                containsCaseInsensitive(project.id, self.launcher_project_filter.items);
+            const matches_filter = self.ws.launcher_project_filter.items.len == 0 or
+                containsCaseInsensitive(project.name, self.ws.launcher_project_filter.items) or
+                containsCaseInsensitive(project.id, self.ws.launcher_project_filter.items);
             if (!matches_filter) continue;
             const is_selected = self.settings_panel.project_id.items.len > 0 and std.mem.eql(u8, self.settings_panel.project_id.items, project.id);
             if (self.drawButtonWidget(
@@ -7656,6 +7784,13 @@ const App = struct {
             if (launcher_modal_open) self.drawLauncherCreateWorkspaceModal(fb_width, fb_height);
             if (about_modal_open) self.drawAboutModal(fb_width, fb_height);
         }
+        if (self.ws.workspace_wizard_open) {
+            self.mouse_down = saved_mouse_down;
+            self.mouse_clicked = saved_mouse_clicked;
+            self.mouse_released = saved_mouse_released;
+            self.mouse_right_clicked = saved_mouse_right_clicked;
+            self.drawWorkspaceWizardModal(fb_width, fb_height);
+        }
     }
 
     fn drawLauncherCreateWorkspaceModal(self: *App, fb_width: u32, fb_height: u32) void {
@@ -7700,7 +7835,7 @@ const App = struct {
         );
         y += layout.line_height + layout.row_gap * 0.8;
 
-        if (self.launcher_create_modal_error) |message| {
+        if (self.ws.launcher_create_modal_error) |message| {
             self.drawTextTrimmed(
                 modal_rect.min[0] + pad,
                 y,
@@ -7771,7 +7906,7 @@ const App = struct {
         self.drawSurfacePanel(list_rect);
         self.drawRect(list_rect, self.theme.colors.border);
 
-        const template_count = self.launcher_create_templates.items.len;
+        const template_count = self.ws.launcher_create_templates.items.len;
         const template_row_h = @max(layout.button_height, 30.0 * self.ui_scale);
         const template_row_gap = layout.row_gap * 0.45;
         const template_row_step = template_row_h + template_row_gap;
@@ -7785,8 +7920,8 @@ const App = struct {
             @as(usize, 1)
         else
             (template_count / rows_per_page) + @as(usize, @intFromBool((template_count % rows_per_page) != 0));
-        if (self.launcher_create_template_page >= total_pages) {
-            self.launcher_create_template_page = total_pages - 1;
+        if (self.ws.launcher_create_template_page >= total_pages) {
+            self.ws.launcher_create_template_page = total_pages - 1;
         }
 
         const pager_button_w = @max(62.0 * self.ui_scale, self.measureText("Next") + pad * 1.05);
@@ -7806,25 +7941,25 @@ const App = struct {
         if (self.drawButtonWidget(
             prev_rect,
             "Prev",
-            .{ .variant = .secondary, .disabled = template_count == 0 or self.launcher_create_template_page == 0 },
+            .{ .variant = .secondary, .disabled = template_count == 0 or self.ws.launcher_create_template_page == 0 },
         )) {
-            self.launcher_create_template_page -= 1;
+            self.ws.launcher_create_template_page -= 1;
         }
         if (self.drawButtonWidget(
             next_rect,
             "Next",
             .{
                 .variant = .secondary,
-                .disabled = template_count == 0 or (self.launcher_create_template_page + 1) >= total_pages,
+                .disabled = template_count == 0 or (self.ws.launcher_create_template_page + 1) >= total_pages,
             },
         )) {
-            self.launcher_create_template_page += 1;
+            self.ws.launcher_create_template_page += 1;
         }
 
         const page_line = std.fmt.allocPrint(
             self.allocator,
             "Page {d}/{d}",
-            .{ self.launcher_create_template_page + 1, total_pages },
+            .{ self.ws.launcher_create_template_page + 1, total_pages },
         ) catch null;
         defer if (page_line) |value| self.allocator.free(value);
         if (page_line) |value| {
@@ -7848,11 +7983,11 @@ const App = struct {
                 self.theme.colors.text_secondary,
             );
         } else {
-            const page_start = self.launcher_create_template_page * rows_per_page;
+            const page_start = self.ws.launcher_create_template_page * rows_per_page;
             const page_end = @min(page_start + rows_per_page, template_count);
             var row_y = list_rect.min[1] + layout.inner_inset;
             const row_max_y = list_rect.max[1] - layout.inner_inset;
-            for (self.launcher_create_templates.items[page_start..page_end], page_start..) |template, idx| {
+            for (self.ws.launcher_create_templates.items[page_start..page_end], page_start..) |template, idx| {
                 if (row_y + template_row_h > row_max_y) break;
                 if (self.drawButtonWidget(
                     Rect.fromXYWH(
@@ -7862,9 +7997,9 @@ const App = struct {
                         template_row_h,
                     ),
                     template.id,
-                    .{ .variant = if (idx == self.launcher_create_selected_template_index) .primary else .secondary },
+                    .{ .variant = if (idx == self.ws.launcher_create_selected_template_index) .primary else .secondary },
                 )) {
-                    self.launcher_create_selected_template_index = idx;
+                    self.ws.launcher_create_selected_template_index = idx;
                     self.syncLauncherCreateSelectedTemplateToSettings() catch {};
                     self.clearLauncherCreateWorkspaceModalError();
                 }
@@ -7919,7 +8054,7 @@ const App = struct {
         const trimmed_name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
         const create_disabled = self.connection_state != .connected or
             trimmed_name.len == 0 or
-            self.launcher_create_templates.items.len == 0;
+            self.ws.launcher_create_templates.items.len == 0;
         if (self.drawButtonWidget(
             Rect.fromXYWH(cancel_rect.max[0] + pad, action_y, button_w, row_h),
             "Create Workspace",
@@ -8342,6 +8477,12 @@ const App = struct {
             self.mouse_down = saved_mouse_down;
             _ = self.drawWindowMenuBar(ui_window, fb_width);
             self.drawStatusOverlay(fb_width, fb_height);
+            if (self.ws.workspace_wizard_open) {
+                self.mouse_down = saved_mouse_down;
+                self.mouse_clicked = saved_mouse_clicked;
+                self.mouse_released = saved_mouse_released;
+                self.drawWorkspaceWizardModal(fb_width, fb_height);
+            }
             return;
         }
         // Draw each dock group
@@ -8371,13 +8512,11 @@ const App = struct {
         }
         _ = self.drawWindowMenuBar(ui_window, fb_width);
         self.drawStatusOverlay(fb_width, fb_height);
-        if (package_modal_open or about_modal_open) {
+        if (self.ws.workspace_wizard_open) {
             self.mouse_down = saved_mouse_down;
             self.mouse_clicked = saved_mouse_clicked;
             self.mouse_released = saved_mouse_released;
-            self.mouse_right_clicked = saved_mouse_right_clicked;
-            if (package_modal_open) self.drawPackageManagerModal(fb_width, fb_height);
-            if (about_modal_open) self.drawAboutModal(fb_width, fb_height);
+            self.drawWorkspaceWizardModal(fb_width, fb_height);
         }
     }
 
@@ -8403,9 +8542,9 @@ const App = struct {
         return switch (domain) {
             .file => if (stage == .launcher) 1 else 2,
             .edit => 2,
-            .view => 2,
-            .project => 2,
-            .tools => 4,
+            .view => 4,
+            .project => 3,
+            .tools => 5,
             .window => 1,
             .help => 1,
         };
@@ -8527,6 +8666,15 @@ const App = struct {
                 .view => {
                     if (self.drawButtonWidget(
                         Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.ws.dashboard_panel_id != null) "Dashboard (Focus)" else "Dashboard (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureDashboardPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
                         if (self.manager.hasPanel(.Chat)) "Chat (Focus)" else "Chat (Open)",
                         .{ .variant = .secondary },
                     )) {
@@ -8536,14 +8684,32 @@ const App = struct {
                     row_y += row_h + row_gap;
                     if (self.drawButtonWidget(
                         Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.filesystem_panel_id != null) "Explorer (Focus)" else "Explorer (Open)",
+                        if (self.fs.filesystem_panel_id != null) "Explorer (Focus)" else "Explorer (Open)",
                         .{ .variant = .secondary },
                     )) {
                         _ = self.ensureFilesystemPanel(&self.manager) catch {};
                         self.ide_menu_open = null;
                     }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.ws.node_topology_panel_id != null) "Node Topology (Focus)" else "Node Topology (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureNodeTopologyPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
                 },
                 .project => {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Workspace Wizard...",
+                        .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+                    )) {
+                        self.openWorkspaceWizard();
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
                     if (self.drawButtonWidget(
                         Rect.fromXYWH(row_x, row_y, row_w, row_h),
                         "Refresh Workspace",
@@ -8574,16 +8740,7 @@ const App = struct {
                     row_y += row_h + row_gap;
                     if (self.drawButtonWidget(
                         Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "Packages",
-                        .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-                    )) {
-                        self.openPackageManagerModal();
-                        self.ide_menu_open = null;
-                    }
-                    row_y += row_h + row_gap;
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.filesystem_tools_panel_id != null) "Explorer Tools (Focus)" else "Explorer Tools (Open)",
+                        if (self.fs.filesystem_tools_panel_id != null) "Explorer Tools (Focus)" else "Explorer Tools (Open)",
                         .{ .variant = .secondary },
                     )) {
                         _ = self.ensureFilesystemToolsPanel(&self.manager) catch {};
@@ -8596,6 +8753,24 @@ const App = struct {
                         .{ .variant = .secondary },
                     )) {
                         _ = self.ensureTerminalPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.ws.venom_manager_panel_id != null) "Venoms (Focus)" else "Venoms (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureVenomManagerPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.ws.mcp_config_panel_id != null) "MCP Servers (Focus)" else "MCP Servers (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureMcpConfigPanel(&self.manager) catch {};
                         self.ide_menu_open = null;
                     }
                 },
@@ -9103,7 +9278,7 @@ const App = struct {
                 if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
                     self.drawWorkspacePanel(manager, rect);
                 }
-                self.workspace_panel_id = panel.id;
+                self.ws.workspace_panel_id = panel.id;
                 self.perf_frame_panel_ns.projects += std.time.nanoTimestamp() - started_ns;
             },
             .FilesystemBrowser => {
@@ -9111,7 +9286,7 @@ const App = struct {
                 if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
                     self.drawFilesystemPanel(manager, rect);
                 }
-                self.filesystem_panel_id = panel.id;
+                self.fs.filesystem_panel_id = panel.id;
                 self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
             },
             .FilesystemTools => {
@@ -9119,7 +9294,7 @@ const App = struct {
                 if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
                     self.drawFilesystemToolsPanel(manager, rect);
                 }
-                self.filesystem_tools_panel_id = panel.id;
+                self.fs.filesystem_tools_panel_id = panel.id;
                 self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
             },
             .DebugStream => {
@@ -9127,7 +9302,7 @@ const App = struct {
                 if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
                     self.drawDebugPanel(manager, rect);
                 }
-                self.debug_panel_id = panel.id;
+                self.debug.debug_panel_id = panel.id;
                 self.perf_frame_panel_ns.debug += std.time.nanoTimestamp() - started_ns;
             },
             .Workboard => {
@@ -9141,7 +9316,7 @@ const App = struct {
                 self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
             },
             .ToolOutput => {
-                if (self.terminal_panel_id != null and self.terminal_panel_id.? == panel.id) {
+                if (self.terminal.terminal_panel_id != null and self.terminal.terminal_panel_id.? == panel.id) {
                     const started_ns = std.time.nanoTimestamp();
                     self.drawTerminalPanel(manager, rect);
                     self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
@@ -9153,7 +9328,7 @@ const App = struct {
                     self.promoteLegacyHostPanel(manager, panel);
                     self.drawPanelContent(manager, panel_id, rect);
                 } else if (std.mem.eql(u8, panel.title, "Terminal")) {
-                    self.terminal_panel_id = panel.id;
+                    self.terminal.terminal_panel_id = panel.id;
                     const started_ns = std.time.nanoTimestamp();
                     self.drawTerminalPanel(manager, rect);
                     self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
@@ -9167,6 +9342,30 @@ const App = struct {
                     );
                     self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
                 }
+            },
+            .Dashboard => {
+                const started_ns = std.time.nanoTimestamp();
+                self.ws.dashboard_panel_id = panel.id;
+                self.drawDashboardPanel(&self.manager, rect);
+                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+            },
+            .VenomManager => {
+                const started_ns = std.time.nanoTimestamp();
+                self.ws.venom_manager_panel_id = panel.id;
+                self.drawVenomManagerPanel(&self.manager, rect);
+                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+            },
+            .NodeTopology => {
+                const started_ns = std.time.nanoTimestamp();
+                self.ws.node_topology_panel_id = panel.id;
+                self.drawNodeTopologyPanel(&self.manager, rect);
+                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+            },
+            .McpConfig => {
+                const started_ns = std.time.nanoTimestamp();
+                self.ws.mcp_config_panel_id = panel.id;
+                self.drawMcpConfigPanel(&self.manager, rect);
+                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
             },
             else => {
                 // Draw placeholder for other panel types
@@ -9304,10 +9503,10 @@ const App = struct {
             else => unreachable,
         };
         switch (kind) {
-            .WorkspaceOverview => self.workspace_panel_id = panel.id,
-            .FilesystemBrowser => self.filesystem_panel_id = panel.id,
-            .FilesystemTools => self.filesystem_tools_panel_id = panel.id,
-            .DebugStream => self.debug_panel_id = panel.id,
+            .WorkspaceOverview => self.ws.workspace_panel_id = panel.id,
+            .FilesystemBrowser => self.fs.filesystem_panel_id = panel.id,
+            .FilesystemTools => self.fs.filesystem_tools_panel_id = panel.id,
+            .DebugStream => self.debug.debug_panel_id = panel.id,
             else => {},
         }
         manager.workspace.markDirty();
@@ -9459,7 +9658,7 @@ const App = struct {
             inner,
             .{ .text_secondary = self.theme.colors.text_secondary },
             .{
-                .total_lines = self.terminal_backend.lineCount(),
+                .total_lines = self.terminal.terminal_backend.lineCount(),
                 .line_height = self.textLineHeight(),
                 .empty_text = "(terminal output empty)",
             },
@@ -9468,7 +9667,7 @@ const App = struct {
 
     fn terminalDrawStyledLineAt(ctx: *anyopaque, line_index: usize, x: f32, y: f32, max_w: f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
-        const line = self.terminal_backend.lineAt(line_index) orelse return;
+        const line = self.terminal.terminal_backend.lineAt(line_index) orelse return;
         self.drawTerminalStyledLine(x, y, max_w, line);
     }
 
@@ -9494,12 +9693,12 @@ const App = struct {
 
     fn debugEventStreamSetOutputRect(ctx: *anyopaque, rect: Rect) void {
         const self: *App = @ptrCast(@alignCast(ctx));
-        self.debug_output_rect = rect;
+        self.debug.debug_output_rect = rect;
     }
 
     fn debugEventStreamFocusPanel(ctx: *anyopaque) void {
         const self: *App = @ptrCast(@alignCast(ctx));
-        if (self.debug_panel_id) |panel_id| self.manager.focusPanel(panel_id);
+        if (self.debug.debug_panel_id) |panel_id| self.manager.focusPanel(panel_id);
     }
 
     fn debugEventStreamPushClip(ctx: *anyopaque, rect: Rect) void {
@@ -9519,42 +9718,42 @@ const App = struct {
 
     fn debugEventStreamGetScrollY(ctx: *anyopaque) f32 {
         const self: *App = @ptrCast(@alignCast(ctx));
-        return self.debug_scroll_y;
+        return self.debug.debug_scroll_y;
     }
 
     fn debugEventStreamSetScrollY(ctx: *anyopaque, value: f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
-        self.debug_scroll_y = value;
+        self.debug.debug_scroll_y = value;
     }
 
     fn debugEventStreamGetScrollbarDragging(ctx: *anyopaque) bool {
         const self: *App = @ptrCast(@alignCast(ctx));
-        return self.debug_scrollbar_dragging;
+        return self.debug.debug_scrollbar_dragging;
     }
 
     fn debugEventStreamSetScrollbarDragging(ctx: *anyopaque, value: bool) void {
         const self: *App = @ptrCast(@alignCast(ctx));
-        self.debug_scrollbar_dragging = value;
+        self.debug.debug_scrollbar_dragging = value;
     }
 
     fn debugEventStreamGetDragStartY(ctx: *anyopaque) f32 {
         const self: *App = @ptrCast(@alignCast(ctx));
-        return self.debug_scrollbar_drag_start_y;
+        return self.debug.debug_scrollbar_drag_start_y;
     }
 
     fn debugEventStreamSetDragStartY(ctx: *anyopaque, value: f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
-        self.debug_scrollbar_drag_start_y = value;
+        self.debug.debug_scrollbar_drag_start_y = value;
     }
 
     fn debugEventStreamGetDragStartScrollY(ctx: *anyopaque) f32 {
         const self: *App = @ptrCast(@alignCast(ctx));
-        return self.debug_scrollbar_drag_start_scroll_y;
+        return self.debug.debug_scrollbar_drag_start_scroll_y;
     }
 
     fn debugEventStreamSetDragStartScrollY(ctx: *anyopaque, value: f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
-        self.debug_scrollbar_drag_start_scroll_y = value;
+        self.debug.debug_scrollbar_drag_start_scroll_y = value;
     }
 
     fn debugEventStreamSetDragCapture(ctx: *anyopaque, capture: bool) void {
@@ -9575,9 +9774,9 @@ const App = struct {
         selected: bool,
     ) f32 {
         const self: *App = @ptrCast(@alignCast(ctx));
-        if (filtered_index >= self.debug_events.items.len) return 0.0;
+        if (filtered_index >= self.debug.debug_events.items.len) return 0.0;
         const layout = self.panelLayoutMetrics();
-        const entry = &self.debug_events.items[filtered_index];
+        const entry = &self.debug.debug_events.items[filtered_index];
         const payload_visible_rows = if (selected)
             self.countVisibleDebugPayloadRows(content_min_x, content_max_x, entry)
         else
@@ -9597,10 +9796,10 @@ const App = struct {
         pointer: DebugEventStreamPanel.PointerState,
     ) bool {
         const self: *App = @ptrCast(@alignCast(ctx));
-        if (filtered_index >= self.debug_events.items.len) return false;
+        if (filtered_index >= self.debug.debug_events.items.len) return false;
         const layout = self.panelLayoutMetrics();
         const line_height = layout.line_height;
-        const entry = &self.debug_events.items[filtered_index];
+        const entry = &self.debug.debug_events.items[filtered_index];
         if (selected) self.ensureDebugPayloadLines(entry);
         self.drawDebugEventHeaderLine(content_min_x, y, content_max_x, entry.*);
         var clicked_fold_marker = false;
@@ -9683,8 +9882,8 @@ const App = struct {
 
     fn debugEventStreamSelectEntry(ctx: *anyopaque, filtered_index: usize) void {
         const self: *App = @ptrCast(@alignCast(ctx));
-        if (self.debug_selected_index == null or self.debug_selected_index.? != filtered_index) {
-            self.debug_selected_index = filtered_index;
+        if (self.debug.debug_selected_index == null or self.debug.debug_selected_index.? != filtered_index) {
+            self.debug.debug_selected_index = filtered_index;
             self.clearSelectedNodeServiceEventCache();
         }
     }
@@ -9696,8 +9895,8 @@ const App = struct {
 
     fn debugEventStreamSelectedEventCount(ctx: *anyopaque) usize {
         const self: *App = @ptrCast(@alignCast(ctx));
-        if (self.debug_selected_index) |sel_idx| {
-            return if (sel_idx < self.debug_events.items.len) 1 else 0;
+        if (self.debug.debug_selected_index) |sel_idx| {
+            return if (sel_idx < self.debug.debug_events.items.len) 1 else 0;
         }
         return 0;
     }
@@ -9886,128 +10085,814 @@ const App = struct {
         }
     }
 
-    fn drawMissionWorkboardPanel(self: *App, manager: *panel_manager.PanelManager, _: *workspace.Panel, rect: UiRect) void {
-        self.requestMissionDashboardRefresh(false);
+    fn drawMissionWorkboardPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
+        mission_workboard_host.draw(self, manager, panel, rect);
+    }
 
-        const panel_rect = Rect{ .min = rect.min, .max = rect.max };
-        self.drawSurfacePanel(panel_rect);
+    // ── Dashboard panel ────────────────────────────────────────────────────────
 
+    const DASHBOARD_REFRESH_INTERVAL_MS: i64 = 8_000;
+
+    fn requestDashboardRefresh(self: *App, force: bool) void {
+        if (self.connection_state != .connected) return;
+        if (self.ws.workspace_op_busy) return;
+        const now = std.time.milliTimestamp();
+        if (!force and self.ws.dashboard_last_refresh_ms != 0 and now - self.ws.dashboard_last_refresh_ms < DASHBOARD_REFRESH_INTERVAL_MS) return;
+        self.ws.dashboard_last_refresh_ms = now;
+        self.refreshWorkspaceData() catch {};
+    }
+
+    fn drawDashboardPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        dashboard_host.draw(self, manager, rect);
+    }
+
+
+    // ── Venom Manager panel ────────────────────────────────────────────────────
+
+    const VENOM_REFRESH_INTERVAL_MS: i64 = 10_000;
+
+    fn clearVenomEntries(self: *App) void {
+        for (self.ws.venom_entries.items) |*e| e.deinit(self.allocator);
+        self.ws.venom_entries.clearRetainingCapacity();
+        self.ws.venom_selected_index = null;
+    }
+
+    fn setVenomError(self: *App, message: []const u8) void {
+        if (self.ws.venom_last_error) |v| self.allocator.free(v);
+        self.ws.venom_last_error = self.allocator.dupe(u8, message) catch null;
+    }
+
+    fn clearVenomError(self: *App) void {
+        if (self.ws.venom_last_error) |v| {
+            self.allocator.free(v);
+            self.ws.venom_last_error = null;
+        }
+    }
+
+    fn loadVenomsFromPath(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8, scope: VenomScope) !void {
+        const payload = self.readFsPathTextGui(client, path) catch |err| {
+            if (err == error.FileNotFound) return;
+            return err;
+        };
+        defer self.allocator.free(payload);
+
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .array) return;
+
+        for (parsed.value.array.items) |item| {
+            if (item != .object) continue;
+            const obj = item.object;
+            const venom_id_raw = if (obj.get("venom_id")) |v| switch (v) {
+                .string => v.string,
+                else => continue,
+            } else continue;
+            const venom_path_raw = if (obj.get("venom_path")) |v| switch (v) {
+                .string => v.string,
+                else => "",
+            } else "";
+            const provider_node_raw = if (obj.get("provider_node_id")) |v| switch (v) {
+                .string => v.string,
+                else => null,
+            } else null;
+            const endpoint_raw = if (obj.get("endpoint_path")) |v| switch (v) {
+                .string => v.string,
+                else => null,
+            } else null;
+            const invoke_raw = if (obj.get("invoke_path")) |v| switch (v) {
+                .string => v.string,
+                else => null,
+            } else null;
+
+            const venom_id = try self.allocator.dupe(u8, venom_id_raw);
+            errdefer self.allocator.free(venom_id);
+            const venom_path = try self.allocator.dupe(u8, venom_path_raw);
+            errdefer self.allocator.free(venom_path);
+            const provider_node_id = if (provider_node_raw) |v| try self.allocator.dupe(u8, v) else null;
+            errdefer if (provider_node_id) |v| self.allocator.free(v);
+            const endpoint_path = if (endpoint_raw) |v| try self.allocator.dupe(u8, v) else null;
+            errdefer if (endpoint_path) |v| self.allocator.free(v);
+            const invoke_path = if (invoke_raw) |v| try self.allocator.dupe(u8, v) else null;
+            errdefer if (invoke_path) |v| self.allocator.free(v);
+
+            try self.ws.venom_entries.append(self.allocator, .{
+                .venom_id = venom_id,
+                .scope = scope,
+                .provider_node_id = provider_node_id,
+                .venom_path = venom_path,
+                .endpoint_path = endpoint_path,
+                .invoke_path = invoke_path,
+            });
+        }
+    }
+
+    fn refreshVenomManager(self: *App) void {
+        if (self.ws.venom_refresh_busy) return;
+        self.ws.venom_refresh_busy = true;
+        defer self.ws.venom_refresh_busy = false;
+        self.ws.venom_last_refresh_ms = std.time.milliTimestamp();
+        self.clearVenomEntries();
+        self.clearVenomError();
+
+        const client = if (self.ws_client) |*value| value else return;
+        self.fsrpcBootstrapGui(client) catch return;
+
+        // Global scope
+        self.loadVenomsFromPath(client, "/global/venoms/VENOMS.json", .global) catch |err| {
+            self.setVenomError(std.fmt.allocPrint(self.allocator, "Global load failed: {s}", .{@errorName(err)}) catch "Global load failed");
+        };
+
+        // Workspace scope
+        if (self.ws.active_workspace_id) |ws_id| {
+            const path = std.fmt.allocPrint(self.allocator, "/projects/{s}/venoms/VENOMS.json", .{ws_id}) catch null;
+            if (path) |p| {
+                defer self.allocator.free(p);
+                self.loadVenomsFromPath(client, p, .workspace) catch {};
+            }
+        }
+
+        // Agent scope
+        self.loadVenomsFromPath(client, "/agents/self/venoms/VENOMS.json", .agent) catch {};
+    }
+
+    fn requestVenomRefresh(self: *App, force: bool) void {
+        if (self.connection_state != .connected) return;
+        if (self.ws.venom_refresh_busy) return;
+        const now = std.time.milliTimestamp();
+        if (!force and self.ws.venom_last_refresh_ms != 0 and now - self.ws.venom_last_refresh_ms < VENOM_REFRESH_INTERVAL_MS) return;
+        self.refreshVenomManager();
+    }
+
+    fn drawVenomManagerPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        venom_manager_host.draw(self, manager, rect);
+    }
+
+
+
+    fn drawNodeTopologyPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        node_topology_host.draw(self, manager, rect);
+    }
+
+
+
+    fn clearMcpEntries(self: *App) void {
+        for (self.ws.mcp_entries.items) |*e| e.deinit(self.allocator);
+        self.ws.mcp_entries.clearRetainingCapacity();
+        self.ws.mcp_selected_index = null;
+        if (self.ws.mcp_selected_runtime) |v| {
+            self.allocator.free(v);
+            self.ws.mcp_selected_runtime = null;
+        }
+    }
+
+    fn refreshMcpConfig(self: *App) void {
+        const client = if (self.ws_client) |*value| value else return;
+        self.fsrpcBootstrapGui(client) catch return;
+        self.clearMcpEntries();
+        if (self.ws.mcp_last_error) |v| {
+            self.allocator.free(v);
+            self.ws.mcp_last_error = null;
+        }
+
+        const now_ms = std.time.milliTimestamp();
+        for (self.ws.nodes.items) |node| {
+            const venoms_path = std.fmt.allocPrint(self.allocator, "/nodes/{s}/venoms/VENOMS.json", .{node.node_id}) catch continue;
+            defer self.allocator.free(venoms_path);
+
+            const payload = self.readFsPathTextGui(client, venoms_path) catch continue;
+            defer self.allocator.free(payload);
+
+            var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, payload, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value != .array) continue;
+
+            for (parsed.value.array.items) |item| {
+                if (item != .object) continue;
+                const obj = item.object;
+                const kind = if (obj.get("kind")) |v| switch (v) {
+                    .string => v.string,
+                    else => continue,
+                } else continue;
+                if (!std.mem.eql(u8, kind, "mcp")) continue;
+
+                const venom_id_raw = if (obj.get("venom_id")) |v| switch (v) {
+                    .string => v.string,
+                    else => continue,
+                } else continue;
+                const state_raw = if (obj.get("state")) |v| switch (v) {
+                    .string => v.string,
+                    else => "unknown",
+                } else "unknown";
+                const endpoint_raw = if (obj.get("endpoint")) |v| switch (v) {
+                    .string => v.string,
+                    else => "",
+                } else "";
+
+                const entry = McpEntry{
+                    .node_id = self.allocator.dupe(u8, node.node_id) catch continue,
+                    .venom_id = self.allocator.dupe(u8, venom_id_raw) catch |err| {
+                        _ = err;
+                        continue;
+                    },
+                    .state = self.allocator.dupe(u8, state_raw) catch |err| {
+                        _ = err;
+                        continue;
+                    },
+                    .endpoint = self.allocator.dupe(u8, endpoint_raw) catch |err| {
+                        _ = err;
+                        continue;
+                    },
+                };
+                self.ws.mcp_entries.append(self.allocator, entry) catch continue;
+            }
+        }
+        self.ws.mcp_last_refresh_ms = now_ms;
+    }
+
+    fn loadMcpRuntime(self: *App, entry: *const McpEntry) void {
+        const client = if (self.ws_client) |*value| value else return;
+        if (self.ws.mcp_selected_runtime) |v| {
+            self.allocator.free(v);
+            self.ws.mcp_selected_runtime = null;
+        }
+        if (entry.endpoint.len == 0) return;
+        const runtime_path = std.fmt.allocPrint(self.allocator, "{s}/RUNTIME.json", .{entry.endpoint}) catch return;
+        defer self.allocator.free(runtime_path);
+        const text = self.readFsPathTextGui(client, runtime_path) catch return;
+        self.ws.mcp_selected_runtime = text;
+    }
+
+    fn drawMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+        mcp_config_host.draw(self, manager, rect);
+    }
+
+
+
+    // ── Workspace Setup Wizard ────────────────────────────────────────────────
+
+    fn openWorkspaceWizard(self: *App) void {
+        self.ws.workspace_wizard_open = true;
+        self.ws.workspace_wizard_step = 0;
+        self.ws.workspace_wizard_selected_node_index = null;
+        // Clear wizard-scoped buffers (reuse settings_panel fields)
+        self.settings_panel.project_create_name.clearRetainingCapacity();
+        self.settings_panel.project_create_vision.clearRetainingCapacity();
+        self.settings_panel.project_mount_path.clearRetainingCapacity();
+        self.settings_panel.project_mount_node_id.clearRetainingCapacity();
+        self.settings_panel.workspace_bind_path.clearRetainingCapacity();
+        self.settings_panel.workspace_bind_target_path.clearRetainingCapacity();
+        // Clear accumulated lists
+        for (self.ws.workspace_wizard_mounts.items) |*m| m.deinit(self.allocator);
+        self.ws.workspace_wizard_mounts.clearRetainingCapacity();
+        for (self.ws.workspace_wizard_binds.items) |*b| b.deinit(self.allocator);
+        self.ws.workspace_wizard_binds.clearRetainingCapacity();
+        if (self.ws.workspace_wizard_error) |v| self.allocator.free(v);
+        self.ws.workspace_wizard_error = null;
+        // Ensure templates are loaded
+        self.refreshLauncherCreateWorkspaceTemplates() catch |err| {
+            self.clearLauncherCreateWorkspaceTemplates();
+            const msg = self.formatControlOpError("Template list failed", err);
+            if (msg) |text| {
+                defer self.allocator.free(text);
+                self.ws.workspace_wizard_error = self.allocator.dupe(u8, text) catch null;
+            }
+        };
+    }
+
+    fn closeWorkspaceWizard(self: *App) void {
+        self.ws.workspace_wizard_open = false;
+        for (self.ws.workspace_wizard_mounts.items) |*m| m.deinit(self.allocator);
+        self.ws.workspace_wizard_mounts.clearAndFree(self.allocator);
+        for (self.ws.workspace_wizard_binds.items) |*b| b.deinit(self.allocator);
+        self.ws.workspace_wizard_binds.clearAndFree(self.allocator);
+        if (self.ws.workspace_wizard_error) |v| self.allocator.free(v);
+        self.ws.workspace_wizard_error = null;
+        self.ws.workspace_wizard_step = 0;
+        self.ws.workspace_wizard_selected_node_index = null;
+    }
+
+    fn wizardAddCurrentMount(self: *App) void {
+        const path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t\r\n");
+        const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t\r\n");
+        if (path.len == 0 or node_id.len == 0) return;
+        const path_copy = self.allocator.dupe(u8, path) catch return;
+        const node_copy = self.allocator.dupe(u8, node_id) catch {
+            self.allocator.free(path_copy);
+            return;
+        };
+        self.ws.workspace_wizard_mounts.append(self.allocator, .{ .path = path_copy, .node_id = node_copy }) catch {
+            self.allocator.free(path_copy);
+            self.allocator.free(node_copy);
+            return;
+        };
+        self.settings_panel.project_mount_path.clearRetainingCapacity();
+        self.settings_panel.project_mount_node_id.clearRetainingCapacity();
+    }
+
+    fn wizardAddCurrentBind(self: *App) void {
+        const bind_path = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t\r\n");
+        const target_path = std.mem.trim(u8, self.settings_panel.workspace_bind_target_path.items, " \t\r\n");
+        if (bind_path.len == 0 or target_path.len == 0) return;
+        const bp_copy = self.allocator.dupe(u8, bind_path) catch return;
+        const tp_copy = self.allocator.dupe(u8, target_path) catch {
+            self.allocator.free(bp_copy);
+            return;
+        };
+        self.ws.workspace_wizard_binds.append(self.allocator, .{ .bind_path = bp_copy, .target_path = tp_copy }) catch {
+            self.allocator.free(bp_copy);
+            self.allocator.free(tp_copy);
+            return;
+        };
+        self.settings_panel.workspace_bind_path.clearRetainingCapacity();
+        self.settings_panel.workspace_bind_target_path.clearRetainingCapacity();
+    }
+
+    fn wizardExecuteCreate(self: *App) void {
+        // Delegate to existing createWorkspaceFromPanel which reads settings_panel fields.
+        // Mounts and binds are handled separately after creation via the workspace panel.
+        self.createWorkspaceFromPanel() catch |err| {
+            const msg = self.formatControlOpError("Workspace create failed", err);
+            if (self.ws.workspace_wizard_error) |v| self.allocator.free(v);
+            if (msg) |text| {
+                defer self.allocator.free(text);
+                self.ws.workspace_wizard_error = self.allocator.dupe(u8, text) catch null;
+            } else {
+                self.ws.workspace_wizard_error = self.allocator.dupe(u8, "Workspace create failed.") catch null;
+            }
+            return;
+        };
+        self.closeWorkspaceWizard();
+        self.setLauncherNotice("Workspace created.");
+    }
+
+    fn drawWorkspaceWizardModal(self: *App, fb_width: u32, fb_height: u32) void {
         const layout = self.panelLayoutMetrics();
-        const pad = layout.inset;
-        const inner_w = @max(1.0, panel_rect.width() - pad * 2.0);
-        const line_h = self.textLineHeight();
-        const button_h = layout.button_height;
+        const pad = @max(layout.inset, 12.0 * self.ui_scale);
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
 
-        const refresh_label = if (self.client_context.pending_workboard_request_id != null) "Refreshing..." else "Refresh";
-        const refresh_w = @max(96.0 * self.ui_scale, self.measureTextFast(refresh_label) + pad * 1.4);
-        const refresh_rect = Rect.fromXYWH(
-            panel_rect.max[0] - pad - refresh_w,
-            panel_rect.min[1] + pad,
-            refresh_w,
-            button_h,
+        const modal_w = @min(740.0 * self.ui_scale, @as(f32, @floatFromInt(fb_width)) - pad * 4.0);
+        const modal_h = @min(520.0 * self.ui_scale, @as(f32, @floatFromInt(fb_height)) - pad * 4.0);
+        const modal_x = (@as(f32, @floatFromInt(fb_width)) - modal_w) * 0.5;
+        const modal_y = (@as(f32, @floatFromInt(fb_height)) - modal_h) * 0.5;
+        const modal_rect = Rect.fromXYWH(modal_x, modal_y, modal_w, modal_h);
+
+        // Dim backdrop
+        self.drawFilledRect(
+            Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height)),
+            zcolors.withAlpha(self.theme.colors.background, 0.72),
         );
-        if (self.drawButtonWidget(refresh_rect, refresh_label, .{
-            .variant = .secondary,
-            .disabled = self.connection_state != .connected or self.client_context.pending_workboard_request_id != null,
-        })) {
-            self.requestMissionDashboardRefresh(true);
+        self.drawSurfacePanel(modal_rect);
+        self.drawRect(modal_rect, self.theme.colors.border);
+
+        // Title bar
+        const step_names = [_][]const u8{ "Template", "Name & Vision", "Mounts", "Binds", "Review" };
+        const current_step_name = if (self.ws.workspace_wizard_step < step_names.len) step_names[self.ws.workspace_wizard_step] else "?";
+        const title_str = std.fmt.allocPrint(
+            self.allocator,
+            "Workspace Wizard — Step {d}/5: {s}",
+            .{ self.ws.workspace_wizard_step + 1, current_step_name },
+        ) catch null;
+        defer if (title_str) |v| self.allocator.free(v);
+        var y = modal_rect.min[1] + pad;
+        self.drawText(
+            modal_rect.min[0] + pad,
+            y,
+            title_str orelse "Workspace Wizard",
+            self.theme.colors.text,
+        );
+        y += layout.line_height + layout.row_gap * 0.5;
+
+        // Step indicator dots
+        const dot_r = 5.0 * self.ui_scale;
+        const dot_spacing = 18.0 * self.ui_scale;
+        var dot_x = modal_rect.min[0] + pad;
+        for (0..5) |i| {
+            const dot_rect = Rect.fromXYWH(dot_x, y, dot_r * 2.0, dot_r * 2.0);
+            const dot_color = if (i == self.ws.workspace_wizard_step)
+                self.theme.colors.primary
+            else if (i < self.ws.workspace_wizard_step)
+                zcolors.blend(self.theme.colors.primary, self.theme.colors.background, 0.5)
+            else
+                self.theme.colors.border;
+            self.drawFilledRect(dot_rect, dot_color);
+            dot_x += dot_r * 2.0 + dot_spacing;
+        }
+        y += dot_r * 2.0 + layout.row_gap * 0.8;
+
+        // Divider
+        self.drawFilledRect(
+            Rect.fromXYWH(modal_rect.min[0] + pad, y, modal_w - pad * 2.0, 1.0),
+            self.theme.colors.border,
+        );
+        y += 1.0 + layout.row_gap * 0.5;
+
+        // Error message
+        if (self.ws.workspace_wizard_error) |msg| {
+            self.drawTextTrimmed(
+                modal_rect.min[0] + pad,
+                y,
+                modal_w - pad * 2.0,
+                msg,
+                zcolors.rgba(220, 80, 80, 255),
+            );
+            y += layout.line_height + layout.row_gap * 0.5;
         }
 
-        var approvals_label_buf: [64]u8 = undefined;
-        const approvals_label = std.fmt.bufPrint(
-            &approvals_label_buf,
-            "Approvals {d}",
-            .{self.client_context.approvals.items.len},
-        ) catch "Approvals";
-        const approvals_w = @max(112.0 * self.ui_scale, self.measureTextFast(approvals_label) + pad * 1.6);
-        const approvals_rect = Rect.fromXYWH(
-            refresh_rect.min[0] - pad * 0.6 - approvals_w,
-            refresh_rect.min[1],
-            approvals_w,
-            button_h,
+        // Content area (above action buttons)
+        const action_h = row_h + pad * 2.0;
+        const content_rect = Rect.fromXYWH(
+            modal_rect.min[0] + pad,
+            y,
+            modal_w - pad * 2.0,
+            modal_rect.max[1] - y - action_h,
         );
-        if (self.drawButtonWidget(approvals_rect, approvals_label, .{
-            .variant = .ghost,
-            .disabled = self.client_context.approvals.items.len == 0 and self.client_context.approvals_resolved.items.len == 0,
-        })) {
-            manager.ensurePanel(.ApprovalsInbox);
+
+        switch (self.ws.workspace_wizard_step) {
+            0 => self.drawWizardStepTemplate(content_rect, layout, pad),
+            1 => self.drawWizardStepNameVision(content_rect, layout, pad),
+            2 => self.drawWizardStepMounts(content_rect, layout, pad),
+            3 => self.drawWizardStepBinds(content_rect, layout, pad),
+            4 => self.drawWizardStepReview(content_rect, layout, pad),
+            else => {},
         }
 
-        self.drawTextTrimmed(
-            panel_rect.min[0] + pad,
-            panel_rect.min[1] + pad,
-            @max(1.0, approvals_rect.min[0] - panel_rect.min[0] - pad * 1.6),
-            "Mission Workboard",
-            self.theme.colors.text_primary,
-        );
+        // Action buttons
+        const btn_area_y = modal_rect.max[1] - pad - row_h;
+        const btn_w = (modal_w - pad * 3.0) * 0.5;
 
-        var status_buf: [160]u8 = undefined;
-        self.drawTextTrimmed(
-            panel_rect.min[0] + pad,
-            panel_rect.min[1] + pad + line_h + layout.row_gap * 0.35,
-            inner_w,
-            self.missionDashboardStatusText(&status_buf),
-            self.theme.colors.text_secondary,
-        );
-
-        const cards_top = panel_rect.min[1] + pad + line_h * 2.0 + layout.row_gap;
-        const card_gap = @max(layout.inner_inset, 10.0 * self.ui_scale);
-        const card_h = @max(84.0 * self.ui_scale, button_h * 2.4);
-        const card_w = @max(80.0, (inner_w - card_gap * 2.0) / 3.0);
-        const missions_rect = Rect.fromXYWH(panel_rect.min[0] + pad, cards_top, card_w, card_h);
-        const approvals_card_rect = Rect.fromXYWH(missions_rect.max[0] + card_gap, cards_top, card_w, card_h);
-        const recovery_rect = Rect.fromXYWH(approvals_card_rect.max[0] + card_gap, cards_top, card_w, card_h);
-
-        var running_count: usize = 0;
-        var waiting_count: usize = 0;
-        var failed_count: usize = 0;
-        var recovering_count: usize = 0;
-        for (self.mission_records.items) |mission| {
-            if (std.ascii.eqlIgnoreCase(mission.state, "running")) running_count += 1;
-            if (std.ascii.eqlIgnoreCase(mission.state, "waiting_for_approval") or std.ascii.eqlIgnoreCase(mission.state, "blocked")) waiting_count += 1;
-            if (std.ascii.eqlIgnoreCase(mission.state, "failed") or std.ascii.eqlIgnoreCase(mission.state, "cancelled")) failed_count += 1;
-            if (mission.recovery_count > 0 or std.ascii.eqlIgnoreCase(mission.state, "recovering")) recovering_count += 1;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, btn_area_y, btn_w, row_h),
+            if (self.ws.workspace_wizard_step == 0) "Cancel" else "Back",
+            .{ .variant = .secondary },
+        )) {
+            if (self.ws.workspace_wizard_step == 0) {
+                self.closeWorkspaceWizard();
+            } else {
+                self.ws.workspace_wizard_step -= 1;
+                if (self.ws.workspace_wizard_error) |v| self.allocator.free(v);
+                self.ws.workspace_wizard_error = null;
+            }
+            return;
         }
 
-        var missions_summary_buf: [96]u8 = undefined;
-        const missions_summary = std.fmt.bufPrint(
-            &missions_summary_buf,
-            "{d} running, {d} waiting, {d} failed",
-            .{ running_count, waiting_count, failed_count },
-        ) catch "Mission activity";
-        self.drawMissionSummaryCard(missions_rect, self.theme.colors.primary, "Missions", if (self.mission_records.items.len > 0) "Live queue" else "No missions", missions_summary);
+        const is_last_step = self.ws.workspace_wizard_step == 4;
+        const next_label: []const u8 = if (is_last_step) "Create Workspace" else "Next";
+        const next_disabled = switch (self.ws.workspace_wizard_step) {
+            0 => self.ws.launcher_create_templates.items.len == 0,
+            1 => std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n").len == 0,
+            else => false,
+        };
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad * 2.0 + btn_w, btn_area_y, btn_w, row_h),
+            next_label,
+            .{ .variant = .primary, .disabled = next_disabled or self.connection_state != .connected },
+        )) {
+            if (is_last_step) {
+                self.wizardExecuteCreate();
+            } else {
+                self.ws.workspace_wizard_step += 1;
+                if (self.ws.workspace_wizard_error) |v| self.allocator.free(v);
+                self.ws.workspace_wizard_error = null;
+                // Focus appropriate field when entering step
+                self.settings_panel.focused_field = switch (self.ws.workspace_wizard_step) {
+                    1 => .project_create_name,
+                    2 => .project_mount_path,
+                    3 => .workspace_bind_path,
+                    else => .none,
+                };
+            }
+        }
 
-        var approvals_summary_buf: [96]u8 = undefined;
-        const approvals_summary = std.fmt.bufPrint(
-            &approvals_summary_buf,
-            "{d} pending, {d} resolved in-session",
-            .{ self.client_context.approvals.items.len, self.client_context.approvals_resolved.items.len },
-        ) catch "Approval queue";
-        self.drawMissionSummaryCard(
-            approvals_card_rect,
-            if (self.client_context.approvals.items.len > 0) zcolors.rgba(236, 174, 36, 255) else self.theme.colors.border,
-            "Approvals",
-            if (self.client_context.approvals.items.len > 0) "Operator review" else "Queue clear",
-            approvals_summary,
+        // Close on outside click
+        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.closeWorkspaceWizard();
+        }
+    }
+
+    fn drawWizardStepTemplate(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
+        const template_count = self.ws.launcher_create_templates.items.len;
+        if (template_count == 0) {
+            self.drawTextTrimmed(
+                rect.min[0], rect.min[1], rect.width(),
+                "No templates available. Ensure you are connected.",
+                self.theme.colors.text_secondary,
+            );
+            return;
+        }
+        const row_h = @max(layout.button_height, 30.0 * self.ui_scale);
+        const row_gap = layout.row_gap * 0.45;
+        var row_y = rect.min[1];
+        self.drawText(rect.min[0], row_y, "Select a workspace template:", self.theme.colors.text_secondary);
+        row_y += layout.line_height + layout.row_gap * 0.4;
+        for (self.ws.launcher_create_templates.items, 0..) |template, idx| {
+            if (row_y + row_h > rect.max[1]) break;
+            const is_selected = idx == self.ws.launcher_create_selected_template_index;
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(rect.min[0], row_y, rect.width(), row_h),
+                template.id,
+                .{ .variant = if (is_selected) .primary else .secondary },
+            )) {
+                self.ws.launcher_create_selected_template_index = idx;
+                self.syncLauncherCreateSelectedTemplateToSettings() catch {};
+            }
+            row_y += row_h + row_gap;
+        }
+        // Show description of selected template
+        if (self.selectedLauncherCreateWorkspaceTemplate()) |tmpl| {
+            if (tmpl.description.len > 0) {
+                const desc_y = @min(row_y + layout.row_gap, rect.max[1] - layout.line_height * 2.0);
+                self.drawTextTrimmed(rect.min[0], desc_y, rect.width(), tmpl.description, self.theme.colors.text_secondary);
+            }
+        }
+        _ = pad;
+    }
+
+    fn drawWizardStepNameVision(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
+        var y = rect.min[1];
+        self.drawLabel(rect.min[0], y, "Workspace Name", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.25;
+        const name_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.project_create_name.items,
+            self.settings_panel.focused_field == .project_create_name,
+            .{ .placeholder = "my-workspace" },
         );
+        if (name_focused) self.settings_panel.focused_field = .project_create_name;
+        y += layout.input_height + layout.row_gap * 0.8;
 
-        var recovery_title_buf: [64]u8 = undefined;
-        const recovery_title = self.workspaceRecoveryHeadline(&recovery_title_buf);
-        var recovery_summary_buf: [96]u8 = undefined;
-        const recovery_summary = std.fmt.bufPrint(
-            &recovery_summary_buf,
-            "{d} missions with recovery history",
-            .{recovering_count},
-        ) catch "Mission recovery";
-        self.drawMissionSummaryCard(recovery_rect, self.workspaceRecoveryColor(), "Recovery", recovery_title, recovery_summary);
+        self.drawLabel(rect.min[0], y, "Vision (optional)", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.25;
+        const vision_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.project_create_vision.items,
+            self.settings_panel.focused_field == .project_create_vision,
+            .{ .placeholder = "Describe the workspace goal..." },
+        );
+        if (vision_focused) self.settings_panel.focused_field = .project_create_vision;
+        _ = pad;
+    }
 
-        const content_top = cards_top + card_h + layout.row_gap;
-        const content_h = @max(1.0, panel_rect.max[1] - content_top - pad);
-        const list_w = @max(240.0 * self.ui_scale, inner_w * 0.36);
-        const list_rect = Rect.fromXYWH(panel_rect.min[0] + pad, content_top, list_w, content_h);
-        const detail_rect = Rect.fromXYWH(list_rect.max[0] + card_gap, content_top, @max(1.0, panel_rect.max[0] - list_rect.max[0] - pad - card_gap), content_h);
-        self.drawMissionListPanel(list_rect);
-        self.drawMissionDetailPanel(detail_rect);
+    fn drawWizardStepMounts(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
+        var y = rect.min[1];
+        // Existing mounts
+        self.drawText(rect.min[0], y, "Mounts (optional — press Add to add each)", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.4;
+        const row_h = @max(layout.button_height, 26.0 * self.ui_scale);
+        for (self.ws.workspace_wizard_mounts.items, 0..) |m, idx| {
+            if (y + row_h > rect.max[1] - layout.input_height * 3.0 - row_h * 1.5) break;
+            const line = std.fmt.allocPrint(self.allocator, "{s}  →  {s}", .{ m.path, m.node_id }) catch null;
+            defer if (line) |v| self.allocator.free(v);
+            self.drawText(rect.min[0] + pad * 0.5, y + (row_h - layout.line_height) * 0.5, line orelse m.path, self.theme.colors.text);
+            // Remove button
+            const rm_w = @max(60.0 * self.ui_scale, self.measureText("Remove") + pad);
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(rect.max[0] - rm_w, y, rm_w, row_h),
+                "Remove",
+                .{ .variant = .secondary },
+            )) {
+                var entry = self.ws.workspace_wizard_mounts.orderedRemove(idx);
+                entry.deinit(self.allocator);
+                return;
+            }
+            y += row_h + layout.row_gap * 0.3;
+        }
+        // Add form
+        const form_top = rect.max[1] - layout.input_height * 2.0 - layout.row_gap * 1.0 - row_h;
+        y = @max(y, form_top);
+        self.drawLabel(rect.min[0], y, "Mount Path", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        const mp_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.project_mount_path.items,
+            self.settings_panel.focused_field == .project_mount_path,
+            .{ .placeholder = "/workspace/path" },
+        );
+        if (mp_focused) self.settings_panel.focused_field = .project_mount_path;
+        y += layout.input_height + layout.row_gap * 0.4;
+        self.drawLabel(rect.min[0], y, "Node ID", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        const ni_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.project_mount_node_id.items,
+            self.settings_panel.focused_field == .project_mount_node_id,
+            .{ .placeholder = "node-id" },
+        );
+        if (ni_focused) self.settings_panel.focused_field = .project_mount_node_id;
+        y += layout.input_height + layout.row_gap * 0.4;
+        const add_w = @max(80.0 * self.ui_scale, self.measureText("Add Mount") + pad);
+        const can_add = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t\r\n").len > 0 and
+            std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t\r\n").len > 0;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(rect.min[0], y, add_w, row_h),
+            "Add Mount",
+            .{ .variant = .secondary, .disabled = !can_add },
+        )) {
+            self.wizardAddCurrentMount();
+        }
+    }
+
+    fn drawWizardStepBinds(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
+        var y = rect.min[1];
+        self.drawText(rect.min[0], y, "Binds (optional — press Add to add each)", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.4;
+        const row_h = @max(layout.button_height, 26.0 * self.ui_scale);
+        for (self.ws.workspace_wizard_binds.items, 0..) |b, idx| {
+            if (y + row_h > rect.max[1] - layout.input_height * 3.0 - row_h * 1.5) break;
+            const line = std.fmt.allocPrint(self.allocator, "{s}  →  {s}", .{ b.bind_path, b.target_path }) catch null;
+            defer if (line) |v| self.allocator.free(v);
+            self.drawText(rect.min[0] + pad * 0.5, y + (row_h - layout.line_height) * 0.5, line orelse b.bind_path, self.theme.colors.text);
+            const rm_w = @max(60.0 * self.ui_scale, self.measureText("Remove") + pad);
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(rect.max[0] - rm_w, y, rm_w, row_h),
+                "Remove",
+                .{ .variant = .secondary },
+            )) {
+                var entry = self.ws.workspace_wizard_binds.orderedRemove(idx);
+                entry.deinit(self.allocator);
+                return;
+            }
+            y += row_h + layout.row_gap * 0.3;
+        }
+        const form_top = rect.max[1] - layout.input_height * 2.0 - layout.row_gap * 1.0 - row_h;
+        y = @max(y, form_top);
+        self.drawLabel(rect.min[0], y, "Bind Path", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        const bp_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.workspace_bind_path.items,
+            self.settings_panel.focused_field == .workspace_bind_path,
+            .{ .placeholder = "/bind/path" },
+        );
+        if (bp_focused) self.settings_panel.focused_field = .workspace_bind_path;
+        y += layout.input_height + layout.row_gap * 0.4;
+        self.drawLabel(rect.min[0], y, "Target Path", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        const tp_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.workspace_bind_target_path.items,
+            self.settings_panel.focused_field == .workspace_bind_target_path,
+            .{ .placeholder = "/target/path" },
+        );
+        if (tp_focused) self.settings_panel.focused_field = .workspace_bind_target_path;
+        y += layout.input_height + layout.row_gap * 0.4;
+        const add_w = @max(80.0 * self.ui_scale, self.measureText("Add Bind") + pad);
+        const can_add = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t\r\n").len > 0 and
+            std.mem.trim(u8, self.settings_panel.workspace_bind_target_path.items, " \t\r\n").len > 0;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(rect.min[0], y, add_w, row_h),
+            "Add Bind",
+            .{ .variant = .secondary, .disabled = !can_add },
+        )) {
+            self.wizardAddCurrentBind();
+        }
+    }
+
+    fn drawWizardStepReview(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
+        var y = rect.min[1];
+        self.drawText(rect.min[0], y, "Review your workspace configuration:", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.6;
+
+        const label_w = 120.0 * self.ui_scale;
+        // Template
+        const tmpl_id = if (self.selectedLauncherCreateWorkspaceTemplate()) |t| t.id else "(none)";
+        self.drawTextTrimmed(rect.min[0], y, label_w, "Template:", self.theme.colors.text_secondary);
+        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, tmpl_id, self.theme.colors.text);
+        y += layout.line_height + layout.row_gap * 0.35;
+        // Name
+        const name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
+        self.drawTextTrimmed(rect.min[0], y, label_w, "Name:", self.theme.colors.text_secondary);
+        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, if (name.len > 0) name else "(none)", self.theme.colors.text);
+        y += layout.line_height + layout.row_gap * 0.35;
+        // Vision
+        const vision = std.mem.trim(u8, self.settings_panel.project_create_vision.items, " \t\r\n");
+        self.drawTextTrimmed(rect.min[0], y, label_w, "Vision:", self.theme.colors.text_secondary);
+        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, if (vision.len > 0) vision else "(none)", self.theme.colors.text);
+        y += layout.line_height + layout.row_gap * 0.6;
+        // Mounts
+        const mount_count_str = std.fmt.allocPrint(self.allocator, "Mounts ({d}):", .{self.ws.workspace_wizard_mounts.items.len}) catch null;
+        defer if (mount_count_str) |v| self.allocator.free(v);
+        self.drawTextTrimmed(rect.min[0], y, label_w, mount_count_str orelse "Mounts:", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        for (self.ws.workspace_wizard_mounts.items) |m| {
+            if (y + layout.line_height > rect.max[1] - layout.line_height * 3.0) break;
+            const line = std.fmt.allocPrint(self.allocator, "  {s}  →  {s}", .{ m.path, m.node_id }) catch null;
+            defer if (line) |v| self.allocator.free(v);
+            self.drawTextTrimmed(rect.min[0] + pad * 0.5, y, rect.width() - pad * 0.5, line orelse m.path, self.theme.colors.text);
+            y += layout.line_height + layout.row_gap * 0.2;
+        }
+        y += layout.row_gap * 0.4;
+        // Binds
+        const bind_count_str = std.fmt.allocPrint(self.allocator, "Binds ({d}):", .{self.ws.workspace_wizard_binds.items.len}) catch null;
+        defer if (bind_count_str) |v| self.allocator.free(v);
+        self.drawTextTrimmed(rect.min[0], y, label_w, bind_count_str orelse "Binds:", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        for (self.ws.workspace_wizard_binds.items) |b| {
+            if (y + layout.line_height > rect.max[1]) break;
+            const line = std.fmt.allocPrint(self.allocator, "  {s}  →  {s}", .{ b.bind_path, b.target_path }) catch null;
+            defer if (line) |v| self.allocator.free(v);
+            self.drawTextTrimmed(rect.min[0] + pad * 0.5, y, rect.width() - pad * 0.5, line orelse b.bind_path, self.theme.colors.text);
+            y += layout.line_height + layout.row_gap * 0.2;
+        }
+    }
+
+    fn ensureMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        if (self.ws.mcp_config_panel_id) |panel_id| {
+            if (self.findPanelById(manager, panel_id) != null) {
+                manager.focusPanel(panel_id);
+                return panel_id;
+            }
+            self.ws.mcp_config_panel_id = null;
+        }
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .McpConfig) {
+                self.ws.mcp_config_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
+        }
+        const panel_data = workspace.PanelData{ .McpConfig = {} };
+        const panel_id = try manager.openPanel(.McpConfig, "MCP Servers", panel_data);
+        self.ws.mcp_config_panel_id = panel_id;
+        if (manager.workspace.syncDockLayout() catch false) {
+            manager.workspace.markDirty();
+        }
+        manager.focusPanel(panel_id);
+        return panel_id;
+    }
+
+    fn ensureNodeTopologyPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        if (self.ws.node_topology_panel_id) |panel_id| {
+            if (self.findPanelById(manager, panel_id) != null) {
+                manager.focusPanel(panel_id);
+                return panel_id;
+            }
+            self.ws.node_topology_panel_id = null;
+        }
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .NodeTopology) {
+                self.ws.node_topology_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
+        }
+        const panel_data = workspace.PanelData{ .NodeTopology = {} };
+        const panel_id = try manager.openPanel(.NodeTopology, "Node Topology", panel_data);
+        self.ws.node_topology_panel_id = panel_id;
+        if (manager.workspace.syncDockLayout() catch false) {
+            manager.workspace.markDirty();
+        }
+        manager.focusPanel(panel_id);
+        return panel_id;
+    }
+
+    fn ensureVenomManagerPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        if (self.ws.venom_manager_panel_id) |panel_id| {
+            if (self.findPanelById(manager, panel_id) != null) {
+                manager.focusPanel(panel_id);
+                return panel_id;
+            }
+            self.ws.venom_manager_panel_id = null;
+        }
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .VenomManager) {
+                self.ws.venom_manager_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
+        }
+        const panel_data = workspace.PanelData{ .VenomManager = {} };
+        const panel_id = try manager.openPanel(.VenomManager, "Venoms", panel_data);
+        self.ws.venom_manager_panel_id = panel_id;
+        if (manager.workspace.syncDockLayout() catch false) {
+            manager.workspace.markDirty();
+        }
+        manager.focusPanel(panel_id);
+        return panel_id;
+    }
+
+    fn ensureDashboardPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        if (self.ws.dashboard_panel_id) |panel_id| {
+            if (self.findPanelById(manager, panel_id) != null) {
+                manager.focusPanel(panel_id);
+                return panel_id;
+            }
+            self.ws.dashboard_panel_id = null;
+        }
+        for (manager.workspace.panels.items) |*panel| {
+            if (panel.kind == .Dashboard) {
+                self.ws.dashboard_panel_id = panel.id;
+                manager.focusPanel(panel.id);
+                return panel.id;
+            }
+        }
+        const panel_data = workspace.PanelData{ .Dashboard = {} };
+        const panel_id = try manager.openPanel(.Dashboard, "Dashboard", panel_data);
+        self.ws.dashboard_panel_id = panel_id;
+        if (manager.workspace.syncDockLayout() catch false) {
+            manager.workspace.markDirty();
+        }
+        manager.focusPanel(panel_id);
+        return panel_id;
     }
 
     fn drawMissionSummaryCard(self: *App, rect: Rect, accent: [4]f32, title: []const u8, value: []const u8, summary: []const u8) void {
@@ -10021,248 +10906,10 @@ const App = struct {
         self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + rect.height() - pad - line_h, rect.width() - pad * 2.0, summary, self.theme.colors.text_secondary);
     }
 
-    fn drawMissionListPanel(self: *App, rect: Rect) void {
-        self.drawSurfacePanel(rect);
-        const pad = @max(self.theme.spacing.xs, 8.0 * self.ui_scale);
-        const line_h = self.textLineHeight();
-        const header_y = rect.min[1] + pad;
-        self.drawTextTrimmed(rect.min[0] + pad, header_y, rect.width() - pad * 2.0, "Mission Queue", self.theme.colors.text_primary);
 
-        if (self.mission_records.items.len == 0) {
-            self.drawTextTrimmed(
-                rect.min[0] + pad,
-                header_y + line_h + pad,
-                rect.width() - pad * 2.0,
-                if (self.connection_state == .connected) "No missions recorded yet." else "Connect to load mission records.",
-                self.theme.colors.text_secondary,
-            );
-            return;
-        }
 
-        const row_gap = @max(6.0 * self.ui_scale, pad * 0.6);
-        const row_h = @max(line_h * 3.0, 76.0 * self.ui_scale);
-        var y = header_y + line_h + pad * 0.8;
-        var drawn: usize = 0;
-        const available_rows = @as(usize, @intFromFloat(@max(1.0, (rect.max[1] - y - pad) / (row_h + row_gap))));
-        const now_ms = std.time.milliTimestamp();
 
-        for (self.mission_records.items) |mission| {
-            if (drawn >= available_rows) break;
-            const row_rect = Rect.fromXYWH(rect.min[0] + pad, y, rect.width() - pad * 2.0, row_h);
-            const selected = self.mission_selected_id != null and std.mem.eql(u8, self.mission_selected_id.?, mission.mission_id);
-            const hovered = row_rect.contains(.{ self.mouse_x, self.mouse_y });
-            const fill = if (selected)
-                zcolors.withAlpha(self.theme.colors.primary, 0.14)
-            else if (hovered)
-                zcolors.withAlpha(self.theme.colors.primary, 0.08)
-            else
-                zcolors.withAlpha(self.theme.colors.surface, 0.6);
-            self.drawFilledRect(row_rect, fill);
-            self.drawRect(row_rect, if (selected) self.theme.colors.primary else self.theme.colors.border);
 
-            const content_x = row_rect.min[0] + pad;
-            const content_w = row_rect.width() - pad * 2.0;
-            self.drawTextTrimmed(content_x, row_rect.min[1] + pad * 0.55, @max(1.0, content_w - 88.0 * self.ui_scale), missionDisplayTitle(&mission), self.theme.colors.text_primary);
-
-            var state_buf: [40]u8 = undefined;
-            const state_rect = Rect.fromXYWH(row_rect.max[0] - pad - 80.0 * self.ui_scale, row_rect.min[1] + pad * 0.45, 80.0 * self.ui_scale, line_h + pad * 0.5);
-            const state_label = normalizedMissionStateLabel(mission.state, &state_buf);
-            self.drawMissionStateBadge(state_rect, state_label, missionStateColor(self, mission.state));
-
-            var secondary_buf: [160]u8 = undefined;
-            const secondary = std.fmt.bufPrint(
-                &secondary_buf,
-                "{s}  {s}",
-                .{ mission.stage, mission.project_id orelse "no-workspace" },
-            ) catch mission.stage;
-            self.drawTextTrimmed(content_x, row_rect.min[1] + pad * 0.55 + line_h + pad * 0.25, content_w, secondary, self.theme.colors.text_secondary);
-
-            var meta_buf: [160]u8 = undefined;
-            const relative = if (mission.updated_at_ms > 0) blk: {
-                var time_buf: [40]u8 = undefined;
-                break :blk formatRelativeTimeLabel(now_ms, mission.updated_at_ms, &time_buf);
-            } else "unknown";
-            const meta = std.fmt.bufPrint(
-                &meta_buf,
-                "{s}  {s}",
-                .{ mission.agent_id orelse "agent:unknown", relative },
-            ) catch relative;
-            self.drawTextTrimmed(content_x, row_rect.min[1] + pad * 0.55 + line_h * 2.0 + pad * 0.3, content_w, meta, self.theme.colors.text_secondary);
-
-            if (self.mouse_released and row_rect.contains(.{ self.mouse_x, self.mouse_y })) {
-                self.setSelectedMissionId(mission.mission_id);
-            }
-
-            y += row_h + row_gap;
-            drawn += 1;
-        }
-
-        if (self.mission_records.items.len > drawn) {
-            var more_buf: [64]u8 = undefined;
-            const more = std.fmt.bufPrint(&more_buf, "...and {d} more", .{self.mission_records.items.len - drawn}) catch "...";
-            self.drawTextTrimmed(rect.min[0] + pad, rect.max[1] - pad - line_h, rect.width() - pad * 2.0, more, self.theme.colors.text_secondary);
-        }
-    }
-
-    fn drawMissionDetailPanel(self: *App, rect: Rect) void {
-        self.drawSurfacePanel(rect);
-        const mission = self.selectedMission() orelse {
-            self.drawTextTrimmed(rect.min[0] + self.theme.spacing.sm, rect.min[1] + self.theme.spacing.sm, rect.width() - self.theme.spacing.sm * 2.0, "Select a mission to inspect it.", self.theme.colors.text_secondary);
-            return;
-        };
-
-        const pad = @max(self.theme.spacing.sm, 10.0 * self.ui_scale);
-        const line_h = self.textLineHeight();
-        const inner_w = rect.width() - pad * 2.0;
-        var y = rect.min[1] + pad;
-
-        self.drawTextTrimmed(rect.min[0] + pad, y, inner_w - 96.0 * self.ui_scale, missionDisplayTitle(mission), self.theme.colors.text_primary);
-        var state_buf: [40]u8 = undefined;
-        const badge_rect = Rect.fromXYWH(rect.max[0] - pad - 88.0 * self.ui_scale, y - pad * 0.2, 88.0 * self.ui_scale, line_h + pad * 0.6);
-        self.drawMissionStateBadge(badge_rect, normalizedMissionStateLabel(mission.state, &state_buf), missionStateColor(self, mission.state));
-        y += line_h + pad * 0.6;
-
-        if (mission.summary) |summary| {
-            y += self.drawTextWrapped(rect.min[0] + pad, y, inner_w, summary, self.theme.colors.text_secondary) + pad * 0.5;
-        }
-
-        y = self.drawMissionDetailLine(rect, pad, y, "Use Case", mission.use_case);
-        y = self.drawMissionDetailLine(rect, pad, y, "Stage", mission.stage);
-        y = self.drawMissionDetailLine(rect, pad, y, "Agent", mission.agent_id orelse "unknown");
-        if (mission.persona_pack) |persona_pack| {
-            y = self.drawMissionDetailLine(rect, pad, y, "Persona Pack", persona_pack);
-        }
-        if (mission.project_id) |project_id| {
-            y = self.drawMissionDetailLine(rect, pad, y, "Workspace", project_id);
-        }
-        if (mission.worktree_name) |worktree_name| {
-            y = self.drawMissionDetailLine(rect, pad, y, "Worktree", worktree_name);
-        }
-        if (mission.workspace_root) |workspace_root| {
-            y = self.drawMissionDetailLine(rect, pad, y, "Workspace", workspace_root);
-        }
-        if (mission.contract_context_path != null or mission.contract_state_path != null or mission.contract_artifact_root != null) {
-            y += pad * 0.35;
-            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Contract", self.theme.colors.text_primary);
-            y += line_h;
-            y = self.drawOptionalMissionDetailLine(rect, pad, y, "Context", mission.contract_context_path);
-            y = self.drawOptionalMissionDetailLine(rect, pad, y, "State File", mission.contract_state_path);
-            y = self.drawOptionalMissionDetailLine(rect, pad, y, "Artifacts Root", mission.contract_artifact_root);
-        }
-
-        if (std.mem.eql(u8, mission.use_case, "pr_review")) {
-            const provider_sync = latestMissionArtifactByKind(mission, "provider_sync");
-            const checkout_sync = latestMissionArtifactByKind(mission, "checkout_sync");
-            const repo_status = latestMissionArtifactByKind(mission, "repo_status");
-            const diff_range = latestMissionArtifactByKind(mission, "diff_range");
-            const validation = latestMissionArtifactByKind(mission, "validation");
-            const recommendation = latestMissionArtifactByKind(mission, "recommendation");
-            const publish_review = latestMissionArtifactByKind(mission, "publish_review");
-
-            if (provider_sync != null or checkout_sync != null or repo_status != null or diff_range != null or validation != null or recommendation != null or publish_review != null) {
-                y += pad * 0.35;
-                self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "PR Review", self.theme.colors.text_primary);
-                y += line_h;
-                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Provider Sync", provider_sync);
-                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Checkout", checkout_sync);
-                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Repo Status", repo_status);
-                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Diff Range", diff_range);
-                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Validation", validation);
-                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Recommendation", recommendation);
-                y = self.drawMissionArtifactDetailLine(rect, pad, y, "Published Review", publish_review);
-            }
-        }
-
-        var recovery_buf: [96]u8 = undefined;
-        const recovery_text = if (mission.recovery_count > 0)
-            (std.fmt.bufPrint(&recovery_buf, "{d} recoveries", .{mission.recovery_count}) catch "recovery history")
-        else
-            "none";
-        y = self.drawMissionDetailLine(rect, pad, y, "Recovery", recovery_text);
-        if (mission.recovery_reason) |reason| {
-            y = self.drawMissionDetailLine(rect, pad, y, "Recovery Reason", reason);
-        }
-        if (mission.blocked_reason) |reason| {
-            y = self.drawMissionDetailLine(rect, pad, y, "Blocked", reason);
-        }
-
-        y += pad * 0.4;
-        self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Memory ownership", self.theme.colors.text_primary);
-        y += line_h;
-        y += self.drawTextWrapped(
-            rect.min[0] + pad,
-            y,
-            inner_w,
-            "Kernel policy memories stay write-protected, identity memories remain agent-owned, and working memory stays mutable for strategy updates.",
-            self.theme.colors.text_secondary,
-        ) + pad * 0.6;
-
-        if (mission.pending_approval) |approval| {
-            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Pending approval", self.theme.colors.text_primary);
-            y += line_h;
-            y += self.drawTextWrapped(rect.min[0] + pad, y, inner_w, approval.message, self.theme.colors.text_secondary) + pad * 0.2;
-            var approval_buf: [128]u8 = undefined;
-            const approval_meta = std.fmt.bufPrint(
-                &approval_buf,
-                "{s} requested by {s}/{s}",
-                .{ approval.action_kind, approval.requested_by.actor_type, approval.requested_by.actor_id },
-            ) catch approval.action_kind;
-            y += self.drawTextWrapped(rect.min[0] + pad, y, inner_w, approval_meta, self.theme.colors.text_secondary) + pad * 0.6;
-        }
-
-        if (mission.artifacts.items.len > 0 and y < rect.max[1] - line_h * 2.0) {
-            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Artifacts", self.theme.colors.text_primary);
-            y += line_h;
-            const start_index = if (mission.artifacts.items.len > MISSION_PREVIEW_ARTIFACT_COUNT) mission.artifacts.items.len - MISSION_PREVIEW_ARTIFACT_COUNT else 0;
-            for (mission.artifacts.items[start_index..]) |artifact| {
-                if (y >= rect.max[1] - line_h * 2.0) break;
-                var artifact_buf: [256]u8 = undefined;
-                const artifact_line = std.fmt.bufPrint(
-                    &artifact_buf,
-                    "{s}  {s}",
-                    .{ artifact.kind, artifact.summary orelse artifact.path orelse "(no summary)" },
-                ) catch artifact.kind;
-                self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, artifact_line, self.theme.colors.text_secondary);
-                y += line_h;
-            }
-            y += pad * 0.4;
-        }
-
-        if (mission.events.items.len > 0 and y < rect.max[1] - line_h * 2.0) {
-            self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, "Recent events", self.theme.colors.text_primary);
-            y += line_h;
-            const start_index = if (mission.events.items.len > MISSION_PREVIEW_EVENT_COUNT) mission.events.items.len - MISSION_PREVIEW_EVENT_COUNT else 0;
-            const now_ms = std.time.milliTimestamp();
-            for (mission.events.items[start_index..]) |event| {
-                if (y >= rect.max[1] - line_h * 2.0) break;
-                var time_buf: [40]u8 = undefined;
-                var event_buf: [256]u8 = undefined;
-                const event_line = std.fmt.bufPrint(
-                    &event_buf,
-                    "{s}  {s}",
-                    .{ formatRelativeTimeLabel(now_ms, event.created_at_ms, &time_buf), event.event_type },
-                ) catch event.event_type;
-                self.drawTextTrimmed(rect.min[0] + pad, y, inner_w, event_line, self.theme.colors.text_secondary);
-                y += line_h;
-            }
-        }
-    }
-
-    fn drawMissionDetailLine(self: *App, rect: Rect, pad: f32, y: f32, label: []const u8, value: []const u8) f32 {
-        const line_h = self.textLineHeight();
-        const label_w = @max(110.0 * self.ui_scale, rect.width() * 0.18);
-        self.drawTextTrimmed(rect.min[0] + pad, y, label_w, label, self.theme.colors.text_secondary);
-        self.drawTextTrimmed(rect.min[0] + pad + label_w + pad * 0.6, y, rect.width() - label_w - pad * 3.0, value, self.theme.colors.text_primary);
-        return y + line_h;
-    }
-
-    fn drawOptionalMissionDetailLine(self: *App, rect: Rect, pad: f32, y: f32, label: []const u8, value: ?[]const u8) f32 {
-        if (value) |text| return self.drawMissionDetailLine(rect, pad, y, label, text);
-        return y;
-    }
-
-    fn drawMissionArtifactDetailLine(
-        self: *App,
         rect: Rect,
         pad: f32,
         y: f32,
@@ -10276,41 +10923,29 @@ const App = struct {
         return self.drawOptionalMissionDetailLine(rect, pad, y, label, value);
     }
 
-    fn drawMissionStateBadge(self: *App, rect: Rect, label: []const u8, color: [4]f32) void {
-        self.drawFilledRect(rect, zcolors.withAlpha(color, 0.18));
-        self.drawRect(rect, color);
-        self.drawCenteredText(rect, label, color);
-    }
 
-    fn setSelectedMissionId(self: *App, mission_id: []const u8) void {
-        if (self.mission_selected_id) |existing| {
-            if (std.mem.eql(u8, existing, mission_id)) return;
-            self.allocator.free(existing);
-        }
-        self.mission_selected_id = self.allocator.dupe(u8, mission_id) catch null;
-    }
 
     fn workspaceRecoveryHeadline(self: *App, buf: []u8) []const u8 {
-        if (self.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.workspace_recovery_suspended_until) {
+        if (self.ws.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.ws.workspace_recovery_suspended_until) {
             return "suspended";
         }
-        if (self.workspace_recovery_blocked_until != 0 and self.debug_frame_counter < self.workspace_recovery_blocked_until) {
+        if (self.ws.workspace_recovery_blocked_until != 0 and self.debug_frame_counter < self.ws.workspace_recovery_blocked_until) {
             return "cooldown";
         }
-        if (self.workspace_recovery_failures > 0) {
-            return std.fmt.bufPrint(buf, "{d} recent retries", .{self.workspace_recovery_failures}) catch "retrying";
+        if (self.ws.workspace_recovery_failures > 0) {
+            return std.fmt.bufPrint(buf, "{d} recent retries", .{self.ws.workspace_recovery_failures}) catch "retrying";
         }
         return "stable";
     }
 
     fn workspaceRecoveryColor(self: *App) [4]f32 {
-        if (self.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.workspace_recovery_suspended_until) {
+        if (self.ws.workspace_recovery_suspended_until != 0 and self.debug_frame_counter < self.ws.workspace_recovery_suspended_until) {
             return self.theme.colors.danger;
         }
-        if (self.workspace_recovery_blocked_until != 0 and self.debug_frame_counter < self.workspace_recovery_blocked_until) {
+        if (self.ws.workspace_recovery_blocked_until != 0 and self.debug_frame_counter < self.ws.workspace_recovery_blocked_until) {
             return zcolors.rgba(236, 174, 36, 255);
         }
-        if (self.workspace_recovery_failures > 0) {
+        if (self.ws.workspace_recovery_failures > 0) {
             return zcolors.rgba(236, 174, 36, 255);
         }
         return self.theme.colors.success;
@@ -10319,10 +10954,10 @@ const App = struct {
     fn missionDashboardStatusText(self: *App, buf: []u8) []const u8 {
         if (self.connection_state != .connected) return "Disconnected";
         if (self.client_context.pending_workboard_request_id != null) return "Updating mission dashboard...";
-        if (self.mission_last_error) |value| return value;
-        if (self.mission_last_refresh_ms <= 0) return "Mission dashboard not loaded yet.";
+        if (self.mission.last_error) |value| return value;
+        if (self.mission.last_refresh_ms <= 0) return "Mission dashboard not loaded yet.";
         var rel_buf: [40]u8 = undefined;
-        const relative = formatRelativeTimeLabel(std.time.milliTimestamp(), self.mission_last_refresh_ms, &rel_buf);
+        const relative = mission_helpers.formatRelativeTimeLabel(std.time.milliTimestamp(), self.mission.last_refresh_ms, &rel_buf);
         return std.fmt.bufPrint(buf, "Live mission data refreshed {s}", .{relative}) catch "Live mission data";
     }
 
@@ -10423,7 +11058,7 @@ const App = struct {
     }
 
     fn findMountForPath(self: *App, path: []const u8) ?*const workspace_types.MountView {
-        if (self.workspace_state) |*status| {
+        if (self.ws.workspace_state) |*status| {
             var best: ?*const workspace_types.MountView = null;
             var best_len: usize = 0;
             for (status.mounts.items) |*mount| {
@@ -10439,7 +11074,7 @@ const App = struct {
     }
 
     fn setFilesystemPath(self: *App, path: []const u8) !void {
-        const existing = self.filesystem_path.items;
+        const existing = self.fs.filesystem_path.items;
         const aliases_existing =
             existing.len > 0 and
             path.len > 0 and
@@ -10450,11 +11085,11 @@ const App = struct {
             path;
         defer if (aliases_existing) self.allocator.free(safe_path);
 
-        self.filesystem_path.clearRetainingCapacity();
+        self.fs.filesystem_path.clearRetainingCapacity();
         if (safe_path.len == 0) {
-            try self.filesystem_path.appendSlice(self.allocator, "/");
+            try self.fs.filesystem_path.appendSlice(self.allocator, "/");
         } else {
-            try self.filesystem_path.appendSlice(self.allocator, safe_path);
+            try self.fs.filesystem_path.appendSlice(self.allocator, safe_path);
         }
     }
 
@@ -10513,8 +11148,8 @@ const App = struct {
     }
 
     fn refreshFilesystemBrowser(self: *App) !void {
-        if (self.filesystem_path.items.len == 0) {
-            try self.filesystem_path.appendSlice(self.allocator, "/");
+        if (self.fs.filesystem_path.items.len == 0) {
+            try self.fs.filesystem_path.appendSlice(self.allocator, "/");
         }
         self.requestFilesystemBrowserRefresh(true);
     }
@@ -10561,7 +11196,7 @@ const App = struct {
     }
 
     fn updateFilesystemEntryKind(self: *App, path: []const u8, kind: FilesystemEntryKind) void {
-        for (self.filesystem_entries.items) |*item| {
+        for (self.fs.filesystem_entries.items) |*item| {
             if (!std.mem.eql(u8, item.path, path)) continue;
             const next_label = self.allocFilesystemTypeLabel(item.name, kind) catch null;
             item.kind = kind;
@@ -10575,7 +11210,7 @@ const App = struct {
     }
 
     fn filesystemEntryExists(self: *App, name: []const u8) bool {
-        for (self.filesystem_entries.items) |entry| {
+        for (self.fs.filesystem_entries.items) |entry| {
             if (std.mem.eql(u8, entry.name, name)) return true;
         }
         return false;
@@ -10588,7 +11223,7 @@ const App = struct {
     }
 
     fn filesystemServiceRuntimePath(self: *App, name: []const u8) ![]u8 {
-        const current_path = if (self.filesystem_path.items.len > 0) self.filesystem_path.items else "/";
+        const current_path = if (self.fs.filesystem_path.items.len > 0) self.fs.filesystem_path.items else "/";
         return self.joinFilesystemPath(current_path, name);
     }
 
@@ -10629,9 +11264,9 @@ const App = struct {
     }
 
     fn selectedContractService(self: *App) ?*const ContractServiceEntry {
-        if (self.contract_services.items.len == 0) return null;
-        if (self.contract_service_selected_index >= self.contract_services.items.len) return null;
-        return &self.contract_services.items[self.contract_service_selected_index];
+        if (self.fs.contract_services.items.len == 0) return null;
+        if (self.fs.contract_service_selected_index >= self.fs.contract_services.items.len) return null;
+        return &self.fs.contract_services.items[self.fs.contract_service_selected_index];
     }
 
     fn contractStatusPathFromInvokePath(self: *App, invoke_path: []const u8) ![]u8 {
@@ -10702,7 +11337,7 @@ const App = struct {
             const template_path = try self.joinFilesystemPath(service_path, "TEMPLATE.json");
             errdefer self.allocator.free(template_path);
 
-            try self.contract_services.append(self.allocator, .{
+            try self.fs.contract_services.append(self.allocator, .{
                 .service_id = try self.allocator.dupe(u8, service_id),
                 .service_path = try self.allocator.dupe(u8, service_path),
                 .invoke_path = try self.allocator.dupe(u8, invoke_path),
@@ -10712,10 +11347,10 @@ const App = struct {
             });
         }
 
-        if (self.contract_services.items.len == 0) {
-            self.contract_service_selected_index = 0;
-        } else if (self.contract_service_selected_index >= self.contract_services.items.len) {
-            self.contract_service_selected_index = 0;
+        if (self.fs.contract_services.items.len == 0) {
+            self.fs.contract_service_selected_index = 0;
+        } else if (self.fs.contract_service_selected_index >= self.fs.contract_services.items.len) {
+            self.fs.contract_service_selected_index = 0;
         }
         self.clearFilesystemError();
     }
@@ -10772,8 +11407,8 @@ const App = struct {
         defer self.allocator.free(template_text);
         const trimmed = std.mem.trim(u8, template_text, " \t\r\n");
         const payload = if (trimmed.len > 0) trimmed else "{}";
-        self.contract_invoke_payload.clearRetainingCapacity();
-        try self.contract_invoke_payload.appendSlice(self.allocator, payload);
+        self.fs.contract_invoke_payload.clearRetainingCapacity();
+        try self.fs.contract_invoke_payload.appendSlice(self.allocator, payload);
         try self.applyFilesystemPreview(entry.template_path, payload);
         self.clearFilesystemError();
     }
@@ -10793,7 +11428,7 @@ const App = struct {
         const entry = self.selectedContractService() orelse return error.MissingField;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
 
-        const payload_trimmed = std.mem.trim(u8, self.contract_invoke_payload.items, " \t\r\n");
+        const payload_trimmed = std.mem.trim(u8, self.fs.contract_invoke_payload.items, " \t\r\n");
         const payload = if (payload_trimmed.len > 0) payload_trimmed else "{}";
         try self.writeFsPathTextGui(client, entry.invoke_path, payload);
 
@@ -10832,7 +11467,7 @@ const App = struct {
     }
 
     fn ensureTerminalSession(self: *App) !void {
-        if (self.terminal_session_id != null) return;
+        if (self.terminal.terminal_session_id != null) return;
 
         const session_id = try std.fmt.allocPrint(self.allocator, "gui-{d}", .{std.time.milliTimestamp()});
         defer self.allocator.free(session_id);
@@ -10848,14 +11483,14 @@ const App = struct {
         try self.writeTerminalControl("create.json", payload);
 
         self.clearTerminalState();
-        self.terminal_session_id = try self.allocator.dupe(u8, session_id);
+        self.terminal.terminal_session_id = try self.allocator.dupe(u8, session_id);
         self.setTerminalStatus("Terminal session ready");
-        self.terminal_next_poll_at_ms = std.time.milliTimestamp() + TERMINAL_READ_POLL_INTERVAL_MS;
+        self.terminal.terminal_next_poll_at_ms = std.time.milliTimestamp() + TERMINAL_READ_POLL_INTERVAL_MS;
     }
 
     fn closeTerminalSession(self: *App) !void {
-        if (self.terminal_session_id == null) return;
-        const session_id = self.terminal_session_id.?;
+        if (self.terminal.terminal_session_id == null) return;
+        const session_id = self.terminal.terminal_session_id.?;
         const escaped_session = try jsonEscape(self.allocator, session_id);
         defer self.allocator.free(escaped_session);
         const payload = try std.fmt.allocPrint(
@@ -10870,8 +11505,8 @@ const App = struct {
     }
 
     fn resizeTerminalSession(self: *App, cols: u32, rows: u32) !void {
-        if (self.terminal_session_id == null) return error.InvalidState;
-        const session_id = self.terminal_session_id.?;
+        if (self.terminal.terminal_session_id == null) return error.InvalidState;
+        const session_id = self.terminal.terminal_session_id.?;
         const escaped_session = try jsonEscape(self.allocator, session_id);
         defer self.allocator.free(escaped_session);
         const payload = try std.fmt.allocPrint(
@@ -10888,8 +11523,8 @@ const App = struct {
 
     fn sendTerminalControlC(self: *App) !void {
         try self.ensureTerminalSession();
-        if (self.terminal_session_id == null) return error.InvalidState;
-        const session_id = self.terminal_session_id.?;
+        if (self.terminal.terminal_session_id == null) return error.InvalidState;
+        const session_id = self.terminal.terminal_session_id.?;
         const escaped_session = try jsonEscape(self.allocator, session_id);
         defer self.allocator.free(escaped_session);
 
@@ -10906,9 +11541,9 @@ const App = struct {
 
     fn sendTerminalInputRaw(self: *App, input: []const u8, append_newline: bool) !void {
         try self.ensureTerminalSession();
-        if (self.terminal_session_id == null) return error.InvalidState;
+        if (self.terminal.terminal_session_id == null) return error.InvalidState;
 
-        const session_id = self.terminal_session_id.?;
+        const session_id = self.terminal.terminal_session_id.?;
         const escaped_session = try jsonEscape(self.allocator, session_id);
         defer self.allocator.free(escaped_session);
         const escaped_input = try jsonEscape(self.allocator, input);
@@ -10932,10 +11567,10 @@ const App = struct {
     }
 
     fn sendTerminalInputFromUi(self: *App) !void {
-        const input = std.mem.trim(u8, self.terminal_input.items, " \t\r\n");
+        const input = std.mem.trim(u8, self.terminal.terminal_input.items, " \t\r\n");
         if (input.len == 0) return;
         try self.sendTerminalInputRaw(input, true);
-        self.terminal_input.clearRetainingCapacity();
+        self.terminal.terminal_input.clearRetainingCapacity();
         self.terminalReadOnce(25) catch |err| switch (err) {
             error.RemoteError => {},
             else => return err,
@@ -10943,8 +11578,8 @@ const App = struct {
     }
 
     fn terminalReadOnce(self: *App, timeout_ms: u32) !void {
-        if (self.terminal_session_id == null) return;
-        const session_id = self.terminal_session_id.?;
+        if (self.terminal.terminal_session_id == null) return;
+        const session_id = self.terminal.terminal_session_id.?;
         const escaped_session = try jsonEscape(self.allocator, session_id);
         defer self.allocator.free(escaped_session);
         const payload = try std.fmt.allocPrint(
@@ -10958,7 +11593,7 @@ const App = struct {
         const result_payload = try self.readTerminalPath("/agents/self/terminal/result.json");
         defer self.allocator.free(result_payload);
         try self.applyTerminalReadResult(result_payload);
-        self.terminal_next_poll_at_ms = std.time.milliTimestamp() + TERMINAL_READ_POLL_INTERVAL_MS;
+        self.terminal.terminal_next_poll_at_ms = std.time.milliTimestamp() + TERMINAL_READ_POLL_INTERVAL_MS;
     }
 
     fn applyTerminalReadResult(self: *App, payload: []const u8) !void {
@@ -11012,13 +11647,13 @@ const App = struct {
             const decoded = try self.allocator.alloc(u8, decoded_len);
             defer self.allocator.free(decoded);
             try std.base64.standard.Decoder.decode(decoded, data_b64);
-            try self.terminal_backend.appendBytes(self.allocator, decoded);
+            try self.terminal.terminal_backend.appendBytes(self.allocator, decoded);
         }
 
         if (eof) {
-            if (self.terminal_session_id) |value| {
+            if (self.terminal.terminal_session_id) |value| {
                 self.allocator.free(value);
-                self.terminal_session_id = null;
+                self.terminal.terminal_session_id = null;
             }
             self.setTerminalStatus("Session closed (EOF)");
         } else {
@@ -11034,13 +11669,13 @@ const App = struct {
     }
 
     fn pollTerminalSession(self: *App) void {
-        if (!self.terminal_auto_poll) return;
-        if (self.terminal_session_id == null) return;
+        if (!self.terminal.terminal_auto_poll) return;
+        if (self.terminal.terminal_session_id == null) return;
         if (self.ws_client == null) return;
-        if (self.awaiting_reply or self.pending_send_job_id != null) return;
+        if (self.chat.awaiting_reply or self.chat.pending_send_job_id != null) return;
 
         const now_ms = std.time.milliTimestamp();
-        if (now_ms < self.terminal_next_poll_at_ms) return;
+        if (now_ms < self.terminal.terminal_next_poll_at_ms) return;
 
         self.terminalReadOnce(TERMINAL_READ_TIMEOUT_MS) catch |err| {
             if (err != error.RemoteError) {
@@ -11050,7 +11685,7 @@ const App = struct {
                     self.setTerminalError(text);
                 }
             }
-            self.terminal_next_poll_at_ms = now_ms + 500;
+            self.terminal.terminal_next_poll_at_ms = now_ms + 500;
             return;
         };
     }
@@ -11235,10 +11870,15 @@ const App = struct {
         const selected_workspace_lock_state = self.selectedWorkspaceTokenLocked();
         const selected_workspace_known = selected_workspace_lock_state != null;
         const selected_is_locked = if (selected_workspace_lock_state) |locked| locked else false;
+        const has_detail = self.ws.selected_workspace_detail != null;
+        const has_mount_selection = self.ws.workspace_selected_mount_index != null;
+        const has_bind_selection = self.ws.workspace_selected_bind_index != null;
+        const profile_id = self.config.selectedProfileId();
+        const has_local_node_val = self.config.appLocalNode(profile_id) != null;
         return .{
             .connected = self.connection_state == .connected,
-            .has_workspaces = self.projects.items.len > 0,
-            .has_nodes = self.nodes.items.len > 0,
+            .has_workspaces = self.ws.projects.items.len > 0,
+            .has_nodes = self.ws.nodes.items.len > 0,
             .can_create_workspace = self.connection_state == .connected and self.settings_panel.project_create_name.items.len > 0,
             .can_activate_workspace = self.connection_state == .connected and self.selectedWorkspaceId() != null,
             .can_attach_session = self.connection_state == .connected and self.selectedWorkspaceId() != null,
@@ -11301,7 +11941,7 @@ const App = struct {
         const selected_workspace_button_label: []const u8 = blk: {
             if (self.settings_panel.project_id.items.len == 0) break :blk "Select workspace";
             const selected_id = self.settings_panel.project_id.items;
-            for (self.projects.items) |project| {
+            for (self.ws.projects.items) |project| {
                 if (std.mem.eql(u8, project.id, selected_id)) {
                     const formatted = std.fmt.allocPrint(
                         self.allocator,
@@ -11350,14 +11990,14 @@ const App = struct {
             .ready => std.fmt.allocPrint(
                 self.allocator,
                 "Live session attached: {s}",
-                .{self.current_session_key orelse self.settings_panel.default_session.items},
+                .{self.chat.current_session_key orelse self.settings_panel.default_session.items},
             ) catch null,
             .err => blk: {
                 session_status_warning = true;
                 break :blk std.fmt.allocPrint(
                     self.allocator,
                     "Live chat unavailable: {s}",
-                    .{self.workspace_last_error orelse "session attach failed"},
+                    .{self.ws.workspace_last_error orelse "session attach failed"},
                 ) catch null;
             },
             .unknown, .warming => blk: {
@@ -11427,7 +12067,7 @@ const App = struct {
 
         var workspace_health_warning = false;
         var workspace_health_error = false;
-        if (self.workspace_state) |*status| {
+        if (self.ws.workspace_state) |*status| {
             const root_text = status.workspace_root orelse "(none)";
             const mounted_count: usize = if (status.actual_mounts.items.len > 0)
                 status.actual_mounts.items.len
@@ -11462,10 +12102,10 @@ const App = struct {
         owned.counts_line = std.fmt.allocPrint(
             self.allocator,
             "Workspaces: {d} | Nodes: {d}",
-            .{ self.projects.items.len, self.nodes.items.len },
+            .{ self.ws.projects.items.len, self.ws.nodes.items.len },
         ) catch null;
 
-        for (self.projects.items, 0..) |project, idx| {
+        for (self.ws.projects.items, 0..) |project, idx| {
             const line = std.fmt.allocPrint(
                 self.allocator,
                 "{s} [{s}] access={s} template={s} mounts={d} binds={d}",
@@ -11492,7 +12132,7 @@ const App = struct {
         }
 
         const now_ms = std.time.milliTimestamp();
-        for (self.nodes.items) |node| {
+        for (self.ws.nodes.items) |node| {
             const node_online = node.lease_expires_at_ms > now_ms;
             const line = std.fmt.allocPrint(
                 self.allocator,
@@ -11507,6 +12147,55 @@ const App = struct {
                 .line = line,
                 .degraded = !node_online,
             }) catch {};
+        }
+
+        if (self.ws.selected_workspace_detail) |*detail| {
+            for (detail.mounts.items, 0..) |*mount, idx| {
+                owned.mount_entries.append(self.allocator, .{
+                    .index = idx,
+                    .mount_path = mount.mount_path,
+                    .node_id = mount.node_id,
+                    .node_name = mount.node_name,
+                    .export_name = mount.export_name,
+                    .selected = self.ws.workspace_selected_mount_index == idx,
+                }) catch {};
+            }
+            for (detail.binds.items, 0..) |*bind, idx| {
+                owned.bind_entries.append(self.allocator, .{
+                    .index = idx,
+                    .bind_path = bind.bind_path,
+                    .target_path = bind.target_path,
+                    .selected = self.ws.workspace_selected_bind_index == idx,
+                }) catch {};
+            }
+            if (detail.workspace_token) |token| {
+                owned.token_display = maskTokenForDisplay(self.allocator, token) catch null;
+            }
+        }
+
+        if (self.ws.node_browser_open) {
+            const now_ms_for_nodes = std.time.milliTimestamp();
+            for (self.ws.nodes.items, 0..) |*node, idx| {
+                const node_online = node.lease_expires_at_ms > now_ms_for_nodes;
+                owned.node_picker_entries.append(self.allocator, .{
+                    .index = idx,
+                    .node_id = node.node_id,
+                    .node_name = node.node_name,
+                    .online = node_online,
+                    .selected = self.ws.node_browser_selected_index == idx,
+                }) catch {};
+            }
+        }
+
+        const profile_id = self.config.selectedProfileId();
+        var local_node_id_val: ?[]const u8 = null;
+        var local_node_name_val: ?[]const u8 = null;
+        var local_node_bootstrapped_val: bool = false;
+        if (self.config.appLocalNode(profile_id)) |local_node| {
+            local_node_id_val = local_node.node_id;
+            local_node_name_val = local_node.node_name;
+            local_node_bootstrapped_val = true;
+            owned.local_node_ttl_text = buildLocalNodeTtlText(self.allocator, self.ws.nodes.items, local_node.node_id) catch null;
         }
 
         owned.view = .{
@@ -11524,7 +12213,7 @@ const App = struct {
             .bind_path = self.settings_panel.workspace_bind_path.items,
             .bind_target_path = self.settings_panel.workspace_bind_target_path.items,
             .mount_hint = mount_hint,
-            .workspace_error_text = self.workspace_last_error,
+            .workspace_error_text = self.ws.workspace_last_error,
             .session_status_line = owned.session_status_line,
             .session_status_warning = session_status_warning,
             .selected_workspace_line = owned.selected_workspace_line,
@@ -11544,24 +12233,200 @@ const App = struct {
                 "External runtimes can use the workspace without live chat. Use Attach Session only when you want a Spiderweb runtime.",
             .workspaces = owned.projects.items,
             .nodes = owned.nodes.items,
+            .mounts = owned.mount_entries.items,
+            .binds = owned.bind_entries.items,
+            .nodes_for_picker = owned.node_picker_entries.items,
+            .token_display = owned.token_display,
+            .local_node_id = local_node_id_val,
+            .local_node_name = local_node_name_val,
+            .local_node_ttl_text = owned.local_node_ttl_text,
+            .local_node_bootstrapped = local_node_bootstrapped_val,
+            .workspace_op_busy = self.ws.workspace_op_busy,
+            .workspace_op_error = null,
         };
         return owned;
     }
 
     fn performWorkspacePanelAction(self: *App, action: panels_bridge.WorkspacePanelAction) void {
-        const action_tag = std.meta.activeTag(action);
-        if (action_tag == .select_workspace_index) {
-            const project_index = action.select_workspace_index;
-            if (project_index >= self.projects.items.len) return;
-            const project = self.projects.items[project_index];
-            self.selectWorkspaceInSettings(project.id) catch |err| {
-                const msg = std.fmt.allocPrint(self.allocator, "Workspace select failed: {s}", .{@errorName(err)}) catch null;
-                if (msg) |text| {
-                    defer self.allocator.free(text);
-                    self.setWorkspaceError(text);
+        switch (action) {
+            .select_workspace_index => |project_index| {
+                if (project_index >= self.ws.projects.items.len) return;
+                const project = self.ws.projects.items[project_index];
+                self.selectWorkspaceInSettings(project.id) catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Workspace select failed: {s}", .{@errorName(err)}) catch null;
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setWorkspaceError(text);
+                    }
+                };
+            },
+            .create_workspace => {
+                self.createWorkspaceFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Workspace create failed", err);
+                };
+            },
+            .refresh_workspace => {
+                self.refreshWorkspaceData() catch |err| {
+                    self.handleWorkspacePanelError("Workspace refresh failed", err);
+                };
+            },
+            .activate_workspace => {
+                self.activateSelectedWorkspace() catch |err| {
+                    self.handleWorkspacePanelError("Workspace activate failed", err);
+                };
+            },
+            .attach_session => {
+                self.attachSelectedSessionFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Session attach failed", err);
+                };
+            },
+            .lock_workspace => {
+                self.lockSelectedWorkspaceFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Workspace lock failed", err);
+                };
+            },
+            .unlock_workspace => {
+                self.unlockSelectedWorkspaceFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Workspace unlock failed", err);
+                };
+            },
+            .add_mount => {
+                if (self.validateWorkspaceMountAddInput()) |message| {
+                    self.setWorkspaceError(message);
+                } else {
+                    self.setWorkspaceMountFromPanel() catch |err| {
+                        self.handleWorkspacePanelError("Mount set failed", err);
+                    };
                 }
-            };
-            return;
+            },
+            .remove_mount => {
+                if (self.validateWorkspaceMountRemoveInput()) |message| {
+                    self.setWorkspaceError(message);
+                } else {
+                    self.removeWorkspaceMountFromPanel() catch |err| {
+                        self.handleWorkspacePanelError("Mount remove failed", err);
+                    };
+                }
+            },
+            .add_bind => {
+                if (self.validateWorkspaceBindAddInput()) |message| {
+                    self.setWorkspaceError(message);
+                } else {
+                    self.setWorkspaceBindFromPanel() catch |err| {
+                        self.handleWorkspacePanelError("Bind set failed", err);
+                    };
+                }
+            },
+            .remove_bind => {
+                if (self.validateWorkspaceBindRemoveInput()) |message| {
+                    self.setWorkspaceError(message);
+                } else {
+                    self.removeWorkspaceBindFromPanel() catch |err| {
+                        self.handleWorkspacePanelError("Bind remove failed", err);
+                    };
+                }
+            },
+            .auth_status => {
+                self.fetchAuthStatusFromPanel(false) catch |err| {
+                    self.handleWorkspacePanelError("Auth status failed", err);
+                };
+            },
+            .rotate_auth_user => {
+                self.rotateAuthTokenFromPanel("user") catch |err| {
+                    self.handleWorkspacePanelError("Auth rotate(user) failed", err);
+                };
+            },
+            .rotate_auth_admin => {
+                self.rotateAuthTokenFromPanel("admin") catch |err| {
+                    self.handleWorkspacePanelError("Auth rotate(admin) failed", err);
+                };
+            },
+            .reveal_auth_admin => {
+                self.revealAuthTokenFromPanel("admin") catch |err| {
+                    self.handleWorkspacePanelError("Reveal admin token failed", err);
+                };
+            },
+            .copy_auth_admin => {
+                self.copyAuthTokenFromPanel("admin") catch |err| {
+                    self.handleWorkspacePanelError("Copy admin token failed", err);
+                };
+            },
+            .reveal_auth_user => {
+                self.revealAuthTokenFromPanel("user") catch |err| {
+                    self.handleWorkspacePanelError("Reveal user token failed", err);
+                };
+            },
+            .copy_auth_user => {
+                self.copyAuthTokenFromPanel("user") catch |err| {
+                    self.handleWorkspacePanelError("Copy user token failed", err);
+                };
+            },
+            .select_mount_index => |idx| {
+                self.ws.workspace_selected_mount_index = idx;
+                if (self.ws.selected_workspace_detail) |*detail| {
+                    if (idx < detail.mounts.items.len) {
+                        const mount = detail.mounts.items[idx];
+                        self.settings_panel.project_mount_path.clearRetainingCapacity();
+                        self.settings_panel.project_mount_path.appendSlice(self.allocator, mount.mount_path) catch {};
+                        self.settings_panel.project_mount_node_id.clearRetainingCapacity();
+                        self.settings_panel.project_mount_node_id.appendSlice(self.allocator, mount.node_id) catch {};
+                        self.settings_panel.project_mount_export_name.clearRetainingCapacity();
+                        self.settings_panel.project_mount_export_name.appendSlice(self.allocator, mount.export_name) catch {};
+                    }
+                }
+            },
+            .remove_selected_mount => {
+                if (self.ws.workspace_selected_mount_index) |idx| {
+                    self.removeWorkspaceMountByView(idx) catch |err| {
+                        self.handleWorkspacePanelError("Mount remove failed", err);
+                    };
+                }
+            },
+            .select_bind_index => |idx| {
+                self.ws.workspace_selected_bind_index = idx;
+                if (self.ws.selected_workspace_detail) |*detail| {
+                    if (idx < detail.binds.items.len) {
+                        const bind = detail.binds.items[idx];
+                        self.settings_panel.workspace_bind_path.clearRetainingCapacity();
+                        self.settings_panel.workspace_bind_path.appendSlice(self.allocator, bind.bind_path) catch {};
+                        self.settings_panel.workspace_bind_target_path.clearRetainingCapacity();
+                        self.settings_panel.workspace_bind_target_path.appendSlice(self.allocator, bind.target_path) catch {};
+                    }
+                }
+            },
+            .remove_selected_bind => {
+                if (self.ws.workspace_selected_bind_index) |idx| {
+                    self.removeWorkspaceBindByView(idx) catch |err| {
+                        self.handleWorkspacePanelError("Bind remove failed", err);
+                    };
+                }
+            },
+            .select_node_for_mount => |idx| {
+                if (idx < self.ws.nodes.items.len) {
+                    const node = self.ws.nodes.items[idx];
+                    self.settings_panel.project_mount_node_id.clearRetainingCapacity();
+                    self.settings_panel.project_mount_node_id.appendSlice(self.allocator, node.node_id) catch {};
+                    self.ws.node_browser_selected_index = idx;
+                    self.ws.node_browser_open = false;
+                }
+            },
+            .rotate_workspace_token => {
+                self.rotateWorkspaceTokenFromPanel() catch |err| {
+                    self.handleWorkspacePanelError("Workspace token rotate failed", err);
+                };
+            },
+            .open_node_browser => {
+                self.ws.node_browser_open = !self.ws.node_browser_open;
+            },
+            .rebootstrap_local_node => {
+                const client = if (self.ws_client) |*value| value else {
+                    self.setWorkspaceError("Not connected");
+                    return;
+                };
+                self.ensureAppLocalNodeBootstrap(client) catch |err| {
+                    self.handleWorkspacePanelError("Local node bootstrap failed", err);
+                };
+            },
         }
         if (action_tag == .create_workspace) {
             self.createWorkspaceFromPanel() catch |err| {
@@ -11690,16 +12555,16 @@ const App = struct {
     };
 
     fn filesystemEntryPassesFilters(self: *App, entry: *const FilesystemEntry) bool {
-        if (self.filesystem_hide_hidden and entry.hidden) return false;
-        if (self.filesystem_hide_runtime_noise and entry.runtime_noise) return false;
-        if (self.filesystem_hide_directories and entry.kind == .directory) return false;
-        if (self.filesystem_hide_files and entry.kind != .directory) return false;
+        if (self.fs.filesystem_hide_hidden and entry.hidden) return false;
+        if (self.fs.filesystem_hide_runtime_noise and entry.runtime_noise) return false;
+        if (self.fs.filesystem_hide_directories and entry.kind == .directory) return false;
+        if (self.fs.filesystem_hide_files and entry.kind != .directory) return false;
         return true;
     }
 
     fn filesystemVisibleEntryCount(self: *App) usize {
         var count: usize = 0;
-        for (self.filesystem_entries.items) |*entry| {
+        for (self.fs.filesystem_entries.items) |*entry| {
             if (self.filesystemEntryPassesFilters(entry)) count += 1;
         }
         return count;
@@ -11754,8 +12619,13 @@ const App = struct {
     }
 
     fn filesystemEntryLessThan(self: *App, lhs: VisibleFilesystemEntry, rhs: VisibleFilesystemEntry) bool {
-        const direction = self.filesystem_sort_direction;
-        const order = switch (self.filesystem_sort_key) {
+        if (lhs.entry.kind != rhs.entry.kind) {
+            if (lhs.entry.kind == .directory) return true;
+            if (rhs.entry.kind == .directory) return false;
+        }
+
+        const direction = self.fs.filesystem_sort_direction;
+        const order = switch (self.fs.filesystem_sort_key) {
             .name => blk: {
                 const base = filesystemTextOrder(lhs.entry.name, rhs.entry.name);
                 break :blk applyFilesystemSortDirection(base, direction);
@@ -11835,14 +12705,14 @@ const App = struct {
     fn filesystemPanelModel(self: *App) panels_bridge.FilesystemPanelModel {
         return .{
             .connected = self.connection_state == .connected,
-            .busy = self.filesystem_busy,
-            .sort_key = self.filesystem_sort_key,
-            .sort_direction = self.filesystem_sort_direction,
-            .hide_hidden = self.filesystem_hide_hidden,
-            .hide_directories = self.filesystem_hide_directories,
-            .hide_files = self.filesystem_hide_files,
-            .hide_runtime_noise = self.filesystem_hide_runtime_noise,
-            .total_entry_count = self.filesystem_entries.items.len,
+            .busy = self.fs.filesystem_busy,
+            .sort_key = self.fs.filesystem_sort_key,
+            .sort_direction = self.fs.filesystem_sort_direction,
+            .hide_hidden = self.fs.filesystem_hide_hidden,
+            .hide_directories = self.fs.filesystem_hide_directories,
+            .hide_files = self.fs.filesystem_hide_files,
+            .hide_runtime_noise = self.fs.filesystem_hide_runtime_noise,
+            .total_entry_count = self.fs.filesystem_entries.items.len,
             .visible_entry_count = self.filesystemVisibleEntryCount(),
             .has_selected_entry = self.selectedFilesystemEntry() != null,
         };
@@ -11859,10 +12729,10 @@ const App = struct {
     fn filesystemToolsPanelModel(self: *App) panels_bridge.FilesystemToolsPanelModel {
         return .{
             .connected = self.connection_state == .connected,
-            .busy = self.filesystem_busy,
+            .busy = self.fs.filesystem_busy,
             .has_service_runtime_root = self.filesystemHasServiceRuntimeRoot(),
             .has_selected_contract_service = self.selectedContractService() != null,
-            .contract_service_count = self.contract_services.items.len,
+            .contract_service_count = self.fs.contract_services.items.len,
         };
     }
 
@@ -11885,7 +12755,7 @@ const App = struct {
             .use_workspace_root => {
                 var target_path: ?[]u8 = null;
                 defer if (target_path) |value| self.allocator.free(value);
-                if (self.workspace_state) |*status| {
+                if (self.ws.workspace_state) |*status| {
                     if (status.workspace_root) |root| {
                         const mapped = self.mapWorkspaceRootToFilesystemPath(root) catch null;
                         if (mapped) |value| {
@@ -11906,16 +12776,16 @@ const App = struct {
                 };
             },
             .select_entry_index => |entry_index| {
-                if (entry_index >= self.filesystem_entries.items.len) return;
-                const entry = self.filesystem_entries.items[entry_index];
+                if (entry_index >= self.fs.filesystem_entries.items.len) return;
+                const entry = self.fs.filesystem_entries.items[entry_index];
                 self.setFilesystemSelectedPath(entry.path);
                 self.refreshSelectedFilesystemPreview() catch |err| {
                     self.handleFilesystemPanelError("Filesystem preview failed", err);
                 };
             },
             .open_entry_index => |entry_index| {
-                if (entry_index >= self.filesystem_entries.items.len) return;
-                const entry = self.filesystem_entries.items[entry_index];
+                if (entry_index >= self.fs.filesystem_entries.items.len) return;
+                const entry = self.fs.filesystem_entries.items[entry_index];
                 self.openFilesystemEntry(&entry) catch |err| {
                     self.handleFilesystemPanelError("Filesystem open failed", err);
                 };
@@ -11927,40 +12797,40 @@ const App = struct {
                 };
             },
             .set_sort_key => |sort_key| {
-                self.filesystem_sort_key = sort_key;
-                self.filesystem_entry_scroll_y = 0;
+                self.fs.filesystem_sort_key = sort_key;
+                self.fs.filesystem_entry_page = 0;
             },
             .toggle_sort_direction => {
-                self.filesystem_sort_direction = switch (self.filesystem_sort_direction) {
+                self.fs.filesystem_sort_direction = switch (self.fs.filesystem_sort_direction) {
                     .ascending => .descending,
                     .descending => .ascending,
                 };
-                self.filesystem_entry_scroll_y = 0;
+                self.fs.filesystem_entry_page = 0;
             },
             .toggle_hide_hidden => {
-                self.filesystem_hide_hidden = !self.filesystem_hide_hidden;
-                self.filesystem_entry_scroll_y = 0;
+                self.fs.filesystem_hide_hidden = !self.fs.filesystem_hide_hidden;
+                self.fs.filesystem_entry_page = 0;
             },
             .toggle_hide_directories => {
-                self.filesystem_hide_directories = !self.filesystem_hide_directories;
-                self.filesystem_entry_scroll_y = 0;
+                self.fs.filesystem_hide_directories = !self.fs.filesystem_hide_directories;
+                self.fs.filesystem_entry_page = 0;
             },
             .toggle_hide_files => {
-                self.filesystem_hide_files = !self.filesystem_hide_files;
-                self.filesystem_entry_scroll_y = 0;
+                self.fs.filesystem_hide_files = !self.fs.filesystem_hide_files;
+                self.fs.filesystem_entry_page = 0;
             },
             .toggle_hide_runtime_noise => {
-                self.filesystem_hide_runtime_noise = !self.filesystem_hide_runtime_noise;
-                self.filesystem_entry_scroll_y = 0;
+                self.fs.filesystem_hide_runtime_noise = !self.fs.filesystem_hide_runtime_noise;
+                self.fs.filesystem_entry_page = 0;
             },
             .reset_explorer_view => {
-                self.filesystem_sort_key = .name;
-                self.filesystem_sort_direction = .ascending;
-                self.filesystem_hide_hidden = false;
-                self.filesystem_hide_directories = false;
-                self.filesystem_hide_files = false;
-                self.filesystem_hide_runtime_noise = false;
-                self.filesystem_entry_scroll_y = 0;
+                self.fs.filesystem_sort_key = .name;
+                self.fs.filesystem_sort_direction = .ascending;
+                self.fs.filesystem_hide_hidden = false;
+                self.fs.filesystem_hide_directories = false;
+                self.fs.filesystem_hide_files = false;
+                self.fs.filesystem_hide_runtime_noise = false;
+                self.fs.filesystem_entry_page = 0;
             },
             .refresh_preview => {
                 self.refreshSelectedFilesystemPreview() catch |err| {
@@ -12014,17 +12884,17 @@ const App = struct {
                 };
             },
             .contract_select_prev => {
-                if (self.contract_services.items.len > 1) {
-                    if (self.contract_service_selected_index == 0) {
-                        self.contract_service_selected_index = self.contract_services.items.len - 1;
+                if (self.fs.contract_services.items.len > 1) {
+                    if (self.fs.contract_service_selected_index == 0) {
+                        self.fs.contract_service_selected_index = self.fs.contract_services.items.len - 1;
                     } else {
-                        self.contract_service_selected_index -= 1;
+                        self.fs.contract_service_selected_index -= 1;
                     }
                 }
             },
             .contract_select_next => {
-                if (self.contract_services.items.len > 1) {
-                    self.contract_service_selected_index = (self.contract_service_selected_index + 1) % self.contract_services.items.len;
+                if (self.fs.contract_services.items.len > 1) {
+                    self.fs.contract_service_selected_index = (self.fs.contract_service_selected_index + 1) % self.fs.contract_services.items.len;
                 }
             },
             .contract_open_service_dir => {
@@ -12090,11 +12960,11 @@ const App = struct {
 
     fn buildFilesystemPanelView(self: *App) OwnedFilesystemPanelView {
         var owned: OwnedFilesystemPanelView = .{};
-        const path_label = if (self.filesystem_path.items.len > 0) self.filesystem_path.items else "/";
+        const path_label = if (self.fs.filesystem_path.items.len > 0) self.fs.filesystem_path.items else "/";
 
         var visible = std.ArrayListUnmanaged(VisibleFilesystemEntry){};
         defer visible.deinit(self.allocator);
-        for (self.filesystem_entries.items, 0..) |*entry, idx| {
+        for (self.fs.filesystem_entries.items, 0..) |*entry, idx| {
             if (!self.filesystemEntryPassesFilters(entry)) continue;
             visible.append(self.allocator, .{
                 .index = idx,
@@ -12147,15 +13017,15 @@ const App = struct {
                 .modified_label = modified_label,
                 .badge = badge,
                 .previewable = entry.previewable,
-                .selected = self.filesystem_selected_path != null and std.mem.eql(u8, self.filesystem_selected_path.?, entry.path),
+                .selected = self.fs.filesystem_selected_path != null and std.mem.eql(u8, self.fs.filesystem_selected_path.?, entry.path),
             }) catch {};
         }
 
         var preview_title: []const u8 = "(select a file to preview)";
-        var preview_path = self.filesystem_preview_path;
-        var preview_kind = self.filesystem_preview_kind;
-        var preview_size_bytes = self.filesystem_preview_size_bytes;
-        var preview_modified_unix_ms = self.filesystem_preview_modified_unix_ms;
+        var preview_path = self.fs.filesystem_preview_path;
+        var preview_kind = self.fs.filesystem_preview_kind;
+        var preview_size_bytes = self.fs.filesystem_preview_size_bytes;
+        var preview_modified_unix_ms = self.fs.filesystem_preview_modified_unix_ms;
         var preview_type_label: []const u8 = "unknown";
 
         if (self.selectedFilesystemEntry()) |entry| {
@@ -12204,9 +13074,9 @@ const App = struct {
 
         owned.view = .{
             .path_label = path_label,
-            .error_text = self.filesystem_error,
+            .error_text = self.fs.filesystem_error,
             .entries = owned.entries.items,
-            .total_entry_count = self.filesystem_entries.items.len,
+            .total_entry_count = self.fs.filesystem_entries.items.len,
             .visible_entry_count = visible.items.len,
             .preview_title = preview_title,
             .preview_path = preview_path,
@@ -12216,9 +13086,9 @@ const App = struct {
             .preview_size_label = preview_size_label,
             .preview_modified_unix_ms = preview_modified_unix_ms,
             .preview_modified_label = preview_modified_label,
-            .preview_mode = self.filesystem_preview_mode,
-            .preview_status = self.filesystem_preview_status,
-            .preview_text = self.filesystem_preview_text,
+            .preview_mode = self.fs.filesystem_preview_mode,
+            .preview_status = self.fs.filesystem_preview_status,
+            .preview_text = self.fs.filesystem_preview_text,
         };
         return owned;
     }
@@ -12229,41 +13099,41 @@ const App = struct {
             std.fmt.allocPrint(
                 self.allocator,
                 "Selected: {s} ({d}/{d})",
-                .{ entry.service_id, self.contract_service_selected_index + 1, self.contract_services.items.len },
+                .{ entry.service_id, self.fs.contract_service_selected_index + 1, self.fs.contract_services.items.len },
             ) catch null
         else
             self.allocator.dupe(u8, "Selected: (none loaded)") catch null;
 
         owned.view = .{
             .selected_contract_label = if (owned.selected_contract_label) |value| value else "Selected: (none loaded)",
-            .contract_payload = self.contract_invoke_payload.items,
+            .contract_payload = self.fs.contract_invoke_payload.items,
         };
         return owned;
     }
 
     fn debugPanelModel(self: *App) panels_bridge.DebugPanelModel {
-        const search_trimmed = std.mem.trim(u8, self.debug_search_filter.items, " \t\r\n");
+        const search_trimmed = std.mem.trim(u8, self.debug.debug_search_filter.items, " \t\r\n");
         const selected_node_event = self.selectedNodeServiceEventInfo();
         const selected_idx = selected_node_event.index;
-        const base_idx_opt = self.node_service_diff_base_index;
+        const base_idx_opt = self.debug.node_service_diff_base_index;
         const can_generate_diff = if (selected_idx) |current_idx|
             if (base_idx_opt) |base_idx|
-                base_idx < self.debug_events.items.len and base_idx != current_idx
+                base_idx < self.debug.debug_events.items.len and base_idx != current_idx
             else
                 false
         else
             false;
         return .{
             .connected = self.ws_client != null,
-            .stream_enabled = self.debug_stream_enabled,
+            .stream_enabled = self.debug.debug_stream_enabled,
             .has_perf_history = self.perf_history.items.len > 0,
             .perf_benchmark_active = self.perf_benchmark_active,
             .has_perf_benchmark_capture = self.hasPerfBenchmarkCapture(),
-            .node_watch_enabled = self.node_service_watch_enabled,
+            .node_watch_enabled = self.debug.node_service_watch_enabled,
             .has_search_filter = search_trimmed.len > 0,
-            .has_selected_event = self.debug_selected_index != null and self.debug_selected_index.? < self.debug_events.items.len,
+            .has_selected_event = self.debug.debug_selected_index != null and self.debug.debug_selected_index.? < self.debug.debug_events.items.len,
             .has_selected_node_event = selected_node_event.index != null,
-            .has_diff_base_or_preview = self.node_service_diff_base_index != null or self.node_service_diff_preview != null,
+            .has_diff_base_or_preview = self.debug.node_service_diff_base_index != null or self.debug.node_service_diff_preview != null,
             .can_generate_diff = can_generate_diff,
         };
     }
@@ -12408,14 +13278,14 @@ const App = struct {
             .{role_name},
         ) catch null;
 
-        const search_trimmed = std.mem.trim(u8, self.debug_search_filter.items, " \t\r\n");
+        const search_trimmed = std.mem.trim(u8, self.debug.debug_search_filter.items, " \t\r\n");
         const filtered_source = self.ensureDebugFilteredIndices(search_trimmed);
         owned.filtered_indices.appendSlice(self.allocator, filtered_source) catch {};
         const filtered_events = owned.filtered_indices.items.len;
         owned.filter_status = std.fmt.allocPrint(
             self.allocator,
             "Showing {d}/{d} events",
-            .{ filtered_events, self.debug_events.items.len },
+            .{ filtered_events, self.debug.debug_events.items.len },
         ) catch null;
 
         const selected_node_event = self.selectedNodeServiceEventInfo();
@@ -12427,12 +13297,12 @@ const App = struct {
             ) catch null;
         }
         if (selected_node_event.index != null) {
-            owned.diff_base_label = if (self.node_service_diff_base_index) |idx|
-                if (idx < self.debug_events.items.len)
+            owned.diff_base_label = if (self.debug.node_service_diff_base_index) |idx|
+                if (idx < self.debug.debug_events.items.len)
                     std.fmt.allocPrint(
                         self.allocator,
                         "Diff base event: #{d}",
-                        .{self.debug_events.items[idx].id},
+                        .{self.debug.debug_events.items[idx].id},
                     ) catch null
                 else
                     self.allocator.dupe(u8, "Diff base event: (stale selection)") catch null
@@ -12441,17 +13311,17 @@ const App = struct {
         }
 
         const show_large_payload_notice = if (selected_node_event.index) |selected_idx|
-            selected_idx < self.debug_events.items.len and
-                self.debug_events.items[selected_idx].payload_json.len > DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES
+            selected_idx < self.debug.debug_events.items.len and
+                self.debug.debug_events.items[selected_idx].payload_json.len > DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES
         else
             false;
 
         owned.view = .{
             .title = "SpiderWeb Debug Stream",
-            .stream_status = if (self.debug_stream_enabled) "Status: live WebSocket debug events" else "Status: paused",
-            .snapshot_status = if (self.debug_stream_snapshot_pending)
+            .stream_status = if (self.debug.debug_stream_enabled) "Status: live WebSocket debug events" else "Status: paused",
+            .snapshot_status = if (self.debug.debug_stream_snapshot_pending)
                 "Snapshot: refresh pending"
-            else if (self.debug_stream_snapshot != null)
+            else if (self.debug.debug_stream_snapshot != null)
                 "Snapshot: cached"
             else
                 "Snapshot: none",
@@ -12467,26 +13337,26 @@ const App = struct {
                 "Benchmark capture: idle",
             .perf_benchmark_label = self.perf_benchmark_label_input.items,
             .perf_charts = owned.perf_charts.items,
-            .node_watch_status = if (self.node_service_watch_enabled)
+            .node_watch_status = if (self.debug.node_service_watch_enabled)
                 "Node service events: polling worldfs snapshot"
             else
                 "Node service events: paused",
             .scope_preview = if (owned.scope_preview) |value| value else "Node watch scope: role/workspace unavailable",
             .show_user_scope_notice = self.config.active_role == .user,
-            .node_watch_filter = self.node_service_watch_filter.items,
-            .node_watch_replay_limit = self.node_service_watch_replay_limit.items,
-            .debug_search_filter = self.debug_search_filter.items,
+            .node_watch_filter = self.debug.node_service_watch_filter.items,
+            .node_watch_replay_limit = self.debug.node_service_watch_replay_limit.items,
+            .debug_search_filter = self.debug.debug_search_filter.items,
             .filter_status = if (owned.filter_status) |value| value else "Showing events",
             .jump_to_node_label = owned.jump_to_node_label,
             .diff_base_label = owned.diff_base_label,
-            .latest_reload_diag = self.node_service_latest_reload_diag,
+            .latest_reload_diag = self.debug.node_service_latest_reload_diag,
             .selected_diag = selected_node_event.diagnostics,
-            .diff_preview = self.node_service_diff_preview,
+            .diff_preview = self.debug.node_service_diff_preview,
             .show_large_payload_notice = show_large_payload_notice,
         };
         owned.event_stream_view = .{
             .filtered_indices = owned.filtered_indices.items,
-            .selected_index = self.debug_selected_index,
+            .selected_index = self.debug.debug_selected_index,
         };
         return owned;
     }
@@ -12494,8 +13364,8 @@ const App = struct {
     fn performDebugPanelAction(self: *App, manager: *panel_manager.PanelManager, action: panels_bridge.DebugPanelAction) void {
         switch (action) {
             .toggle_stream => {
-                self.debug_stream_enabled = !self.debug_stream_enabled;
-                if (self.debug_stream_enabled) {
+                self.debug.debug_stream_enabled = !self.debug.debug_stream_enabled;
+                if (self.debug.debug_stream_enabled) {
                     self.requestDebugStreamSnapshot(true);
                 }
             },
@@ -12589,10 +13459,10 @@ const App = struct {
                 };
             },
             .clear_search => {
-                self.debug_search_filter.clearRetainingCapacity();
-                self.debug_selected_index = null;
+                self.debug.debug_search_filter.clearRetainingCapacity();
+                self.debug.debug_selected_index = null;
                 self.clearSelectedNodeServiceEventCache();
-                self.debug_scroll_y = 0;
+                self.debug.debug_scroll_y = 0;
             },
             .jump_to_selected_node_fs => {
                 const selected = self.selectedNodeServiceEventInfo();
@@ -12603,32 +13473,32 @@ const App = struct {
             },
             .set_diff_base => {
                 const selected_idx = self.selectedNodeServiceEventInfo().index orelse return;
-                self.node_service_diff_base_index = selected_idx;
+                self.debug.node_service_diff_base_index = selected_idx;
                 self.clearNodeServiceDiffPreview();
-                const msg = std.fmt.allocPrint(self.allocator, "Node diff base set to event #{d}", .{self.debug_events.items[selected_idx].id}) catch null;
+                const msg = std.fmt.allocPrint(self.allocator, "Node diff base set to event #{d}", .{self.debug.debug_events.items[selected_idx].id}) catch null;
                 defer if (msg) |value| self.allocator.free(value);
                 if (msg) |value| self.appendMessage("system", value, null) catch {};
             },
             .clear_diff_base => {
-                self.node_service_diff_base_index = null;
+                self.debug.node_service_diff_base_index = null;
                 self.clearNodeServiceDiffPreview();
             },
             .generate_diff => {
                 const selected_idx = self.selectedNodeServiceEventInfo().index orelse return;
-                const base_idx = self.node_service_diff_base_index orelse return;
-                if (base_idx >= self.debug_events.items.len or base_idx == selected_idx) return;
+                const base_idx = self.debug.node_service_diff_base_index orelse return;
+                if (base_idx >= self.debug.debug_events.items.len or base_idx == selected_idx) return;
                 if (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null) |diff| {
                     self.clearNodeServiceDiffPreview();
-                    self.node_service_diff_preview = diff;
+                    self.debug.node_service_diff_preview = diff;
                 } else {
                     self.appendMessage("system", "Unable to build node service diff from selected events.", null) catch {};
                 }
             },
             .copy_diff => {
                 const selected_idx = self.selectedNodeServiceEventInfo().index orelse return;
-                const base_idx = self.node_service_diff_base_index orelse return;
-                if (base_idx >= self.debug_events.items.len or base_idx == selected_idx) return;
-                const diff_text = if (self.node_service_diff_preview) |value|
+                const base_idx = self.debug.node_service_diff_base_index orelse return;
+                if (base_idx >= self.debug.debug_events.items.len or base_idx == selected_idx) return;
+                const diff_text = if (self.debug.node_service_diff_preview) |value|
                     self.allocator.dupe(u8, value) catch null
                 else
                     (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null);
@@ -12640,9 +13510,9 @@ const App = struct {
             },
             .export_diff => {
                 const selected_idx = self.selectedNodeServiceEventInfo().index orelse return;
-                const base_idx = self.node_service_diff_base_index orelse return;
-                if (base_idx >= self.debug_events.items.len or base_idx == selected_idx) return;
-                const diff_text = if (self.node_service_diff_preview) |value|
+                const base_idx = self.debug.node_service_diff_base_index orelse return;
+                if (base_idx >= self.debug.debug_events.items.len or base_idx == selected_idx) return;
+                const diff_text = if (self.debug.node_service_diff_preview) |value|
                     self.allocator.dupe(u8, value) catch null
                 else
                     (self.buildNodeServiceEventDiffText(base_idx, selected_idx) catch null);
@@ -12650,8 +13520,8 @@ const App = struct {
                 if (diff_text) |value| {
                     const export_path = self.exportNodeServiceDiffSnapshot(
                         value,
-                        self.debug_events.items[base_idx].id,
-                        self.debug_events.items[selected_idx].id,
+                        self.debug.debug_events.items[base_idx].id,
+                        self.debug.debug_events.items[selected_idx].id,
                     ) catch null;
                     defer if (export_path) |path| self.allocator.free(path);
                     if (export_path) |path| {
@@ -12664,9 +13534,9 @@ const App = struct {
                 }
             },
             .copy_selected_event => {
-                const sel_idx = self.debug_selected_index orelse return;
-                if (sel_idx >= self.debug_events.items.len) return;
-                const entry = self.debug_events.items[sel_idx];
+                const sel_idx = self.debug.debug_selected_index orelse return;
+                if (sel_idx >= self.debug.debug_events.items.len) return;
+                const entry = self.debug.debug_events.items[sel_idx];
                 const to_copy = self.formatDebugEventLine(entry) catch "";
                 defer if (to_copy.len > 0) self.allocator.free(to_copy);
                 if (to_copy.len > 0) {
@@ -12905,10 +13775,10 @@ const App = struct {
     fn terminalPanelModel(self: *App) panels_bridge.TerminalPanelModel {
         return .{
             .connected = self.connection_state == .connected,
-            .has_session = self.terminal_session_id != null,
-            .auto_poll = self.terminal_auto_poll,
-            .has_input = std.mem.trim(u8, self.terminal_input.items, " \t\r\n").len > 0,
-            .has_output = self.terminal_backend.text().len > 0,
+            .has_session = self.terminal.terminal_session_id != null,
+            .auto_poll = self.terminal.terminal_auto_poll,
+            .has_input = std.mem.trim(u8, self.terminal.terminal_input.items, " \t\r\n").len > 0,
+            .has_output = self.terminal.terminal_backend.text().len > 0,
         };
     }
 
@@ -12929,12 +13799,12 @@ const App = struct {
             self.allocator,
             "Backend: {s} (selected: {s}, build default: {s})",
             .{
-                self.terminal_backend.label(),
-                terminal_render_backend.Backend.kindName(self.terminal_backend_kind),
+                self.terminal.terminal_backend.label(),
+                terminal_render_backend.Backend.kindName(self.terminal.terminal_backend_kind),
                 TERMINAL_BACKEND_KIND,
             },
         ) catch null;
-        const session_line = if (self.terminal_session_id) |id|
+        const session_line = if (self.terminal.terminal_session_id) |id|
             std.fmt.allocPrint(self.allocator, "Session: {s}", .{id}) catch null
         else
             self.allocator.dupe(u8, "Session: (not started)") catch null;
@@ -12942,12 +13812,12 @@ const App = struct {
             .view = .{
                 .title = "Terminal",
                 .backend_line = backend_line orelse "Backend: unknown",
-                .backend_detail = self.terminal_backend.statusDetail(),
+                .backend_detail = self.terminal.terminal_backend.statusDetail(),
                 .session_line = session_line orelse "Session: (unknown)",
-                .status_text = self.terminal_status,
-                .error_text = self.terminal_error,
-                .input_text = self.terminal_input.items,
-                .start_label = if (self.terminal_session_id == null) "Start" else "Restart",
+                .status_text = self.terminal.terminal_status,
+                .error_text = self.terminal.terminal_error,
+                .input_text = self.terminal.terminal_input.items,
+                .start_label = if (self.terminal.terminal_session_id == null) "Start" else "Restart",
             },
             .backend_line = backend_line,
             .session_line = session_line,
@@ -12957,7 +13827,7 @@ const App = struct {
     fn performTerminalPanelAction(self: *App, action: panels_bridge.TerminalPanelAction) void {
         switch (action) {
             .start_or_restart => {
-                if (self.terminal_session_id != null) {
+                if (self.terminal.terminal_session_id != null) {
                     self.closeTerminalSession() catch {};
                 }
                 self.ensureTerminalSession() catch |err| {
@@ -12996,12 +13866,12 @@ const App = struct {
                 };
             },
             .clear_output => {
-                self.terminal_backend.clear(self.allocator);
+                self.terminal.terminal_backend.clear(self.allocator);
                 self.clearTerminalError();
                 self.setTerminalStatus("Output cleared");
             },
             .toggle_auto_poll => {
-                self.terminal_auto_poll = !self.terminal_auto_poll;
+                self.terminal.terminal_auto_poll = !self.terminal.terminal_auto_poll;
             },
             .send_ctrl_c => {
                 self.sendTerminalControlC() catch |err| {
@@ -13022,7 +13892,7 @@ const App = struct {
                 };
             },
             .copy_output => {
-                self.copyTextToClipboard(self.terminal_backend.text()) catch {};
+                self.copyTextToClipboard(self.terminal.terminal_backend.text()) catch {};
                 self.setTerminalStatus("Copied terminal output");
             },
         }
@@ -13031,9 +13901,9 @@ const App = struct {
     fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         _ = manager;
         if (self.connection_state == .connected and
-            self.filesystem_entries.items.len == 0 and
-            self.filesystem_active_request == null and
-            self.filesystem_pending_path == null)
+            self.fs.filesystem_entries.items.len == 0 and
+            self.fs.filesystem_active_request == null and
+            self.fs.filesystem_pending_path == null)
         {
             self.requestFilesystemBrowserRefresh(true);
         }
@@ -13052,22 +13922,19 @@ const App = struct {
             .draw_filled_rect = filesystemDrawFilledRect,
             .draw_rect = filesystemDrawRect,
         };
-        const path_label = if (self.filesystem_path.items.len > 0) self.filesystem_path.items else "/";
+        const path_label = if (self.fs.filesystem_path.items.len > 0) self.fs.filesystem_path.items else "/";
         var view = self.buildFilesystemPanelView();
         defer view.deinit(self.allocator);
         var panel_state = FilesystemPanel.State{
-            .entry_scroll_y = self.filesystem_entry_scroll_y,
-            .entry_scrollbar_dragging = self.filesystem_entry_scrollbar_dragging,
-            .entry_scrollbar_drag_anchor = self.filesystem_entry_scrollbar_drag_anchor,
-            .entry_scrollbar_drag_scroll = self.filesystem_entry_scrollbar_drag_scroll,
-            .last_clicked_entry_index = self.filesystem_last_clicked_entry_index,
-            .last_click_ms = self.filesystem_last_click_ms,
-            .type_column_width = self.filesystem_type_column_width,
-            .modified_column_width = self.filesystem_modified_column_width,
-            .size_column_width = self.filesystem_size_column_width,
-            .column_resize = self.filesystem_column_resize_handle,
-            .preview_split_ratio = self.filesystem_preview_split_ratio,
-            .preview_split_dragging = self.filesystem_preview_split_dragging,
+            .entry_page = self.fs.filesystem_entry_page,
+            .last_clicked_entry_index = self.fs.filesystem_last_clicked_entry_index,
+            .last_click_ms = self.fs.filesystem_last_click_ms,
+            .type_column_width = self.fs.filesystem_type_column_width,
+            .modified_column_width = self.fs.filesystem_modified_column_width,
+            .size_column_width = self.fs.filesystem_size_column_width,
+            .column_resize = self.fs.filesystem_column_resize_handle,
+            .preview_split_ratio = self.fs.filesystem_preview_split_ratio,
+            .preview_split_dragging = self.fs.filesystem_preview_split_dragging,
         };
         const action = FilesystemPanel.draw(
             host,
@@ -13093,18 +13960,15 @@ const App = struct {
             },
             &panel_state,
         );
-        self.filesystem_entry_scroll_y = panel_state.entry_scroll_y;
-        self.filesystem_entry_scrollbar_dragging = panel_state.entry_scrollbar_dragging;
-        self.filesystem_entry_scrollbar_drag_anchor = panel_state.entry_scrollbar_drag_anchor;
-        self.filesystem_entry_scrollbar_drag_scroll = panel_state.entry_scrollbar_drag_scroll;
-        self.filesystem_last_clicked_entry_index = panel_state.last_clicked_entry_index;
-        self.filesystem_last_click_ms = panel_state.last_click_ms;
-        self.filesystem_type_column_width = panel_state.type_column_width;
-        self.filesystem_modified_column_width = panel_state.modified_column_width;
-        self.filesystem_size_column_width = panel_state.size_column_width;
-        self.filesystem_column_resize_handle = panel_state.column_resize;
-        self.filesystem_preview_split_ratio = panel_state.preview_split_ratio;
-        self.filesystem_preview_split_dragging = panel_state.preview_split_dragging;
+        self.fs.filesystem_entry_page = panel_state.entry_page;
+        self.fs.filesystem_last_clicked_entry_index = panel_state.last_clicked_entry_index;
+        self.fs.filesystem_last_click_ms = panel_state.last_click_ms;
+        self.fs.filesystem_type_column_width = panel_state.type_column_width;
+        self.fs.filesystem_modified_column_width = panel_state.modified_column_width;
+        self.fs.filesystem_size_column_width = panel_state.size_column_width;
+        self.fs.filesystem_column_resize_handle = panel_state.column_resize;
+        self.fs.filesystem_preview_split_ratio = panel_state.preview_split_ratio;
+        self.fs.filesystem_preview_split_dragging = panel_state.preview_split_dragging;
         if (action) |value| {
             self.performFilesystemPanelAction(value, path_label);
         }
@@ -13315,38 +14179,38 @@ const App = struct {
     }
 
     fn isDebugBlockCollapsed(self: *App, event_id: u64, line_index: usize) bool {
-        return self.debug_folded_blocks.contains(makeDebugFoldKey(event_id, line_index));
+        return self.debug.debug_folded_blocks.contains(makeDebugFoldKey(event_id, line_index));
     }
 
     fn toggleDebugBlockCollapsed(self: *App, event_id: u64, line_index: usize) void {
         const key = makeDebugFoldKey(event_id, line_index);
-        if (self.debug_folded_blocks.contains(key)) {
-            _ = self.debug_folded_blocks.remove(key);
-            self.debug_fold_revision +%= 1;
-            if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
+        if (self.debug.debug_folded_blocks.contains(key)) {
+            _ = self.debug.debug_folded_blocks.remove(key);
+            self.debug.debug_fold_revision +%= 1;
+            if (self.debug.debug_fold_revision == 0) self.debug.debug_fold_revision = 1;
             return;
         }
-        self.debug_folded_blocks.put(key, {}) catch {};
-        self.debug_fold_revision +%= 1;
-        if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
+        self.debug.debug_folded_blocks.put(key, {}) catch {};
+        self.debug.debug_fold_revision +%= 1;
+        if (self.debug.debug_fold_revision == 0) self.debug.debug_fold_revision = 1;
     }
 
     fn pruneDebugFoldStateForEvent(self: *App, event_id: u64) void {
         var to_remove: std.ArrayList(DebugFoldKey) = .empty;
         defer to_remove.deinit(self.allocator);
 
-        var it = self.debug_folded_blocks.keyIterator();
+        var it = self.debug.debug_folded_blocks.keyIterator();
         while (it.next()) |key_ptr| {
             if (key_ptr.*.event_id == event_id) {
                 to_remove.append(self.allocator, key_ptr.*) catch return;
             }
         }
         for (to_remove.items) |key| {
-            _ = self.debug_folded_blocks.remove(key);
+            _ = self.debug.debug_folded_blocks.remove(key);
         }
         if (to_remove.items.len > 0) {
-            self.debug_fold_revision +%= 1;
-            if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
+            self.debug.debug_fold_revision +%= 1;
+            if (self.debug.debug_fold_revision == 0) self.debug.debug_fold_revision = 1;
         }
     }
 
@@ -13421,7 +14285,7 @@ const App = struct {
         const wrap_width = @max(1.0, content_max_x - output_min_x);
         if (entry.payload_visible_lines_valid and
             @abs(entry.cached_visible_rows_wrap_width - wrap_width) < 0.5 and
-            entry.cached_visible_rows_fold_revision == self.debug_fold_revision)
+            entry.cached_visible_rows_fold_revision == self.debug.debug_fold_revision)
         {
             return;
         }
@@ -13460,7 +14324,7 @@ const App = struct {
         else
             @intCast(rows_u64);
         entry.cached_visible_rows_wrap_width = wrap_width;
-        entry.cached_visible_rows_fold_revision = self.debug_fold_revision;
+        entry.cached_visible_rows_fold_revision = self.debug.debug_fold_revision;
         entry.cached_visible_rows_valid = true;
         entry.payload_visible_lines_valid = true;
     }
@@ -13776,48 +14640,48 @@ const App = struct {
     }
 
     fn clearSelectedNodeServiceEventCache(self: *App) void {
-        if (self.debug_selected_node_service_cache_node_id) |value| {
+        if (self.debug.debug_selected_node_service_cache_node_id) |value| {
             self.allocator.free(value);
-            self.debug_selected_node_service_cache_node_id = null;
+            self.debug.debug_selected_node_service_cache_node_id = null;
         }
-        if (self.debug_selected_node_service_cache_diagnostics) |value| {
+        if (self.debug.debug_selected_node_service_cache_diagnostics) |value| {
             self.allocator.free(value);
-            self.debug_selected_node_service_cache_diagnostics = null;
+            self.debug.debug_selected_node_service_cache_diagnostics = null;
         }
-        self.debug_selected_node_service_cache_index = null;
-        self.debug_selected_node_service_cache_event_id = 0;
+        self.debug.debug_selected_node_service_cache_index = null;
+        self.debug.debug_selected_node_service_cache_event_id = 0;
     }
 
     fn selectedNodeServiceEventInfo(self: *App) SelectedNodeServiceEventInfo {
-        const selected_idx = self.debug_selected_index orelse {
+        const selected_idx = self.debug.debug_selected_index orelse {
             self.clearSelectedNodeServiceEventCache();
             return .{};
         };
-        if (selected_idx >= self.debug_events.items.len) {
-            self.debug_selected_index = null;
+        if (selected_idx >= self.debug.debug_events.items.len) {
+            self.debug.debug_selected_index = null;
             self.clearSelectedNodeServiceEventCache();
             return .{};
         }
 
-        const entry = self.debug_events.items[selected_idx];
+        const entry = self.debug.debug_events.items[selected_idx];
         if (!std.mem.eql(u8, entry.category, "control.node_service_event")) {
             self.clearSelectedNodeServiceEventCache();
             return .{};
         }
 
-        if (self.debug_selected_node_service_cache_index == selected_idx and
-            self.debug_selected_node_service_cache_event_id == entry.id)
+        if (self.debug.debug_selected_node_service_cache_index == selected_idx and
+            self.debug.debug_selected_node_service_cache_event_id == entry.id)
         {
             return .{
                 .index = selected_idx,
-                .node_id = self.debug_selected_node_service_cache_node_id,
-                .diagnostics = self.debug_selected_node_service_cache_diagnostics,
+                .node_id = self.debug.debug_selected_node_service_cache_node_id,
+                .diagnostics = self.debug.debug_selected_node_service_cache_diagnostics,
             };
         }
 
         self.clearSelectedNodeServiceEventCache();
-        self.debug_selected_node_service_cache_index = selected_idx;
-        self.debug_selected_node_service_cache_event_id = entry.id;
+        self.debug.debug_selected_node_service_cache_index = selected_idx;
+        self.debug.debug_selected_node_service_cache_event_id = entry.id;
 
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, entry.payload_json, .{}) catch null;
         if (parsed) |*parsed_value| {
@@ -13825,18 +14689,18 @@ const App = struct {
             if (parsed_value.value == .object) {
                 if (parsed_value.value.object.get("node_id")) |value| {
                     if (value == .string and value.string.len > 0) {
-                        self.debug_selected_node_service_cache_node_id = self.allocator.dupe(u8, value.string) catch null;
+                        self.debug.debug_selected_node_service_cache_node_id = self.allocator.dupe(u8, value.string) catch null;
                     }
                 }
             }
         }
-        self.debug_selected_node_service_cache_diagnostics =
+        self.debug.debug_selected_node_service_cache_diagnostics =
             self.buildNodeServiceDeltaDiagnosticsTextFromJson(entry.payload_json) catch null;
 
         return .{
             .index = selected_idx,
-            .node_id = self.debug_selected_node_service_cache_node_id,
-            .diagnostics = self.debug_selected_node_service_cache_diagnostics,
+            .node_id = self.debug.debug_selected_node_service_cache_node_id,
+            .diagnostics = self.debug.debug_selected_node_service_cache_diagnostics,
         };
     }
 
@@ -13879,9 +14743,9 @@ const App = struct {
         base_idx: usize,
         compare_idx: usize,
     ) !?[]u8 {
-        if (base_idx >= self.debug_events.items.len or compare_idx >= self.debug_events.items.len) return null;
-        const base_entry = self.debug_events.items[base_idx];
-        const compare_entry = self.debug_events.items[compare_idx];
+        if (base_idx >= self.debug.debug_events.items.len or compare_idx >= self.debug.debug_events.items.len) return null;
+        const base_entry = self.debug.debug_events.items[base_idx];
+        const compare_entry = self.debug.debug_events.items[compare_idx];
         if (!std.mem.eql(u8, base_entry.category, "control.node_service_event")) return null;
         if (!std.mem.eql(u8, compare_entry.category, "control.node_service_event")) return null;
 
@@ -14482,8 +15346,8 @@ const App = struct {
             .{node_id},
         );
         defer self.allocator.free(node_path);
-        self.filesystem_path.clearRetainingCapacity();
-        try self.filesystem_path.appendSlice(self.allocator, node_path);
+        self.fs.filesystem_path.clearRetainingCapacity();
+        try self.fs.filesystem_path.appendSlice(self.allocator, node_path);
         try self.queueFilesystemPathLoad(node_path, true, false);
     }
 
@@ -14499,7 +15363,7 @@ const App = struct {
         }
 
         const pad = self.theme.spacing.sm;
-        const session_key_for_panel: ?[]const u8 = if (self.current_session_key) |key| key else if (self.connection_state == .connected) "main" else null;
+        const session_key_for_panel: ?[]const u8 = if (self.chat.current_session_key) |key| key else if (self.connection_state == .connected) "main" else null;
         const panel_rect = UiRect.fromMinSize(
             .{ rect.min[0] + pad, rect.min[1] + pad },
             .{
@@ -14514,7 +15378,7 @@ const App = struct {
             ChatMessage,
             ChatSession,
             self.allocator,
-            &self.chat_panel_state,
+            &self.chat.chat_panel_state,
             "spider-gui",
             session_key_for_panel,
             self.activeMessages(),
@@ -14522,7 +15386,7 @@ const App = struct {
             null,
             "🕷",
             "SpiderApp",
-            self.chat_sessions.items,
+            self.chat.chat_sessions.items,
             0,
             panel_rect,
         );
@@ -14600,7 +15464,7 @@ const App = struct {
         if (max_scroll <= 0.0) {
             if (self.form_scroll_drag_target == target) {
                 self.form_scroll_drag_target = .none;
-                if (!self.debug_scrollbar_dragging) self.setDragMouseCapture(false);
+                if (!self.debug.debug_scrollbar_dragging) self.setDragMouseCapture(false);
             }
             return;
         }
@@ -14631,7 +15495,7 @@ const App = struct {
                 );
             } else {
                 self.form_scroll_drag_target = .none;
-                if (!self.debug_scrollbar_dragging) self.setDragMouseCapture(false);
+                if (!self.debug.debug_scrollbar_dragging) self.setDragMouseCapture(false);
             }
         } else if (self.mouse_clicked and track_rect.contains(.{ self.mouse_x, self.mouse_y })) {
             const raw = (self.mouse_y - track_rect.min[1] - thumb_height * 0.5) / thumb_range;
@@ -15039,7 +15903,7 @@ const App = struct {
     }
 
     fn sessionExists(self: *const App, session_key: []const u8) bool {
-        for (self.chat_sessions.items) |session| {
+        for (self.chat.chat_sessions.items) |session| {
             if (std.mem.eql(u8, session.key, session_key)) return true;
         }
         return false;
@@ -15082,8 +15946,8 @@ const App = struct {
         );
         defer self.allocator.free(response_payload);
         self.invalidateFsrpcAttachment();
-        if (self.debug_stream_enabled) self.requestDebugStreamSnapshot(true);
-        if (self.node_service_watch_enabled) self.requestNodeServiceSnapshot(true);
+        if (self.debug.debug_stream_enabled) self.requestDebugStreamSnapshot(true);
+        if (self.debug.node_service_watch_enabled) self.requestNodeServiceSnapshot(true);
     }
 
     fn loadSessionHistoryFromServer(self: *App, show_feedback: bool) !void {
@@ -15111,7 +15975,7 @@ const App = struct {
             if (!existed) added_count += 1;
         }
 
-        if (self.current_session_key == null and history.items.len > 0) {
+        if (self.chat.current_session_key == null and history.items.len > 0) {
             try self.setCurrentSessionKey(history.items[0].session_key);
         }
 
@@ -15190,7 +16054,7 @@ const App = struct {
             std.log.warn("Failed to rebind filesystem transport for restored session: {s}", .{@errorName(restore_err)});
         };
         self.requestDebugStreamSnapshot(true);
-        self.node_service_watch_enabled = true;
+        self.debug.node_service_watch_enabled = true;
         self.requestNodeServiceSnapshot(true);
 
         try self.loadSessionHistoryFromServer(false);
@@ -15507,8 +16371,8 @@ const App = struct {
             .{ session_key, workspace_id orelse "(none)", resolved_agent },
         );
         self.invalidateFsrpcAttachment();
-        if (self.debug_stream_enabled) self.requestDebugStreamSnapshot(true);
-        if (self.node_service_watch_enabled) self.requestNodeServiceSnapshot(true);
+        if (self.debug.debug_stream_enabled) self.requestDebugStreamSnapshot(true);
+        if (self.debug.node_service_watch_enabled) self.requestNodeServiceSnapshot(true);
         try self.setDefaultAgentInSettings(resolved_agent);
     }
 
@@ -15559,7 +16423,7 @@ const App = struct {
         );
         self.clearFilesystemError();
         self.requestDebugStreamSnapshot(true);
-        self.node_service_watch_enabled = true;
+        self.debug.node_service_watch_enabled = true;
         self.requestNodeServiceSnapshot(true);
         self.clearWorkspaceError();
         try self.syncSettingsToConfig();
@@ -15579,7 +16443,7 @@ const App = struct {
             return;
         }
 
-        const had_pending_send = self.pending_send_message_id != null;
+        const had_pending_send = self.chat.pending_send_message_id != null;
         self.setConnectionState(.connecting, "Connecting...");
         self.session_attach_state = .unknown;
         self.clearConnectSetupHint();
@@ -15594,12 +16458,12 @@ const App = struct {
             existing.deinit();
             self.ws_client = null;
         }
-        self.debug_stream_enabled = true;
-        self.debug_stream_snapshot_pending = false;
-        self.debug_stream_snapshot_retry_at_ms = 0;
-        self.node_service_watch_enabled = false;
-        self.node_service_snapshot_pending = false;
-        self.node_service_snapshot_retry_at_ms = 0;
+        self.debug.debug_stream_enabled = true;
+        self.debug.debug_stream_snapshot_pending = false;
+        self.debug.debug_stream_snapshot_retry_at_ms = 0;
+        self.debug.node_service_watch_enabled = false;
+        self.debug.node_service_snapshot_pending = false;
+        self.debug.node_service_snapshot_retry_at_ms = 0;
         self.clearDebugStreamSnapshot();
 
         const effective_url = std.mem.trim(u8, self.settings_panel.server_url.items, " \t\r\n");
@@ -15608,7 +16472,7 @@ const App = struct {
             return;
         }
         try self.persistLauncherConnectToken();
-        const connect_token = std.mem.trim(u8, self.launcher_connect_token.items, " \t\r\n");
+        const connect_token = std.mem.trim(u8, self.ws.launcher_connect_token.items, " \t\r\n");
         std.log.info(
             "[GUI] SpiderApp v{s} connect requested url={s} token_present={}",
             .{ currentBuildLabel(), effective_url, connect_token.len > 0 },
@@ -15708,7 +16572,7 @@ const App = struct {
             self.setLauncherNotice("Connected. Select a workspace to open.");
         }
         self.requestDebugStreamSnapshot(true);
-        self.node_service_watch_enabled = true;
+        self.debug.node_service_watch_enabled = true;
         self.requestNodeServiceSnapshot(true);
         self.settings_panel.focused_field = .none;
         self.refreshWorkspaceData() catch |err| {
@@ -15729,10 +16593,10 @@ const App = struct {
         self.syncSettingsToConfig() catch |err| {
             std.log.warn("Failed to save config on connect: {s}", .{@errorName(err)});
         };
-        if (self.chat_sessions.items.len == 0) {
+        if (self.chat.chat_sessions.items.len == 0) {
             try self.ensureSessionExists("main", "Main");
-        } else if (self.current_session_key == null) {
-            try self.setCurrentSessionKey(self.chat_sessions.items[0].key);
+        } else if (self.chat.current_session_key == null) {
+            try self.setCurrentSessionKey(self.chat.chat_sessions.items[0].key);
         }
 
         if (self.connect_setup_hint) |hint| {
@@ -15751,7 +16615,7 @@ const App = struct {
         }
 
         if (had_pending_send) {
-            self.pending_send_resume_notified = true;
+            self.chat.pending_send_resume_notified = true;
         }
         if (had_pending_send) {
             _ = try self.tryResumePendingSendJob();
@@ -15818,11 +16682,11 @@ const App = struct {
     }
 
     fn syncLauncherSelectionFromConfig(self: *App) void {
-        self.launcher_selected_profile_index = 0;
+        self.ws.launcher_selected_profile_index = 0;
         const selected_id = self.config.selected_profile_id orelse return;
         for (self.config.connection_profiles, 0..) |profile, idx| {
             if (!std.mem.eql(u8, profile.id, selected_id)) continue;
-            self.launcher_selected_profile_index = idx;
+            self.ws.launcher_selected_profile_index = idx;
             return;
         }
     }
@@ -15863,9 +16727,9 @@ const App = struct {
 
     fn saveSelectedProfileFromLauncher(self: *App) !void {
         if (self.config.connection_profiles.len == 0) return error.ProfileNotFound;
-        const profile_name = std.mem.trim(u8, self.launcher_profile_name.items, " \t\r\n");
+        const profile_name = std.mem.trim(u8, self.ws.launcher_profile_name.items, " \t\r\n");
         const server_url = std.mem.trim(u8, self.settings_panel.server_url.items, " \t\r\n");
-        const metadata_trimmed = std.mem.trim(u8, self.launcher_profile_metadata.items, " \t\r\n");
+        const metadata_trimmed = std.mem.trim(u8, self.ws.launcher_profile_metadata.items, " \t\r\n");
         if (server_url.len == 0) return error.ServerUrlRequired;
 
         try self.config.updateSelectedConnectionProfile(
@@ -15880,9 +16744,9 @@ const App = struct {
     }
 
     fn createConnectionProfileFromLauncher(self: *App) !void {
-        const profile_name = std.mem.trim(u8, self.launcher_profile_name.items, " \t\r\n");
+        const profile_name = std.mem.trim(u8, self.ws.launcher_profile_name.items, " \t\r\n");
         const server_url = std.mem.trim(u8, self.settings_panel.server_url.items, " \t\r\n");
-        const metadata_trimmed = std.mem.trim(u8, self.launcher_profile_metadata.items, " \t\r\n");
+        const metadata_trimmed = std.mem.trim(u8, self.ws.launcher_profile_metadata.items, " \t\r\n");
         if (server_url.len == 0) return error.ServerUrlRequired;
 
         const display_name = if (profile_name.len > 0) profile_name else "Spider Web";
@@ -15905,16 +16769,16 @@ const App = struct {
 
     fn applyLauncherSelectedProfile(self: *App) !void {
         if (self.config.connection_profiles.len == 0) return;
-        const index = @min(self.launcher_selected_profile_index, self.config.connection_profiles.len - 1);
+        const index = @min(self.ws.launcher_selected_profile_index, self.config.connection_profiles.len - 1);
         const profile = self.config.connection_profiles[index];
         try self.config.setSelectedProfileById(profile.id);
         self.settings_panel.server_url.clearRetainingCapacity();
         try self.settings_panel.server_url.appendSlice(self.allocator, self.config.server_url);
-        self.launcher_profile_name.clearRetainingCapacity();
-        try self.launcher_profile_name.appendSlice(self.allocator, profile.name);
-        self.launcher_profile_metadata.clearRetainingCapacity();
+        self.ws.launcher_profile_name.clearRetainingCapacity();
+        try self.ws.launcher_profile_name.appendSlice(self.allocator, profile.name);
+        self.ws.launcher_profile_metadata.clearRetainingCapacity();
         if (profile.metadata) |value| {
-            try self.launcher_profile_metadata.appendSlice(self.allocator, value);
+            try self.ws.launcher_profile_metadata.appendSlice(self.allocator, value);
         }
         try self.config.setRoleToken(.admin, "");
         try self.config.setRoleToken(.user, "");
@@ -15932,29 +16796,29 @@ const App = struct {
     }
 
     fn setLauncherNotice(self: *App, message: []const u8) void {
-        if (self.launcher_notice) |existing| self.allocator.free(existing);
-        self.launcher_notice = self.allocator.dupe(u8, message) catch null;
+        if (self.ws.launcher_notice) |existing| self.allocator.free(existing);
+        self.ws.launcher_notice = self.allocator.dupe(u8, message) catch null;
     }
 
     fn clearLauncherNotice(self: *App) void {
-        if (self.launcher_notice) |existing| self.allocator.free(existing);
-        self.launcher_notice = null;
+        if (self.ws.launcher_notice) |existing| self.allocator.free(existing);
+        self.ws.launcher_notice = null;
     }
 
     fn clearLauncherCreateWorkspaceTemplates(self: *App) void {
-        workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.launcher_create_templates);
-        self.launcher_create_selected_template_index = 0;
-        self.launcher_create_template_page = 0;
+        workspace_types.deinitWorkspaceTemplateList(self.allocator, &self.ws.launcher_create_templates);
+        self.ws.launcher_create_selected_template_index = 0;
+        self.ws.launcher_create_template_page = 0;
     }
 
     fn setLauncherCreateWorkspaceModalError(self: *App, message: []const u8) void {
-        if (self.launcher_create_modal_error) |existing| self.allocator.free(existing);
-        self.launcher_create_modal_error = self.allocator.dupe(u8, message) catch null;
+        if (self.ws.launcher_create_modal_error) |existing| self.allocator.free(existing);
+        self.ws.launcher_create_modal_error = self.allocator.dupe(u8, message) catch null;
     }
 
     fn clearLauncherCreateWorkspaceModalError(self: *App) void {
-        if (self.launcher_create_modal_error) |existing| self.allocator.free(existing);
-        self.launcher_create_modal_error = null;
+        if (self.ws.launcher_create_modal_error) |existing| self.allocator.free(existing);
+        self.ws.launcher_create_modal_error = null;
     }
 
     fn clearPackageManagerPackages(self: *App) void {
@@ -16044,23 +16908,23 @@ const App = struct {
     }
 
     fn syncLauncherCreateSelectedTemplateToSettings(self: *App) !void {
-        if (self.launcher_create_templates.items.len == 0) {
+        if (self.ws.launcher_create_templates.items.len == 0) {
             self.settings_panel.workspace_template_id.clearRetainingCapacity();
             return;
         }
-        const selected_index = @min(self.launcher_create_selected_template_index, self.launcher_create_templates.items.len - 1);
-        self.launcher_create_selected_template_index = selected_index;
+        const selected_index = @min(self.ws.launcher_create_selected_template_index, self.ws.launcher_create_templates.items.len - 1);
+        self.ws.launcher_create_selected_template_index = selected_index;
         self.settings_panel.workspace_template_id.clearRetainingCapacity();
         try self.settings_panel.workspace_template_id.appendSlice(
             self.allocator,
-            self.launcher_create_templates.items[selected_index].id,
+            self.ws.launcher_create_templates.items[selected_index].id,
         );
     }
 
     fn selectedLauncherCreateWorkspaceTemplate(self: *const App) ?*const workspace_types.WorkspaceTemplate {
-        if (self.launcher_create_templates.items.len == 0) return null;
-        const selected_index = @min(self.launcher_create_selected_template_index, self.launcher_create_templates.items.len - 1);
-        return &self.launcher_create_templates.items[selected_index];
+        if (self.ws.launcher_create_templates.items.len == 0) return null;
+        const selected_index = @min(self.ws.launcher_create_selected_template_index, self.ws.launcher_create_templates.items.len - 1);
+        return &self.ws.launcher_create_templates.items[selected_index];
     }
 
     fn refreshLauncherCreateWorkspaceTemplates(self: *App) !void {
@@ -16071,14 +16935,14 @@ const App = struct {
         errdefer workspace_types.deinitWorkspaceTemplateList(self.allocator, &templates);
 
         self.clearLauncherCreateWorkspaceTemplates();
-        self.launcher_create_templates = templates;
-        self.launcher_create_selected_template_index = 0;
+        self.ws.launcher_create_templates = templates;
+        self.ws.launcher_create_selected_template_index = 0;
 
         const preferred_template = std.mem.trim(u8, self.settings_panel.workspace_template_id.items, " \t\r\n");
         if (preferred_template.len > 0) {
-            for (self.launcher_create_templates.items, 0..) |template, idx| {
+            for (self.ws.launcher_create_templates.items, 0..) |template, idx| {
                 if (std.mem.eql(u8, template.id, preferred_template)) {
-                    self.launcher_create_selected_template_index = idx;
+                    self.ws.launcher_create_selected_template_index = idx;
                     break;
                 }
             }
@@ -16087,7 +16951,7 @@ const App = struct {
     }
 
     fn openLauncherCreateWorkspaceModal(self: *App) void {
-        self.launcher_create_modal_open = true;
+        self.ws.launcher_create_modal_open = true;
         self.settings_panel.focused_field = .project_create_name;
         self.clearLauncherCreateWorkspaceModalError();
         self.refreshLauncherCreateWorkspaceTemplates() catch |err| {
@@ -16103,7 +16967,7 @@ const App = struct {
     }
 
     fn closeLauncherCreateWorkspaceModal(self: *App) void {
-        self.launcher_create_modal_open = false;
+        self.ws.launcher_create_modal_open = false;
         self.clearLauncherCreateWorkspaceModalError();
         if (self.settings_panel.focused_field == .project_create_name or
             self.settings_panel.focused_field == .project_create_vision)
@@ -16115,7 +16979,7 @@ const App = struct {
     fn createWorkspaceFromLauncherModal(self: *App) !void {
         const name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
         if (name.len == 0) return error.MissingField;
-        if (self.launcher_create_templates.items.len == 0) return error.MissingField;
+        if (self.ws.launcher_create_templates.items.len == 0) return error.MissingField;
         try self.syncLauncherCreateSelectedTemplateToSettings();
         try self.createWorkspaceFromPanel();
         self.closeLauncherCreateWorkspaceModal();
@@ -16125,7 +16989,7 @@ const App = struct {
     fn canRenderWorkspaceStage(self: *const App) bool {
         if (self.connection_state != .connected) return false;
         if (self.ws_client == null) return false;
-        if (self.active_workspace_id == null) return false;
+        if (self.ws.active_workspace_id == null) return false;
         return true;
     }
 
@@ -16147,7 +17011,7 @@ const App = struct {
 
     fn saveActiveWorkspaceLayout(self: *App) void {
         const profile_id = self.active_profile_id orelse return;
-        const workspace_id = self.active_workspace_id orelse return;
+        const workspace_id = self.ws.active_workspace_id orelse return;
         const layout_path = self.layoutPathForWorkspace(profile_id, workspace_id) catch return;
         defer self.allocator.free(layout_path);
         zui.ui.workspace_store.save(self.allocator, layout_path, &self.manager.workspace) catch return;
@@ -16193,9 +17057,9 @@ const App = struct {
         const profile_id = self.config.selectedProfileId();
         self.saveActiveWorkspaceLayout();
         if (self.active_profile_id) |existing| self.allocator.free(existing);
-        if (self.active_workspace_id) |existing| self.allocator.free(existing);
+        if (self.ws.active_workspace_id) |existing| self.allocator.free(existing);
         self.active_profile_id = try self.allocator.dupe(u8, profile_id);
-        self.active_workspace_id = try self.allocator.dupe(u8, project_id);
+        self.ws.active_workspace_id = try self.allocator.dupe(u8, project_id);
         self.ui_stage = .workspace;
         self.ide_menu_open = null;
         self.windows_menu_open_window_id = null;
@@ -16217,9 +17081,9 @@ const App = struct {
             self.allocator.free(value);
             self.active_profile_id = null;
         }
-        if (self.active_workspace_id) |value| {
+        if (self.ws.active_workspace_id) |value| {
             self.allocator.free(value);
-            self.active_workspace_id = null;
+            self.ws.active_workspace_id = null;
         }
         self.closeAllSecondaryWindows();
         _ = c.SDL_SetWindowTitle(self.window, platformWindowTitle("SpiderApp - Launcher"));
@@ -16273,9 +17137,7 @@ const App = struct {
 
     fn disconnect(self: *App) void {
         self.setDragMouseCapture(false);
-        self.closePackageManagerModal();
-        self.closeAboutModal();
-        self.debug_scrollbar_dragging = false;
+        self.debug.debug_scrollbar_dragging = false;
         self.form_scroll_drag_target = .none;
         self.stopFilesystemWorker();
         if (self.ws_client) |*client| {
@@ -16285,12 +17147,12 @@ const App = struct {
         self.mount_control_ready = false;
         self.clearPendingSend();
         self.clearSessions();
-        self.debug_stream_enabled = false;
-        self.debug_stream_snapshot_pending = false;
-        self.debug_stream_snapshot_retry_at_ms = 0;
-        self.node_service_watch_enabled = false;
-        self.node_service_snapshot_pending = false;
-        self.node_service_snapshot_retry_at_ms = 0;
+        self.debug.debug_stream_enabled = false;
+        self.debug.debug_stream_snapshot_pending = false;
+        self.debug.debug_stream_snapshot_retry_at_ms = 0;
+        self.debug.node_service_watch_enabled = false;
+        self.debug.node_service_snapshot_pending = false;
+        self.debug.node_service_snapshot_retry_at_ms = 0;
         self.session_attach_state = .unknown;
         self.resetFsrpcConnectionState();
         self.clearDebugStreamSnapshot();
@@ -16422,7 +17284,7 @@ const App = struct {
     }
 
     fn parseNodeServiceWatchReplayLimit(self: *App) usize {
-        const trimmed = std.mem.trim(u8, self.node_service_watch_replay_limit.items, " \t\r\n");
+        const trimmed = std.mem.trim(u8, self.debug.node_service_watch_replay_limit.items, " \t\r\n");
         if (trimmed.len == 0) return 25;
         const parsed = std.fmt.parseUnsigned(usize, trimmed, 10) catch return 25;
         return @min(parsed, 10_000);
@@ -16430,7 +17292,7 @@ const App = struct {
 
     fn subscribeNodeServiceEvents(self: *App, client: *ws_client_mod.WebSocketClient) void {
         _ = client;
-        self.node_service_watch_enabled = true;
+        self.debug.node_service_watch_enabled = true;
         self.requestNodeServiceSnapshot(true);
     }
 
@@ -16440,7 +17302,7 @@ const App = struct {
         else
             return error.NotConnected;
         self.subscribeNodeServiceEvents(client);
-        if (self.node_service_watch_enabled) {
+        if (self.debug.node_service_watch_enabled) {
             try self.appendMessage("system", "Node service feed refreshed", null);
             return;
         }
@@ -16462,19 +17324,609 @@ const App = struct {
         else
             return error.NotConnected;
         _ = client;
-        self.node_service_watch_enabled = false;
-        self.node_service_snapshot_pending = false;
-        self.node_service_snapshot_retry_at_ms = 0;
+        self.debug.node_service_watch_enabled = false;
+        self.debug.node_service_snapshot_pending = false;
+        self.debug.node_service_snapshot_retry_at_ms = 0;
         try self.appendMessage("system", "Node service feed paused", null);
     }
 
     fn sendChatMessageText(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
-        const msg = "Chat and job transport is temporarily unavailable while SpiderApp moves fully to the mount-based workspace model.";
-        self.setWorkspaceError(msg);
-        try self.appendMessage("system", msg, null);
-        self.clearPendingSend();
-        return error.Unsupported;
+        std.log.info("[GUI] sendChatMessageText: text_len={d} connected={}", .{ text.len, self.ws_client != null });
+        if (self.chat.awaiting_reply) {
+            try self.appendMessage("system", "Wait for the current send to finish.", null);
+            return;
+        }
+        const client = if (self.ws_client) |*value|
+            value
+        else {
+            try self.appendMessage("system", "No active websocket connection", null);
+            return;
+        };
+
+        // Keep a session key for this send
+        const session_key = try self.currentSessionOrDefault();
+        if (session_key.len == 0) {
+            try self.appendMessage("system", "No active session available", null);
+            return;
+        }
+        const attach_project_id = self.preferredAttachWorkspaceId();
+        std.log.info(
+            "[GUI] sendChatMessageText: session={s} workspace={s} attach_state={s}",
+            .{ session_key, attach_project_id orelse "(none)", @tagName(self.session_attach_state) },
+        );
+        if (self.session_attach_state == .err) {
+            const detail = self.ws.workspace_last_error orelse "Sandbox runtime is unavailable for this session.";
+            try self.appendMessage("system", detail, null);
+            return error.RemoteError;
+        }
+        if (self.session_attach_state != .ready) {
+            const msg = "Chat is disabled until you attach a Spiderweb session from Workspace Overview. External workers can keep using the mounted workspace without live chat.";
+            self.setWorkspaceError(msg);
+            try self.appendMessage("system", msg, null);
+            return error.ProjectIdRequired;
+        }
+
+        const user_msg_id = try self.nextMessageId("msg");
+        const appended_user_msg_id = try self.appendMessageWithIdForSession(session_key, "user", text, .sending, user_msg_id);
+        defer self.allocator.free(appended_user_msg_id);
+        self.allocator.free(user_msg_id);
+        try self.setPendingSend(self.allocator, appended_user_msg_id, session_key);
+
+        const request_id = try self.nextMessageId("send");
+        defer self.allocator.free(request_id);
+        if (self.chat.pending_send_request_id) |value| {
+            self.allocator.free(value);
+            self.chat.pending_send_request_id = null;
+        }
+        self.chat.pending_send_request_id = try self.allocator.dupe(u8, request_id);
+        self.chat.awaiting_reply = true;
+        std.log.info(
+            "[GUI] sendChatMessageText: submit request_id={s} session={s}",
+            .{ request_id, session_key },
+        );
+
+        const submit = self.submitChatJobViaFsrpc(client, text) catch |err| {
+            std.log.err("[GUI] sendChatMessageText: fsrpc submit failed: {s}", .{@errorName(err)});
+            const remote_detail = if (err == error.RemoteError)
+                (control_plane.lastRemoteError() orelse (self.fs.fsrpc_last_remote_error orelse @errorName(err)))
+            else
+                @errorName(err);
+            const err_text = if (err == error.RemoteError and isTokenAuthRemoteError(remote_detail))
+                try std.fmt.allocPrint(
+                    self.allocator,
+                    "Send failed: {s}. Verify the {s} token in Launcher.",
+                    .{ remote_detail, self.activeRoleLabel() },
+                )
+            else
+                try std.fmt.allocPrint(self.allocator, "Send failed: {s}", .{remote_detail});
+            defer self.allocator.free(err_text);
+            try self.appendMessage("system", err_text, null);
+            if (self.chat.pending_send_message_id) |message_id| {
+                try self.setMessageFailed(message_id);
+            } else {
+                try self.setMessageFailed(appended_user_msg_id);
+            }
+            self.clearPendingSend();
+            return err;
+        };
+        std.log.info(
+            "[GUI] sendChatMessageText: submit ok request_id={s} job_id={s}",
+            .{ request_id, submit.job_id },
+        );
+        if (self.chat.pending_send_job_id) |value| {
+            self.allocator.free(value);
+            self.chat.pending_send_job_id = null;
+        }
+        if (self.chat.pending_send_jobs_root) |value| {
+            self.allocator.free(value);
+            self.chat.pending_send_jobs_root = null;
+        }
+        if (self.chat.pending_send_correlation_id) |value| {
+            self.allocator.free(value);
+            self.chat.pending_send_correlation_id = null;
+        }
+        self.chat.pending_send_job_id = submit.job_id;
+        self.chat.pending_send_jobs_root = submit.jobs_root;
+        self.chat.pending_send_thoughts_root = submit.thoughts_root;
+        self.chat.pending_send_correlation_id = submit.correlation_id;
+    }
+
+    fn nextFsrpcTag(self: *App) u32 {
+        if (self.ws_client) |*client| {
+            return client.nextAcheronTag();
+        }
+        const tag = self.fs.next_fsrpc_tag;
+        self.fs.next_fsrpc_tag +%= 1;
+        if (self.fs.next_fsrpc_tag == 0) self.fs.next_fsrpc_tag = 1;
+        return tag;
+    }
+
+    fn nextFsrpcFid(self: *App) u32 {
+        if (self.ws_client) |*client| {
+            return client.nextAcheronFid();
+        }
+        const fid = self.fs.next_fsrpc_fid;
+        self.fs.next_fsrpc_fid +%= 1;
+        if (self.fs.next_fsrpc_fid == 0 or self.fs.next_fsrpc_fid == 1) self.fs.next_fsrpc_fid = 2;
+        return fid;
+    }
+
+    fn fsrpcRequestTypeForLog(request_json: []const u8) []const u8 {
+        inline for ([_][]const u8{
+            "acheron.t_version",
+            "acheron.t_attach",
+            "acheron.t_walk",
+            "acheron.t_open",
+            "acheron.t_read",
+            "acheron.t_write",
+            "acheron.t_clunk",
+        }) |needle| {
+            if (std.mem.indexOf(u8, request_json, needle) != null) return needle;
+        }
+        return "unknown";
+    }
+
+    fn fsrpcVerboseLogsEnabled(self: *const App) bool {
+        return self.settings_panel.ws_verbose_logs;
+    }
+
+    fn logFsrpcVerbose(self: *const App, comptime fmt: []const u8, args: anytype) void {
+        if (!self.fsrpcVerboseLogsEnabled()) return;
+        std.log.info(fmt, args);
+    }
+
+    fn sendAndAwaitFsrpc(
+        self: *App,
+        client: *ws_client_mod.WebSocketClient,
+        request_json: []const u8,
+        tag: u32,
+        timeout_ms: u32,
+    ) !FsrpcEnvelope {
+        const req_type = fsrpcRequestTypeForLog(request_json);
+        self.logFsrpcVerbose(
+            "[GUI][FSRPC] send type={s} tag={d} timeout_ms={d}",
+            .{ req_type, tag, timeout_ms },
+        );
+        client.send(request_json) catch |err| {
+            std.log.err(
+                "[GUI][FSRPC] send failed type={s} tag={d} err={s}",
+                .{ req_type, tag, @errorName(err) },
+            );
+            return err;
+        };
+        const raw = client.awaitAcheronFrame(tag, timeout_ms) catch |err| {
+            std.log.err(
+                "[GUI][FSRPC] await failed type={s} tag={d} err={s} alive={}",
+                .{ req_type, tag, @errorName(err), client.isAlive() },
+            );
+            return err;
+        } orelse {
+            std.log.err(
+                "[GUI][FSRPC] await timeout type={s} tag={d} alive={}",
+                .{ req_type, tag, client.isAlive() },
+            );
+            return error.Timeout;
+        };
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, raw, .{}) catch {
+            std.log.err(
+                "[GUI][FSRPC] parse failed type={s} tag={d}",
+                .{ req_type, tag },
+            );
+            self.allocator.free(raw);
+            return error.InvalidResponse;
+        };
+        self.logFsrpcVerbose(
+            "[GUI][FSRPC] recv type={s} tag={d} bytes={d} alive={}",
+            .{ req_type, tag, raw.len, client.isAlive() },
+        );
+        if (!client.isAlive()) {
+            self.fs.fsrpc_ready = false;
+        }
+        return .{
+            .raw = raw,
+            .parsed = parsed,
+        };
+    }
+
+    fn ensureFsrpcOk(self: *App, envelope: *FsrpcEnvelope) !void {
+        if (envelope.parsed.value != .object) return error.InvalidResponse;
+        const obj = envelope.parsed.value.object;
+        const ok_value = obj.get("ok") orelse return error.InvalidResponse;
+        if (ok_value != .bool) return error.InvalidResponse;
+        if (ok_value.bool) {
+            self.session_attach_state = .ready;
+            self.clearFsrpcRemoteError();
+            return;
+        }
+
+        var detail: ?[]u8 = null;
+        var runtime_warming = false;
+        if (obj.get("error")) |err_value| {
+            if (err_value == .object) {
+                const err_obj = err_value.object;
+                const message = if (err_obj.get("message")) |value|
+                    if (value == .string) value.string else null
+                else
+                    null;
+                const code = if (err_obj.get("code")) |value|
+                    if (value == .string) value.string else null
+                else
+                    null;
+                if (code) |value| {
+                    if (std.mem.eql(u8, value, "runtime_warming")) runtime_warming = true;
+                }
+                const errno = if (err_obj.get("errno")) |value|
+                    if (value == .integer) value.integer else null
+                else
+                    null;
+
+                if (message != null and code != null and errno != null) {
+                    detail = std.fmt.allocPrint(self.allocator, "{s} [{s}] (errno={d})", .{ message.?, code.?, errno.? }) catch null;
+                } else if (message != null and errno != null) {
+                    detail = std.fmt.allocPrint(self.allocator, "{s} (errno={d})", .{ message.?, errno.? }) catch null;
+                } else if (message != null and code != null) {
+                    detail = std.fmt.allocPrint(self.allocator, "{s} [{s}]", .{ message.?, code.? }) catch null;
+                } else if (message) |value| {
+                    detail = self.allocator.dupe(u8, value) catch null;
+                } else if (code) |value| {
+                    detail = std.fmt.allocPrint(self.allocator, "remote fsrpc error [{s}]", .{value}) catch null;
+                } else if (errno) |value| {
+                    detail = std.fmt.allocPrint(self.allocator, "remote fsrpc error (errno={d})", .{value}) catch null;
+                }
+            } else if (err_value == .string) {
+                detail = self.allocator.dupe(u8, err_value.string) catch null;
+            }
+        }
+
+        // Detect the POSIX enoent code that the 9P layer sends for missing paths.
+        // This is a normal "file not found" condition; callers already handle it
+        // via `catch`. Log at debug so the console stays quiet, and return a
+        // dedicated error so callers can distinguish it from real protocol errors.
+        const is_enoent = blk: {
+            if (obj.get("error")) |ev| {
+                if (ev == .object) {
+                    if (ev.object.get("code")) |cv| {
+                        if (cv == .string and std.mem.eql(u8, cv.string, "enoent")) break :blk true;
+                    }
+                }
+            }
+            break :blk false;
+        };
+
+        if (is_enoent) {
+            if (detail) |value| {
+                defer self.allocator.free(value);
+                std.log.debug("[GUI][FSRPC] path not found: {s}", .{value});
+            } else {
+                std.log.debug("[GUI][FSRPC] path not found (enoent)", .{});
+            }
+            return error.FileNotFound;
+        }
+
+        if (detail) |value| {
+            defer self.allocator.free(value);
+            self.setFsrpcRemoteError(value);
+            std.log.warn("[GUI][FSRPC] remote error: {s}", .{value});
+        } else {
+            self.setFsrpcRemoteError("remote fsrpc error");
+            std.log.warn("[GUI][FSRPC] remote error: remote fsrpc error", .{});
+        }
+        if (runtime_warming) {
+            self.session_attach_state = .unknown;
+            if (self.connection_state == .connected) {
+                self.setConnectionState(.connected, "Connected");
+            }
+            self.setFsrpcRemoteError("sandbox runtime unavailable");
+            return error.RemoteError;
+        }
+        return error.RemoteError;
+    }
+
+    fn getFsrpcPayloadObject(self: *App, root: std.json.ObjectMap) !std.json.ObjectMap {
+        _ = self;
+        const payload = root.get("payload") orelse return error.InvalidResponse;
+        if (payload != .object) return error.InvalidResponse;
+        return payload.object;
+    }
+
+    fn fsrpcBootstrapGui(self: *App, client: *ws_client_mod.WebSocketClient) !void {
+        if (self.fs.fsrpc_ready) {
+            self.logFsrpcVerbose("[GUI][FSRPC] bootstrap skipped: already ready", .{});
+            return;
+        }
+
+        self.logFsrpcVerbose("[GUI][FSRPC] bootstrap start", .{});
+
+        try control_plane.ensureUnifiedV2Connection(
+            self.allocator,
+            client,
+            &self.message_counter,
+        );
+        self.logFsrpcVerbose("[GUI][FSRPC] unified-v2 ready", .{});
+
+        const version_tag = self.nextFsrpcTag();
+        const version_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_version\",\"tag\":{d},\"msize\":1048576,\"version\":\"acheron-1\"}}",
+            .{version_tag},
+        );
+        defer self.allocator.free(version_req);
+        var version = try self.sendAndAwaitFsrpc(client, version_req, version_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer version.deinit(self.allocator);
+        try self.ensureFsrpcOk(&version);
+        self.logFsrpcVerbose("[GUI][FSRPC] version ok tag={d}", .{version_tag});
+
+        const attach_tag = self.nextFsrpcTag();
+        const attach_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_attach\",\"tag\":{d},\"fid\":1}}",
+            .{attach_tag},
+        );
+        defer self.allocator.free(attach_req);
+        var attach = try self.sendAndAwaitFsrpc(client, attach_req, attach_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer attach.deinit(self.allocator);
+        try self.ensureFsrpcOk(&attach);
+        self.fs.fsrpc_ready = true;
+        self.logFsrpcVerbose("[GUI][FSRPC] bootstrap ready attach_tag={d}", .{attach_tag});
+    }
+
+    fn fsrpcClunkBestEffort(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) void {
+        const tag = self.nextFsrpcTag();
+        const req = std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_clunk\",\"tag\":{d},\"fid\":{d}}}",
+            .{ tag, fid },
+        ) catch return;
+        defer self.allocator.free(req);
+
+        var response = self.sendAndAwaitFsrpc(client, req, tag, FSRPC_CLUNK_TIMEOUT_MS) catch return;
+        response.deinit(self.allocator);
+    }
+
+    fn sendChatViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) ![]u8 {
+        var submit = try self.submitChatJobViaFsrpc(client, text);
+        defer submit.deinit(self.allocator);
+
+        const result_fid = self.nextFsrpcFid();
+        defer self.fsrpcClunkBestEffort(client, result_fid);
+
+        const result_path = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/{s}/result.txt",
+            .{ submit.jobs_root, submit.job_id },
+        );
+        defer self.allocator.free(result_path);
+        try self.walkPathGui(client, result_fid, result_path);
+
+        const open_result_tag = self.nextFsrpcTag();
+        const open_result_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"r\"}}",
+            .{ open_result_tag, result_fid },
+        );
+        defer self.allocator.free(open_result_req);
+        var open_result = try self.sendAndAwaitFsrpc(client, open_result_req, open_result_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer open_result.deinit(self.allocator);
+        try self.ensureFsrpcOk(&open_result);
+
+        const read_tag = self.nextFsrpcTag();
+        const read_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":0,\"count\":1048576}}",
+            .{ read_tag, result_fid },
+        );
+        defer self.allocator.free(read_req);
+        var read = try self.sendAndAwaitFsrpc(client, read_req, read_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer read.deinit(self.allocator);
+        try self.ensureFsrpcOk(&read);
+
+        const read_payload = try self.getFsrpcPayloadObject(read.parsed.value.object);
+        const data_b64 = read_payload.get("data_b64") orelse return error.InvalidResponse;
+        if (data_b64 != .string) return error.InvalidResponse;
+
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
+        const decoded = try self.allocator.alloc(u8, decoded_len);
+        errdefer self.allocator.free(decoded);
+        _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
+
+        return decoded;
+    }
+
+    fn submitChatJobViaFsrpc(self: *App, client: *ws_client_mod.WebSocketClient, text: []const u8) !SubmitChatJobResult {
+        self.logFsrpcVerbose("[GUI][FSRPC] submitChatJobViaFsrpc start text_len={d}", .{text.len});
+        try self.fsrpcBootstrapGui(client);
+        var chat_paths = try self.discoverScopedChatBindingPathsGui(client);
+        defer chat_paths.deinit(self.allocator);
+
+        const input_fid = self.nextFsrpcFid();
+        defer self.fsrpcClunkBestEffort(client, input_fid);
+        self.logFsrpcVerbose("[GUI][FSRPC] chat input fid={d}", .{input_fid});
+        try self.walkPathGui(client, input_fid, chat_paths.input_path);
+
+        const open_input_tag = self.nextFsrpcTag();
+        const open_input_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"rw\"}}",
+            .{ open_input_tag, input_fid },
+        );
+        defer self.allocator.free(open_input_req);
+        var open_input = try self.sendAndAwaitFsrpc(client, open_input_req, open_input_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer open_input.deinit(self.allocator);
+        try self.ensureFsrpcOk(&open_input);
+        self.logFsrpcVerbose("[GUI][FSRPC] chat input open ok fid={d}", .{input_fid});
+
+        const encoded = try encodeDataB64(self.allocator, text);
+        defer self.allocator.free(encoded);
+        var generated_write_request_id: ?[]const u8 = null;
+        defer if (generated_write_request_id) |value| self.allocator.free(value);
+        const write_request_id = if (self.chat.pending_send_request_id) |pending|
+            pending
+        else blk: {
+            const generated = try self.nextMessageId("job");
+            generated_write_request_id = generated;
+            break :blk generated;
+        };
+        const escaped_write_request_id = try jsonEscape(self.allocator, write_request_id);
+        defer self.allocator.free(escaped_write_request_id);
+        const write_tag = self.nextFsrpcTag();
+        const write_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_write\",\"tag\":{d},\"id\":\"{s}\",\"fid\":{d},\"offset\":0,\"data_b64\":\"{s}\"}}",
+            .{ write_tag, escaped_write_request_id, input_fid, encoded },
+        );
+        defer self.allocator.free(write_req);
+        var write = try self.sendAndAwaitFsrpc(client, write_req, write_tag, FSRPC_CHAT_WRITE_TIMEOUT_MS);
+        defer write.deinit(self.allocator);
+        try self.ensureFsrpcOk(&write);
+
+        const write_payload = try self.getFsrpcPayloadObject(write.parsed.value.object);
+        const job_value = write_payload.get("job") orelse return error.InvalidResponse;
+        if (job_value != .string) return error.InvalidResponse;
+        self.logFsrpcVerbose(
+            "[GUI][FSRPC] chat write ok fid={d} request_id={s} job={s}",
+            .{ input_fid, write_request_id, job_value.string },
+        );
+        return .{
+            .job_id = try self.allocator.dupe(u8, job_value.string),
+            .jobs_root = try self.allocator.dupe(u8, chat_paths.jobs_root),
+            .thoughts_root = try self.allocator.dupe(u8, chat_paths.thoughts_root),
+            .correlation_id = if (write_payload.get("correlation_id")) |value|
+                if (value == .string and value.string.len > 0) try self.allocator.dupe(u8, value.string) else null
+            else
+                null,
+        };
+    }
+
+    fn walkPathGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32, path: []const u8) !void {
+        var segments = try self.splitFsPathSegments(path);
+        defer self.freeFsPathSegments(&segments);
+        const path_json = try self.buildPathArrayJsonGui(segments.items);
+        defer self.allocator.free(path_json);
+
+        const walk_tag = self.nextFsrpcTag();
+        const walk_req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+            .{ walk_tag, fid, path_json },
+        );
+        defer self.allocator.free(walk_req);
+        var walk = try self.sendAndAwaitFsrpc(client, walk_req, walk_tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer walk.deinit(self.allocator);
+        try self.ensureFsrpcOk(&walk);
+    }
+
+    fn splitFsPathSegments(self: *App, path: []const u8) !std.ArrayListUnmanaged([]u8) {
+        var out = std.ArrayListUnmanaged([]u8){};
+        errdefer {
+            for (out.items) |segment| self.allocator.free(segment);
+            out.deinit(self.allocator);
+        }
+
+        const trimmed = std.mem.trim(u8, path, " \t\r\n");
+        if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "/")) return out;
+
+        var iter = std.mem.splitScalar(u8, trimmed, '/');
+        while (iter.next()) |raw| {
+            const part = std.mem.trim(u8, raw, " \t\r\n");
+            if (part.len == 0) continue;
+            try out.append(self.allocator, try self.allocator.dupe(u8, part));
+        }
+        return out;
+    }
+
+    fn freeFsPathSegments(self: *App, segments: *std.ArrayListUnmanaged([]u8)) void {
+        for (segments.items) |segment| self.allocator.free(segment);
+        segments.deinit(self.allocator);
+        segments.* = .{};
+    }
+
+    fn buildPathArrayJsonGui(self: *App, segments: []const []const u8) ![]u8 {
+        var out = std.ArrayListUnmanaged(u8){};
+        defer out.deinit(self.allocator);
+        try out.append(self.allocator, '[');
+        for (segments, 0..) |segment, idx| {
+            if (idx > 0) try out.append(self.allocator, ',');
+            const escaped = try jsonEscape(self.allocator, segment);
+            defer self.allocator.free(escaped);
+            try out.writer(self.allocator).print("\"{s}\"", .{escaped});
+        }
+        try out.append(self.allocator, ']');
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    fn fsrpcWalkPathGui(self: *App, client: *ws_client_mod.WebSocketClient, path: []const u8) !u32 {
+        var segments = try self.splitFsPathSegments(path);
+        defer self.freeFsPathSegments(&segments);
+        const path_json = try self.buildPathArrayJsonGui(segments.items);
+        defer self.allocator.free(path_json);
+
+        const new_fid = self.nextFsrpcFid();
+        const tag = self.nextFsrpcTag();
+        const req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_walk\",\"tag\":{d},\"fid\":1,\"newfid\":{d},\"path\":{s}}}",
+            .{ tag, new_fid, path_json },
+        );
+        defer self.allocator.free(req);
+
+        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer response.deinit(self.allocator);
+        try self.ensureFsrpcOk(&response);
+        return new_fid;
+    }
+
+    fn fsrpcOpenGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32, mode: []const u8) !void {
+        const escaped_mode = try jsonEscape(self.allocator, mode);
+        defer self.allocator.free(escaped_mode);
+        const tag = self.nextFsrpcTag();
+        const req = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"channel\":\"acheron\",\"type\":\"acheron.t_open\",\"tag\":{d},\"fid\":{d},\"mode\":\"{s}\"}}",
+            .{ tag, fid, escaped_mode },
+        );
+        defer self.allocator.free(req);
+
+        var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
+        defer response.deinit(self.allocator);
+        try self.ensureFsrpcOk(&response);
+    }
+
+    fn fsrpcReadAllTextGui(self: *App, client: *ws_client_mod.WebSocketClient, fid: u32) ![]u8 {
+        var out = std.ArrayListUnmanaged(u8){};
+        errdefer out.deinit(self.allocator);
+
+        var offset: u64 = 0;
+        while (true) {
+            const tag = self.nextFsrpcTag();
+            const req = try std.fmt.allocPrint(
+                self.allocator,
+                "{{\"channel\":\"acheron\",\"type\":\"acheron.t_read\",\"tag\":{d},\"fid\":{d},\"offset\":{d},\"count\":{d}}}",
+                .{ tag, fid, offset, FSRPC_READ_CHUNK_BYTES },
+            );
+            defer self.allocator.free(req);
+
+            var response = try self.sendAndAwaitFsrpc(client, req, tag, FSRPC_DEFAULT_TIMEOUT_MS);
+            defer response.deinit(self.allocator);
+            try self.ensureFsrpcOk(&response);
+
+            const payload = try self.getFsrpcPayloadObject(response.parsed.value.object);
+            const data_b64 = payload.get("data_b64") orelse return error.InvalidResponse;
+            if (data_b64 != .string) return error.InvalidResponse;
+
+            const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64.string) catch return error.InvalidResponse;
+            const decoded = try self.allocator.alloc(u8, decoded_len);
+            defer self.allocator.free(decoded);
+            _ = std.base64.standard.Decoder.decode(decoded, data_b64.string) catch return error.InvalidResponse;
+
+            if (decoded.len == 0) break;
+            if (out.items.len + decoded.len > FSRPC_READ_MAX_TOTAL_BYTES) return error.ResponseTooLarge;
+            try out.appendSlice(self.allocator, decoded);
+            offset += @as(u64, @intCast(decoded.len));
+            if (decoded.len < @as(usize, FSRPC_READ_CHUNK_BYTES)) break;
+        }
+
+        return out.toOwnedSlice(self.allocator);
     }
 
     fn jsonValueAsU64(value: std.json.Value) ?u64 {
@@ -17068,29 +18520,107 @@ const App = struct {
     fn syncPendingThoughtText(self: *App, session_key: []const u8, latest_thought: ?[]const u8) !void {
         const thought = latest_thought orelse return;
 
-        if (self.pending_send_last_thought_text) |previous| {
+        if (self.chat.pending_send_last_thought_text) |previous| {
             if (std.mem.eql(u8, previous, thought)) return;
             self.allocator.free(previous);
-            self.pending_send_last_thought_text = null;
+            self.chat.pending_send_last_thought_text = null;
         }
-        self.pending_send_last_thought_text = try self.allocator.dupe(u8, thought);
+        self.chat.pending_send_last_thought_text = try self.allocator.dupe(u8, thought);
 
-        if (self.pending_send_thought_message_id) |message_id| {
+        if (self.chat.pending_send_thought_message_id) |message_id| {
             if (self.findMessageIndex(session_key, message_id)) |idx| {
                 try self.setMessageContentByIndex(session_key, idx, thought);
                 return;
             }
             self.allocator.free(message_id);
-            self.pending_send_thought_message_id = null;
+            self.chat.pending_send_thought_message_id = null;
         }
 
         const appended_id = try self.appendMessageWithIdForSession(session_key, "thought", thought, null, "");
-        self.pending_send_thought_message_id = @constCast(appended_id);
+        self.chat.pending_send_thought_message_id = @constCast(appended_id);
     }
 
     fn tryResumePendingSendJob(self: *App) !bool {
-        if (!self.pending_send_resume_notified) return false;
-        if (self.pending_send_job_id == null and self.pending_send_message_id == null) return false;
+        const job_id = self.chat.pending_send_job_id orelse return false;
+        const jobs_root = self.chat.pending_send_jobs_root orelse "/global/jobs";
+        const client = if (self.ws_client) |*value| value else return false;
+        if (!self.chat.pending_send_resume_notified) return false;
+        const session_key = if (self.chat.pending_send_session_key) |value|
+            value
+        else
+            try self.currentSessionOrDefault();
+
+        const now_ms = std.time.milliTimestamp();
+        if (self.chat.pending_send_last_resume_attempt_ms != 0 and now_ms - self.chat.pending_send_last_resume_attempt_ms < 1_500) {
+            return false;
+        }
+        self.chat.pending_send_last_resume_attempt_ms = now_ms;
+        std.log.info("[GUI] tryResumePendingSendJob: job_id={s}", .{job_id});
+
+        try self.fsrpcBootstrapGui(client);
+        var status = try self.readJobStatusGui(client, jobs_root, job_id);
+        defer status.deinit(self.allocator);
+
+        const maybe_log = self.readJobArtifactTextGui(client, jobs_root, job_id, "log.txt") catch null;
+        defer if (maybe_log) |value| self.allocator.free(value);
+
+        if (self.chat.pending_send_thoughts_root) |thoughts_root| {
+            const latest_path = try std.fmt.allocPrint(self.allocator, "{s}/latest.txt", .{thoughts_root});
+            defer self.allocator.free(latest_path);
+            const latest_thought_text = self.readFsPathTextGui(client, latest_path) catch null;
+            defer if (latest_thought_text) |value| self.allocator.free(value);
+            if (latest_thought_text) |value| {
+                const trimmed = std.mem.trim(u8, value, " \t\r\n");
+                try self.syncPendingThoughtText(session_key, if (trimmed.len > 0) trimmed else null);
+            } else if (maybe_log) |log_text| {
+                try self.syncPendingThoughtFromJobLog(session_key, log_text);
+            }
+        } else if (maybe_log) |log_text| {
+            try self.syncPendingThoughtFromJobLog(session_key, log_text);
+        }
+
+        if (maybe_log) |log_text| {
+            try self.ingestDebugEventsFromJobLog(log_text);
+        }
+
+        if (!std.mem.eql(u8, status.state, "done") and !std.mem.eql(u8, status.state, "failed")) {
+            return false;
+        }
+
+        const result = self.readJobArtifactTextGui(client, jobs_root, job_id, "result.txt") catch |err| blk: {
+            const msg = try std.fmt.allocPrint(self.allocator, "resume read failed: {s}", .{@errorName(err)});
+            break :blk msg;
+        };
+        defer self.allocator.free(result);
+
+        if (std.mem.eql(u8, status.state, "failed")) {
+            if (self.chat.pending_send_message_id) |message_id| {
+                try self.setMessageFailed(message_id);
+            }
+            if (status.error_text) |err_text| {
+                const msg = try std.fmt.allocPrint(self.allocator, "Job {s} failed: {s}", .{ job_id, err_text });
+                defer self.allocator.free(msg);
+                try self.appendMessage("system", msg, null);
+            } else {
+                const msg = try std.fmt.allocPrint(self.allocator, "Job {s} failed: {s}", .{ job_id, result });
+                defer self.allocator.free(msg);
+                try self.appendMessage("system", msg, null);
+            }
+            self.clearPendingSend();
+            return true;
+        }
+
+        if (self.chat.pending_send_message_id) |message_id| {
+            try self.setMessageState(message_id, null);
+        }
+        if (maybe_log) |log_text| {
+            const replayed = try self.replaySessionReceiveFromJobLog(session_key, log_text);
+            if (!replayed) {
+                try self.appendMessageForSession(session_key, "assistant", result, null);
+            }
+        } else {
+            try self.appendMessageForSession(session_key, "assistant", result, null);
+        }
         self.clearPendingSend();
         return false;
     }
@@ -17106,98 +18636,98 @@ const App = struct {
         message_id: []const u8,
         session_key: []const u8,
     ) !void {
-        if (self.pending_send_request_id) |value| {
+        if (self.chat.pending_send_request_id) |value| {
             allocator.free(value);
-            self.pending_send_request_id = null;
+            self.chat.pending_send_request_id = null;
         }
-        if (self.pending_send_message_id) |value| allocator.free(value);
-        if (self.pending_send_session_key) |value| allocator.free(value);
-        if (self.pending_send_job_id) |value| {
+        if (self.chat.pending_send_message_id) |value| allocator.free(value);
+        if (self.chat.pending_send_session_key) |value| allocator.free(value);
+        if (self.chat.pending_send_job_id) |value| {
             allocator.free(value);
-            self.pending_send_job_id = null;
+            self.chat.pending_send_job_id = null;
         }
-        if (self.pending_send_jobs_root) |value| {
+        if (self.chat.pending_send_jobs_root) |value| {
             allocator.free(value);
-            self.pending_send_jobs_root = null;
+            self.chat.pending_send_jobs_root = null;
         }
-        if (self.pending_send_thoughts_root) |value| {
+        if (self.chat.pending_send_thoughts_root) |value| {
             allocator.free(value);
-            self.pending_send_thoughts_root = null;
+            self.chat.pending_send_thoughts_root = null;
         }
-        if (self.pending_send_correlation_id) |value| {
+        if (self.chat.pending_send_correlation_id) |value| {
             allocator.free(value);
-            self.pending_send_correlation_id = null;
+            self.chat.pending_send_correlation_id = null;
         }
         self.clearPendingThoughtMessage();
-        if (self.pending_send_last_thought_text) |value| {
+        if (self.chat.pending_send_last_thought_text) |value| {
             allocator.free(value);
-            self.pending_send_last_thought_text = null;
+            self.chat.pending_send_last_thought_text = null;
         }
-        self.pending_send_message_id = try allocator.dupe(u8, message_id);
-        self.pending_send_session_key = try allocator.dupe(u8, session_key);
-        self.pending_send_resume_notified = false;
-        self.pending_send_last_resume_attempt_ms = 0;
-        self.pending_send_started_at_ms = std.time.milliTimestamp();
+        self.chat.pending_send_message_id = try allocator.dupe(u8, message_id);
+        self.chat.pending_send_session_key = try allocator.dupe(u8, session_key);
+        self.chat.pending_send_resume_notified = false;
+        self.chat.pending_send_last_resume_attempt_ms = 0;
+        self.chat.pending_send_started_at_ms = std.time.milliTimestamp();
     }
 
     fn clearPendingSend(self: *App) void {
         self.clearPendingThoughtMessage();
-        if (self.pending_send_request_id) |value| {
+        if (self.chat.pending_send_request_id) |value| {
             self.allocator.free(value);
-            for (self.session_messages.items) |*state| {
+            for (self.chat.session_messages.items) |*state| {
                 if (state.streaming_request_id) |stream_request_id| {
                     if (std.mem.eql(u8, value, stream_request_id)) {
                         self.clearSessionStreamingState(state);
                     }
                 }
             }
-            self.pending_send_request_id = null;
+            self.chat.pending_send_request_id = null;
         }
-        if (self.pending_send_message_id) |value| {
+        if (self.chat.pending_send_message_id) |value| {
             self.allocator.free(value);
-            self.pending_send_message_id = null;
+            self.chat.pending_send_message_id = null;
         }
-        if (self.pending_send_session_key) |value| {
+        if (self.chat.pending_send_session_key) |value| {
             self.allocator.free(value);
-            self.pending_send_session_key = null;
+            self.chat.pending_send_session_key = null;
         }
-        if (self.pending_send_job_id) |value| {
+        if (self.chat.pending_send_job_id) |value| {
             self.allocator.free(value);
-            self.pending_send_job_id = null;
+            self.chat.pending_send_job_id = null;
         }
-        if (self.pending_send_jobs_root) |value| {
+        if (self.chat.pending_send_jobs_root) |value| {
             self.allocator.free(value);
-            self.pending_send_jobs_root = null;
+            self.chat.pending_send_jobs_root = null;
         }
-        if (self.pending_send_thoughts_root) |value| {
+        if (self.chat.pending_send_thoughts_root) |value| {
             self.allocator.free(value);
-            self.pending_send_thoughts_root = null;
+            self.chat.pending_send_thoughts_root = null;
         }
-        if (self.pending_send_correlation_id) |value| {
+        if (self.chat.pending_send_correlation_id) |value| {
             self.allocator.free(value);
-            self.pending_send_correlation_id = null;
+            self.chat.pending_send_correlation_id = null;
         }
         self.clearPendingThoughtMessage();
-        if (self.pending_send_last_thought_text) |value| {
+        if (self.chat.pending_send_last_thought_text) |value| {
             self.allocator.free(value);
-            self.pending_send_last_thought_text = null;
+            self.chat.pending_send_last_thought_text = null;
         }
-        self.pending_send_resume_notified = false;
-        self.pending_send_last_resume_attempt_ms = 0;
-        self.pending_send_started_at_ms = 0;
-        self.awaiting_reply = false;
+        self.chat.pending_send_resume_notified = false;
+        self.chat.pending_send_last_resume_attempt_ms = 0;
+        self.chat.pending_send_started_at_ms = 0;
+        self.chat.awaiting_reply = false;
     }
 
     fn currentSessionOrDefault(self: *App) ![]const u8 {
         self.sanitizeCurrentSessionSelection();
 
-        if (self.current_session_key) |current| {
+        if (self.chat.current_session_key) |current| {
             if (isValidSessionKeyForAttach(current)) return current;
             try self.ensureSessionExists("main", "Main");
-            return self.current_session_key.?;
+            return self.chat.current_session_key.?;
         }
-        if (self.chat_sessions.items.len > 0) {
-            const fallback = self.chat_sessions.items[0].key;
+        if (self.chat.chat_sessions.items.len > 0) {
+            const fallback = self.chat.chat_sessions.items[0].key;
             if (isValidSessionKeyForAttach(fallback)) {
                 try self.setCurrentSessionKey(fallback);
                 return fallback;
@@ -17211,13 +18741,13 @@ const App = struct {
     fn activeMessages(self: *App) []const ChatMessage {
         self.sanitizeCurrentSessionSelection();
 
-        if (self.current_session_key) |key| {
+        if (self.chat.current_session_key) |key| {
             if (self.findSessionMessageState(key)) |state| {
                 return state.messages.items;
             }
         }
-        if (self.chat_sessions.items.len > 0) {
-            if (self.findSessionMessageState(self.chat_sessions.items[0].key)) |state| {
+        if (self.chat.chat_sessions.items.len > 0) {
+            if (self.findSessionMessageState(self.chat.chat_sessions.items[0].key)) |state| {
                 return state.messages.items;
             }
         }
@@ -17225,7 +18755,7 @@ const App = struct {
     }
 
     fn setMessageFailed(self: *App, message_id: []const u8) !void {
-        for (self.session_messages.items) |*state| {
+        for (self.chat.session_messages.items) |*state| {
             for (state.messages.items) |*msg| {
                 if (std.mem.eql(u8, msg.id, message_id)) {
                     msg.local_state = .failed;
@@ -17236,7 +18766,7 @@ const App = struct {
     }
 
     fn setMessageState(self: *App, message_id: []const u8, state: ?ChatMessageState) !void {
-        for (self.session_messages.items) |*session_state| {
+        for (self.chat.session_messages.items) |*session_state| {
             for (session_state.messages.items) |*msg| {
                 if (std.mem.eql(u8, msg.id, message_id)) {
                     msg.local_state = state;
@@ -17746,7 +19276,7 @@ const App = struct {
 
         if (try self.buildNodeServiceDeltaDiagnosticsTextFromValue(payload_value)) |diag| {
             self.clearNodeServiceReloadDiagnostics();
-            self.node_service_latest_reload_diag = diag;
+            self.debug.node_service_latest_reload_diag = diag;
         }
     }
 
@@ -17832,13 +19362,13 @@ const App = struct {
                     else => true,
                 } else true;
                 if (request_id) |req_id| {
-                    if (self.pending_send_request_id) |pending| {
+                    if (self.chat.pending_send_request_id) |pending| {
                         if (std.mem.eql(u8, pending, req_id)) {
-                            if (self.pending_send_message_id) |msg_id| {
+                            if (self.chat.pending_send_message_id) |msg_id| {
                                 self.setMessageState(msg_id, null) catch {};
                             }
                             if (session_key) |sk| {
-                                if (self.current_session_key) |current| {
+                                if (self.chat.current_session_key) |current| {
                                     if (!std.mem.eql(u8, current, sk)) {
                                         self.setCurrentSessionKey(sk) catch {};
                                     }
@@ -17876,9 +19406,9 @@ const App = struct {
                 } else null;
 
                 if (request_id) |rid| {
-                    if (self.pending_send_request_id) |pending| {
+                    if (self.chat.pending_send_request_id) |pending| {
                         if (std.mem.eql(u8, pending, rid)) {
-                            if (self.pending_send_message_id) |message_id| {
+                            if (self.chat.pending_send_message_id) |message_id| {
                                 self.setMessageState(message_id, null) catch {};
                             }
                             self.clearPendingSend();
@@ -17912,9 +19442,9 @@ const App = struct {
                     else => null,
                 } else null;
                 if (extractRequestId(root, payload)) |request_id| {
-                    if (self.pending_send_request_id) |pending| {
+                    if (self.chat.pending_send_request_id) |pending| {
                         if (std.mem.eql(u8, pending, request_id)) {
-                            if (self.pending_send_message_id) |message_id| {
+                            if (self.chat.pending_send_message_id) |message_id| {
                                 self.setMessageFailed(message_id) catch {};
                             }
                             self.clearPendingSend();
@@ -17960,9 +19490,9 @@ const App = struct {
         defer if (owned) self.allocator.free(use);
 
         const target_session = if (request_id) |request| blk: {
-            if (self.pending_send_request_id) |pending| {
+            if (self.chat.pending_send_request_id) |pending| {
                 if (std.mem.eql(u8, pending, request)) {
-                    if (self.pending_send_session_key) |key| break :blk key;
+                    if (self.chat.pending_send_session_key) |key| break :blk key;
                 }
             }
             break :blk session_key_opt;
@@ -18000,9 +19530,9 @@ const App = struct {
                 self.allocator.free(new_id);
             }
 
-            if (self.pending_send_request_id) |pending| {
+            if (self.chat.pending_send_request_id) |pending| {
                 if (std.mem.eql(u8, pending, request)) {
-                    if (self.pending_send_message_id) |msg_id| {
+                    if (self.chat.pending_send_message_id) |msg_id| {
                         self.setMessageState(msg_id, null) catch {};
                     }
                     if (final) {
@@ -18022,7 +19552,7 @@ const App = struct {
     }
 
     fn findSessionMessageState(self: *App, key: []const u8) ?*SessionMessageState {
-        for (self.session_messages.items) |*state| {
+        for (self.chat.session_messages.items) |*state| {
             if (std.mem.eql(u8, state.key, key)) return state;
         }
         return null;
@@ -18031,11 +19561,11 @@ const App = struct {
     fn getSessionMessageState(self: *App, key: []const u8) !*SessionMessageState {
         if (self.findSessionMessageState(key)) |state| return state;
         const key_copy = try self.allocator.dupe(u8, key);
-        try self.session_messages.append(self.allocator, .{
+        try self.chat.session_messages.append(self.allocator, .{
             .key = key_copy,
             .messages = .empty,
         });
-        return &self.session_messages.items[self.session_messages.items.len - 1];
+        return &self.chat.session_messages.items[self.chat.session_messages.items.len - 1];
     }
 
     fn makeStreamingMessageId(self: *App, request_id: []const u8) ![]const u8 {
@@ -18095,12 +19625,12 @@ const App = struct {
     }
 
     fn clearPendingThoughtMessage(self: *App) void {
-        if (self.pending_send_thought_message_id) |message_id| {
-            if (self.pending_send_session_key) |session_key| {
+        if (self.chat.pending_send_thought_message_id) |message_id| {
+            if (self.chat.pending_send_session_key) |session_key| {
                 self.removeMessageById(session_key, message_id);
             }
             self.allocator.free(message_id);
-            self.pending_send_thought_message_id = null;
+            self.chat.pending_send_thought_message_id = null;
         }
     }
 
@@ -18164,10 +19694,10 @@ const App = struct {
                     }
                 }
             }
-            if (self.pending_send_message_id) |pending_message_id| {
+            if (self.chat.pending_send_message_id) |pending_message_id| {
                 if (std.mem.eql(u8, pending_message_id, oldest.id)) {
                     self.allocator.free(pending_message_id);
-                    self.pending_send_message_id = null;
+                    self.chat.pending_send_message_id = null;
                 }
             }
             self.freeMessage(&oldest);
@@ -18207,7 +19737,7 @@ const App = struct {
     }
 
     fn clearAllMessages(self: *App) void {
-        for (self.session_messages.items) |*state| {
+        for (self.chat.session_messages.items) |*state| {
             self.clearSessionStreamingState(state);
             for (state.messages.items) |*msg| {
                 self.freeMessage(msg);
@@ -18219,59 +19749,59 @@ const App = struct {
     fn clearSessions(self: *App) void {
         self.clearAllMessages();
 
-        if (self.current_session_key) |current_session| {
+        if (self.chat.current_session_key) |current_session| {
             self.allocator.free(current_session);
-            self.current_session_key = null;
+            self.chat.current_session_key = null;
         }
-        for (self.chat_sessions.items) |session| {
+        for (self.chat.chat_sessions.items) |session| {
             self.allocator.free(session.key);
             if (session.display_name) |name| self.allocator.free(name);
         }
-        self.chat_sessions.clearRetainingCapacity();
+        self.chat.chat_sessions.clearRetainingCapacity();
 
-        for (self.session_messages.items) |*state| {
+        for (self.chat.session_messages.items) |*state| {
             state.messages.deinit(self.allocator);
             self.allocator.free(state.key);
             if (state.streaming_request_id) |rid| self.allocator.free(rid);
         }
-        self.session_messages.clearRetainingCapacity();
+        self.chat.session_messages.clearRetainingCapacity();
     }
 
     fn clearDebugEvents(self: *App) void {
-        for (self.debug_events.items) |*entry| {
+        for (self.debug.debug_events.items) |*entry| {
             entry.deinit(self.allocator);
         }
-        self.debug_events.clearRetainingCapacity();
-        self.debug_folded_blocks.clearRetainingCapacity();
-        self.debug_event_fingerprint_set.clearRetainingCapacity();
-        self.debug_event_fingerprint_count = 0;
-        self.debug_event_fingerprint_next = 0;
-        self.debug_fold_revision +%= 1;
-        if (self.debug_fold_revision == 0) self.debug_fold_revision = 1;
-        self.debug_next_event_id = 1;
-        self.debug_selected_index = null;
+        self.debug.debug_events.clearRetainingCapacity();
+        self.debug.debug_folded_blocks.clearRetainingCapacity();
+        self.debug.debug_event_fingerprint_set.clearRetainingCapacity();
+        self.debug.debug_event_fingerprint_count = 0;
+        self.debug.debug_event_fingerprint_next = 0;
+        self.debug.debug_fold_revision +%= 1;
+        if (self.debug.debug_fold_revision == 0) self.debug.debug_fold_revision = 1;
+        self.debug.debug_next_event_id = 1;
+        self.debug.debug_selected_index = null;
         self.clearSelectedNodeServiceEventCache();
-        self.node_service_diff_base_index = null;
+        self.debug.node_service_diff_base_index = null;
         self.clearNodeServiceReloadDiagnostics();
         self.clearNodeServiceDiffPreview();
         self.bumpDebugEventsRevision();
     }
 
     fn bumpDebugEventsRevision(self: *App) void {
-        self.debug_events_revision +%= 1;
-        if (self.debug_events_revision == 0) self.debug_events_revision = 1;
-        self.debug_filter_cache_valid = false;
+        self.debug.debug_events_revision +%= 1;
+        if (self.debug.debug_events_revision == 0) self.debug.debug_events_revision = 1;
+        self.debug.debug_filter_cache_valid = false;
     }
 
     fn clearDebugStreamSnapshot(self: *App) void {
-        if (self.debug_stream_snapshot) |value| {
+        if (self.debug.debug_stream_snapshot) |value| {
             self.allocator.free(value);
-            self.debug_stream_snapshot = null;
+            self.debug.debug_stream_snapshot = null;
         }
     }
 
     fn mergeDebugStreamSnapshot(self: *App, content: []const u8) !void {
-        if (self.debug_stream_snapshot) |previous| {
+        if (self.debug.debug_stream_snapshot) |previous| {
             if (content.len >= previous.len and std.mem.startsWith(u8, content, previous)) {
                 try self.ingestDebugStreamLines(content[previous.len..]);
             } else {
@@ -18284,8 +19814,8 @@ const App = struct {
         }
 
         const snapshot_copy = try self.allocator.dupe(u8, content);
-        if (self.debug_stream_snapshot) |previous| self.allocator.free(previous);
-        self.debug_stream_snapshot = snapshot_copy;
+        if (self.debug.debug_stream_snapshot) |previous| self.allocator.free(previous);
+        self.debug.debug_stream_snapshot = snapshot_copy;
     }
 
     fn ingestDebugStreamLines(self: *App, chunk: []const u8) !void {
@@ -18320,7 +19850,7 @@ const App = struct {
         var matching_lines: std.ArrayListUnmanaged([]const u8) = .{};
         defer matching_lines.deinit(self.allocator);
 
-        const node_filter = std.mem.trim(u8, self.node_service_watch_filter.items, " \t\r\n");
+        const node_filter = std.mem.trim(u8, self.debug.node_service_watch_filter.items, " \t\r\n");
         var iter = std.mem.splitScalar(u8, chunk, '\n');
         while (iter.next()) |raw_line| {
             const line = std.mem.trim(u8, raw_line, " \t\r\n");
@@ -18363,16 +19893,16 @@ const App = struct {
     }
 
     fn clearNodeServiceReloadDiagnostics(self: *App) void {
-        if (self.node_service_latest_reload_diag) |value| {
+        if (self.debug.node_service_latest_reload_diag) |value| {
             self.allocator.free(value);
-            self.node_service_latest_reload_diag = null;
+            self.debug.node_service_latest_reload_diag = null;
         }
     }
 
     fn clearNodeServiceDiffPreview(self: *App) void {
-        if (self.node_service_diff_preview) |value| {
+        if (self.debug.node_service_diff_preview) |value| {
             self.allocator.free(value);
-            self.node_service_diff_preview = null;
+            self.debug.node_service_diff_preview = null;
         }
     }
 
@@ -18396,20 +19926,20 @@ const App = struct {
     }
 
     fn rememberDebugEventFingerprint(self: *App, fingerprint: u64) bool {
-        if (self.debug_event_fingerprint_set.contains(fingerprint)) {
+        if (self.debug.debug_event_fingerprint_set.contains(fingerprint)) {
             return false;
         }
 
-        if (self.debug_event_fingerprint_count == DEBUG_EVENT_DEDUPE_WINDOW) {
-            const evicted = self.debug_event_fingerprint_ring[self.debug_event_fingerprint_next];
-            _ = self.debug_event_fingerprint_set.remove(evicted);
+        if (self.debug.debug_event_fingerprint_count == DEBUG_EVENT_DEDUPE_WINDOW) {
+            const evicted = self.debug.debug_event_fingerprint_ring[self.debug.debug_event_fingerprint_next];
+            _ = self.debug.debug_event_fingerprint_set.remove(evicted);
         } else {
-            self.debug_event_fingerprint_count += 1;
+            self.debug.debug_event_fingerprint_count += 1;
         }
 
-        self.debug_event_fingerprint_ring[self.debug_event_fingerprint_next] = fingerprint;
-        self.debug_event_fingerprint_next = (self.debug_event_fingerprint_next + 1) % DEBUG_EVENT_DEDUPE_WINDOW;
-        self.debug_event_fingerprint_set.put(self.allocator, fingerprint, {}) catch {
+        self.debug.debug_event_fingerprint_ring[self.debug.debug_event_fingerprint_next] = fingerprint;
+        self.debug.debug_event_fingerprint_next = (self.debug.debug_event_fingerprint_next + 1) % DEBUG_EVENT_DEDUPE_WINDOW;
+        self.debug.debug_event_fingerprint_set.put(self.allocator, fingerprint, {}) catch {
             return true;
         };
         return true;
@@ -18419,24 +19949,24 @@ const App = struct {
         const fingerprint = debugEventFingerprint(timestamp_ms, category, correlation_id, payload_json);
         if (!self.rememberDebugEventFingerprint(fingerprint)) return;
 
-        while (self.debug_events.items.len >= MAX_DEBUG_EVENTS) {
-            var removed = self.debug_events.orderedRemove(0);
+        while (self.debug.debug_events.items.len >= MAX_DEBUG_EVENTS) {
+            var removed = self.debug.debug_events.orderedRemove(0);
             self.pruneDebugFoldStateForEvent(removed.id);
             removed.deinit(self.allocator);
-            if (self.node_service_diff_base_index) |idx| {
+            if (self.debug.node_service_diff_base_index) |idx| {
                 if (idx == 0) {
-                    self.node_service_diff_base_index = null;
+                    self.debug.node_service_diff_base_index = null;
                     self.clearNodeServiceDiffPreview();
                 } else {
-                    self.node_service_diff_base_index = idx - 1;
+                    self.debug.node_service_diff_base_index = idx - 1;
                 }
             }
-            if (self.debug_selected_index) |idx| {
+            if (self.debug.debug_selected_index) |idx| {
                 if (idx == 0) {
-                    self.debug_selected_index = null;
+                    self.debug.debug_selected_index = null;
                     self.clearSelectedNodeServiceEventCache();
                 } else {
-                    self.debug_selected_index = idx - 1;
+                    self.debug.debug_selected_index = idx - 1;
                     self.clearSelectedNodeServiceEventCache();
                 }
             }
@@ -18452,11 +19982,11 @@ const App = struct {
         const payload_copy = try self.allocator.dupe(u8, payload_json);
         errdefer self.allocator.free(payload_copy);
 
-        const event_id = self.debug_next_event_id;
-        self.debug_next_event_id +%= 1;
-        if (self.debug_next_event_id == 0) self.debug_next_event_id = 1;
+        const event_id = self.debug.debug_next_event_id;
+        self.debug.debug_next_event_id +%= 1;
+        if (self.debug.debug_next_event_id == 0) self.debug.debug_next_event_id = 1;
 
-        try self.debug_events.append(self.allocator, .{
+        try self.debug.debug_events.append(self.allocator, .{
             .id = event_id,
             .timestamp_ms = timestamp_ms,
             .category = category_copy,
@@ -18468,38 +19998,38 @@ const App = struct {
 
     fn ensureDebugFilteredIndices(self: *App, filter_text: []const u8) []const u32 {
         const query_hash = std.hash.Wyhash.hash(0, filter_text);
-        if (self.debug_filter_cache_valid and
-            self.debug_filter_cache_query_hash == query_hash and
-            self.debug_filter_cache_query_len == filter_text.len and
-            self.debug_filter_cache_events_revision == self.debug_events_revision)
+        if (self.debug.debug_filter_cache_valid and
+            self.debug.debug_filter_cache_query_hash == query_hash and
+            self.debug.debug_filter_cache_query_len == filter_text.len and
+            self.debug.debug_filter_cache_events_revision == self.debug.debug_events_revision)
         {
-            return self.debug_filtered_indices.items;
+            return self.debug.debug_filtered_indices.items;
         }
 
-        self.debug_filtered_indices.clearRetainingCapacity();
-        self.debug_filtered_indices.ensureTotalCapacity(self.allocator, self.debug_events.items.len) catch {
-            self.debug_filter_cache_valid = false;
-            return self.debug_filtered_indices.items;
+        self.debug.debug_filtered_indices.clearRetainingCapacity();
+        self.debug.debug_filtered_indices.ensureTotalCapacity(self.allocator, self.debug.debug_events.items.len) catch {
+            self.debug.debug_filter_cache_valid = false;
+            return self.debug.debug_filtered_indices.items;
         };
 
         if (filter_text.len == 0) {
-            for (self.debug_events.items, 0..) |_, idx| {
+            for (self.debug.debug_events.items, 0..) |_, idx| {
                 const value: u32 = @intCast(idx);
-                self.debug_filtered_indices.appendAssumeCapacity(value);
+                self.debug.debug_filtered_indices.appendAssumeCapacity(value);
             }
         } else {
-            for (self.debug_events.items, 0..) |*entry, idx| {
+            for (self.debug.debug_events.items, 0..) |*entry, idx| {
                 if (!self.debugEventMatchesFilter(entry, filter_text)) continue;
                 const value: u32 = @intCast(idx);
-                self.debug_filtered_indices.appendAssumeCapacity(value);
+                self.debug.debug_filtered_indices.appendAssumeCapacity(value);
             }
         }
 
-        self.debug_filter_cache_query_hash = query_hash;
-        self.debug_filter_cache_query_len = filter_text.len;
-        self.debug_filter_cache_events_revision = self.debug_events_revision;
-        self.debug_filter_cache_valid = true;
-        return self.debug_filtered_indices.items;
+        self.debug.debug_filter_cache_query_hash = query_hash;
+        self.debug.debug_filter_cache_query_len = filter_text.len;
+        self.debug.debug_filter_cache_events_revision = self.debug.debug_events_revision;
+        self.debug.debug_filter_cache_valid = true;
+        return self.debug.debug_filtered_indices.items;
     }
 
     fn debugEventMatchesFilter(self: *App, entry: *const DebugEventEntry, filter_text: []const u8) bool {
@@ -18513,34 +20043,34 @@ const App = struct {
     }
 
     fn countDebugEventsMatchingFilter(self: *App, filter_text: []const u8) usize {
-        if (filter_text.len == 0) return self.debug_events.items.len;
+        if (filter_text.len == 0) return self.debug.debug_events.items.len;
         var total: usize = 0;
-        for (self.debug_events.items) |*entry| {
+        for (self.debug.debug_events.items) |*entry| {
             if (self.debugEventMatchesFilter(entry, filter_text)) total += 1;
         }
         return total;
     }
 
     fn ensureDebugPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
-        if (self.debug_panel_id) |panel_id| {
+        if (self.debug.debug_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
                 self.requestDebugStreamSnapshot(true);
                 return panel_id;
             }
-            self.debug_panel_id = null;
+            self.debug.debug_panel_id = null;
         }
 
         for (manager.workspace.panels.items) |*panel| {
             if (panel.kind == .DebugStream) {
-                self.debug_panel_id = panel.id;
+                self.debug.debug_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 self.requestDebugStreamSnapshot(true);
                 return panel.id;
             }
             if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Debug Stream")) {
                 self.promoteLegacyHostPanel(manager, panel);
-                self.debug_panel_id = panel.id;
+                self.debug.debug_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 self.requestDebugStreamSnapshot(true);
                 return panel.id;
@@ -18549,7 +20079,7 @@ const App = struct {
 
         const panel_data = workspace.PanelData{ .DebugStream = {} };
         const panel_id = try manager.openPanel(.DebugStream, "Debug Stream", panel_data);
-        self.debug_panel_id = panel_id;
+        self.debug.debug_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
         }
@@ -18559,17 +20089,17 @@ const App = struct {
     }
 
     fn ensureWorkspacePanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
-        if (self.workspace_panel_id) |panel_id| {
+        if (self.ws.workspace_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
                 return panel_id;
             }
-            self.workspace_panel_id = null;
+            self.ws.workspace_panel_id = null;
         }
 
         for (manager.workspace.panels.items) |*panel| {
             if (panel.kind == .WorkspaceOverview) {
-                self.workspace_panel_id = panel.id;
+                self.ws.workspace_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
@@ -18577,7 +20107,7 @@ const App = struct {
 
         const panel_data = workspace.PanelData{ .WorkspaceOverview = {} };
         const panel_id = try manager.openPanel(.WorkspaceOverview, "Workspace Overview", panel_data);
-        self.workspace_panel_id = panel_id;
+        self.ws.workspace_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
         }
@@ -18606,26 +20136,26 @@ const App = struct {
     }
 
     fn ensureFilesystemPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
-        if (self.filesystem_panel_id) |panel_id| {
+        if (self.fs.filesystem_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
-                if (self.filesystem_entries.items.len == 0 and self.filesystem_active_request == null and self.filesystem_pending_path == null) {
+                if (self.fs.filesystem_entries.items.len == 0 and self.fs.filesystem_active_request == null and self.fs.filesystem_pending_path == null) {
                     self.requestFilesystemBrowserRefresh(true);
                 }
                 return panel_id;
             }
-            self.filesystem_panel_id = null;
+            self.fs.filesystem_panel_id = null;
         }
 
         for (manager.workspace.panels.items) |*panel| {
             if (panel.kind == .FilesystemBrowser) {
-                self.filesystem_panel_id = panel.id;
+                self.fs.filesystem_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
             if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Filesystem Browser")) {
                 self.promoteLegacyHostPanel(manager, panel);
-                self.filesystem_panel_id = panel.id;
+                self.fs.filesystem_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
@@ -18633,7 +20163,7 @@ const App = struct {
 
         const panel_data = workspace.PanelData{ .FilesystemBrowser = {} };
         const panel_id = try manager.openPanel(.FilesystemBrowser, "Filesystem Browser", panel_data);
-        self.filesystem_panel_id = panel_id;
+        self.fs.filesystem_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
         }
@@ -18645,23 +20175,23 @@ const App = struct {
     }
 
     fn ensureFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
-        if (self.filesystem_tools_panel_id) |panel_id| {
+        if (self.fs.filesystem_tools_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
                 return panel_id;
             }
-            self.filesystem_tools_panel_id = null;
+            self.fs.filesystem_tools_panel_id = null;
         }
 
         for (manager.workspace.panels.items) |*panel| {
             if (panel.kind == .FilesystemTools) {
-                self.filesystem_tools_panel_id = panel.id;
+                self.fs.filesystem_tools_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
             if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Filesystem Tools")) {
                 self.promoteLegacyHostPanel(manager, panel);
-                self.filesystem_tools_panel_id = panel.id;
+                self.fs.filesystem_tools_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
@@ -18669,7 +20199,7 @@ const App = struct {
 
         const panel_data = workspace.PanelData{ .FilesystemTools = {} };
         const panel_id = try manager.openPanel(.FilesystemTools, "Filesystem Tools", panel_data);
-        self.filesystem_tools_panel_id = panel_id;
+        self.fs.filesystem_tools_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
         }
@@ -18679,17 +20209,17 @@ const App = struct {
     }
 
     fn ensureTerminalPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
-        if (self.terminal_panel_id) |panel_id| {
+        if (self.terminal.terminal_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
                 return panel_id;
             }
-            self.terminal_panel_id = null;
+            self.terminal.terminal_panel_id = null;
         }
 
         for (manager.workspace.panels.items) |*panel| {
             if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Terminal")) {
-                self.terminal_panel_id = panel.id;
+                self.terminal.terminal_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
@@ -18708,7 +20238,7 @@ const App = struct {
             .exit_code = 0,
         } };
         const panel_id = try manager.openPanel(.ToolOutput, "Terminal", panel_data);
-        self.terminal_panel_id = panel_id;
+        self.terminal.terminal_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
         }
@@ -18723,9 +20253,9 @@ const App = struct {
         errdefer self.allocator.free(name_copy);
 
         if (self.shouldLogDebug(1)) {
-            std.log.debug("addSession: key={s} current={}", .{ key, self.chat_sessions.items.len });
+            std.log.debug("addSession: key={s} current={}", .{ key, self.chat.chat_sessions.items.len });
         }
-        try self.chat_sessions.append(self.allocator, .{
+        try self.chat.chat_sessions.append(self.allocator, .{
             .key = key_copy,
             .display_name = name_copy,
         });
@@ -18737,7 +20267,7 @@ const App = struct {
     }
 
     fn ensureSessionInList(self: *App, key: []const u8, display_name: []const u8) !void {
-        for (self.chat_sessions.items) |*session| {
+        for (self.chat.chat_sessions.items) |*session| {
             if (std.mem.eql(u8, session.key, key)) {
                 const existing_name = session.display_name orelse "";
                 if (display_name.len > 0 and !std.mem.eql(u8, existing_name, display_name)) {
@@ -18758,26 +20288,26 @@ const App = struct {
     }
 
     fn sanitizeCurrentSessionSelection(self: *App) void {
-        if (self.current_session_key) |current| {
-            for (self.chat_sessions.items) |session| {
+        if (self.chat.current_session_key) |current| {
+            for (self.chat.chat_sessions.items) |session| {
                 if (std.mem.eql(u8, current, session.key)) {
                     return;
                 }
             }
 
             self.allocator.free(current);
-            self.current_session_key = null;
+            self.chat.current_session_key = null;
         }
 
-        if (self.current_session_key == null) {
-            if (self.chat_sessions.items.len > 0) {
-                self.setCurrentSessionKey(self.chat_sessions.items[0].key) catch {};
+        if (self.chat.current_session_key == null) {
+            if (self.chat.chat_sessions.items.len > 0) {
+                self.setCurrentSessionKey(self.chat.chat_sessions.items[0].key) catch {};
             }
         }
     }
 
     fn setCurrentSessionByKey(self: *App, session_key: []const u8) bool {
-        for (self.chat_sessions.items) |session| {
+        for (self.chat.chat_sessions.items) |session| {
             if (std.mem.eql(u8, session.key, session_key)) {
                 self.setCurrentSessionKey(session.key) catch {};
                 return true;
@@ -18787,8 +20317,8 @@ const App = struct {
     }
 
     fn setCurrentSessionByIndex(self: *App, index: usize) bool {
-        if (index >= self.chat_sessions.items.len) return false;
-        self.setCurrentSessionKey(self.chat_sessions.items[index].key) catch {};
+        if (index >= self.chat.chat_sessions.items.len) return false;
+        self.setCurrentSessionKey(self.chat.chat_sessions.items[index].key) catch {};
         return true;
     }
 
@@ -18800,11 +20330,11 @@ const App = struct {
 
     fn setCurrentSessionKeyOwned(self: *App, key_copy: []const u8) void {
         var changed = true;
-        if (self.current_session_key) |current| {
+        if (self.chat.current_session_key) |current| {
             changed = !std.mem.eql(u8, current, key_copy);
             self.allocator.free(current);
         }
-        self.current_session_key = key_copy;
+        self.chat.current_session_key = key_copy;
         if (changed) {
             self.session_attach_state = .unknown;
         }
@@ -19326,55 +20856,10 @@ fn deinitWorkboardItemOwnedSlice(allocator: std.mem.Allocator, items: []zui.prot
     allocator.free(items);
 }
 
-fn missionDisplayTitle(mission: *const MissionRecordView) []const u8 {
-    return mission.title orelse mission.summary orelse mission.mission_id;
-}
 
-fn normalizedMissionStateLabel(state: []const u8, buf: []u8) []const u8 {
-    if (std.ascii.eqlIgnoreCase(state, "waiting_for_approval")) return "waiting";
-    if (std.ascii.eqlIgnoreCase(state, "completed")) return "done";
-    if (std.ascii.eqlIgnoreCase(state, "cancelled")) return "cancelled";
-    if (std.ascii.eqlIgnoreCase(state, "recovering")) return "recovering";
-    return std.fmt.bufPrint(buf, "{s}", .{state}) catch state;
-}
 
-fn latestMissionArtifactByKind(mission: *const MissionRecordView, kind: []const u8) ?*const MissionArtifactView {
-    var index = mission.artifacts.items.len;
-    while (index > 0) {
-        index -= 1;
-        const artifact = &mission.artifacts.items[index];
-        if (std.mem.eql(u8, artifact.kind, kind)) return artifact;
-    }
-    return null;
-}
 
-fn missionStateColor(app: *App, state: []const u8) [4]f32 {
-    if (std.ascii.eqlIgnoreCase(state, "running")) return app.theme.colors.primary;
-    if (std.ascii.eqlIgnoreCase(state, "completed")) return app.theme.colors.success;
-    if (std.ascii.eqlIgnoreCase(state, "failed") or std.ascii.eqlIgnoreCase(state, "cancelled")) return app.theme.colors.danger;
-    if (std.ascii.eqlIgnoreCase(state, "waiting_for_approval") or
-        std.ascii.eqlIgnoreCase(state, "blocked") or
-        std.ascii.eqlIgnoreCase(state, "planning"))
-    {
-        return zcolors.rgba(236, 174, 36, 255);
-    }
-    if (std.ascii.eqlIgnoreCase(state, "recovering")) return zcolors.rgba(120, 180, 255, 255);
-    return app.theme.colors.border;
-}
 
-fn formatRelativeTimeLabel(now_ms: i64, ts_ms: i64, buf: []u8) []const u8 {
-    if (ts_ms <= 0) return "unknown";
-    const delta_ms_abs: i64 = if (now_ms >= ts_ms) now_ms - ts_ms else ts_ms - now_ms;
-    const minutes: i64 = @divTrunc(delta_ms_abs, 60_000);
-    if (minutes < 1) return "just now";
-    if (minutes < 60) return std.fmt.bufPrint(buf, "{d}m ago", .{minutes}) catch "recent";
-    const hours: i64 = @divTrunc(minutes, 60);
-    if (hours < 24) return std.fmt.bufPrint(buf, "{d}h ago", .{hours}) catch "today";
-    const days: i64 = @divTrunc(hours, 24);
-    if (days < 30) return std.fmt.bufPrint(buf, "{d}d ago", .{days}) catch "this month";
-    const months: i64 = @divTrunc(days, 30);
-    return std.fmt.bufPrint(buf, "{d}mo ago", .{months}) catch "older";
-}
 
 // Image loading stubs required by ziggy-ui
 pub export fn zsc_load_icon_rgba_from_memory(data: [*c]const u8, len: c_int, width: [*c]c_int, height: [*c]c_int) [*c]u8 {

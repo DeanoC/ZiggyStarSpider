@@ -28,6 +28,7 @@ pub const Noun = enum {
     disconnect,
     status,
     help,
+    complete,
     none,
 };
 
@@ -89,6 +90,7 @@ pub const Options = struct {
     role: ?Role = null,
     interactive: bool = false,
     verbose: bool = false,
+    json: bool = false,
     show_help: bool = false,
     show_version: bool = false,
     command: ?Command = null,
@@ -169,7 +171,7 @@ pub fn gitRevision() []const u8 {
     return git_revision;
 }
 
-fn parseNoun(arg: []const u8) ?Noun {
+pub fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "chat")) return .chat;
     if (std.mem.eql(u8, arg, "fs")) return .fs;
     if (std.mem.eql(u8, arg, "agent")) return .agent;
@@ -182,10 +184,11 @@ fn parseNoun(arg: []const u8) ?Noun {
     if (std.mem.eql(u8, arg, "disconnect")) return .disconnect;
     if (std.mem.eql(u8, arg, "status")) return .status;
     if (std.mem.eql(u8, arg, "help")) return .help;
+    if (std.mem.eql(u8, arg, "complete")) return .complete;
     return null;
 }
 
-fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
+pub fn parseVerb(noun: Noun, arg: []const u8) ?Verb {
     switch (noun) {
         .chat => {
             if (std.mem.eql(u8, arg, "send")) return .send;
@@ -351,6 +354,10 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Options {
         }
         if (std.mem.eql(u8, arg, "--verbose")) {
             options.verbose = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--json")) {
+            options.json = true;
             continue;
         }
 
