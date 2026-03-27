@@ -680,4 +680,38 @@ pub fn build(b: *std.Build) void {
     });
     const run_control_plane_tests = b.addRunArtifact(control_plane_tests);
     test_step.dependOn(&run_control_plane_tests.step);
+
+    // GUI state type tests (pure-std types, no GUI deps required)
+    const gui_mission_test_module = b.createModule(.{
+        .root_source_file = b.path("src/gui/state/mission_types.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const gui_mission_tests = b.addTest(.{
+        .root_module = gui_mission_test_module,
+        .name = "gui_mission_types_tests",
+    });
+    test_step.dependOn(&b.addRunArtifact(gui_mission_tests).step);
+
+    const gui_venom_test_module = b.createModule(.{
+        .root_source_file = b.path("src/gui/state/venom_types.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const gui_venom_tests = b.addTest(.{
+        .root_module = gui_venom_test_module,
+        .name = "gui_venom_types_tests",
+    });
+    test_step.dependOn(&b.addRunArtifact(gui_venom_tests).step);
+
+    const gui_mission_helpers_module = b.createModule(.{
+        .root_source_file = b.path("src/gui/state/mission_helpers.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const gui_mission_helpers_tests = b.addTest(.{
+        .root_module = gui_mission_helpers_module,
+        .name = "gui_mission_helpers_tests",
+    });
+    test_step.dependOn(&b.addRunArtifact(gui_mission_helpers_tests).step);
 }
