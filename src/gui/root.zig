@@ -1500,7 +1500,15 @@ const App = struct {
     theme_pack_entries: std.ArrayListUnmanaged(ThemePackEntry) = .{},
     theme_pack_watch_next_scan_ms: i64 = 0,
     theme_pack_watch_stamp_ns: i128 = 0,
+    package_manager_modal_open: bool = false,
+    package_manager_packages: std.ArrayListUnmanaged(PackageManagerEntry) = .{},
+    package_manager_selected_index: usize = 0,
+    package_manager_install_payload: std.ArrayList(u8) = .empty,
+    package_manager_modal_error: ?[]u8 = null,
+    package_manager_modal_notice: ?[]u8 = null,
     about_modal_open: bool = false,
+    about_modal_build_label: std.ArrayList(u8) = .empty,
+    about_modal_notice: ?[]u8 = null,
     mount_control_ready: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
@@ -4384,6 +4392,8 @@ const App = struct {
             .debug_search_filter => &self.debug.debug_search_filter,
             .perf_benchmark_label => &self.perf_benchmark_label_input,
             .filesystem_contract_payload => &self.fs.contract_invoke_payload,
+            .package_manager_install_payload => &self.package_manager_install_payload,
+            .about_modal_build_label => &self.about_modal_build_label,
             .terminal_command_input => &self.terminal.terminal_input,
             .none => null,
         };
@@ -10472,7 +10482,7 @@ const App = struct {
             modal_rect.min[0] + pad,
             y,
             title_str orelse "Workspace Wizard",
-            self.theme.colors.text,
+            self.theme.colors.text_primary,
         );
         y += layout.line_height + layout.row_gap * 0.5;
 
