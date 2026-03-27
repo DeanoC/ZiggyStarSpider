@@ -201,6 +201,17 @@ fn platformWindowTitle(title: [:0]const u8) [:0]const u8 {
     return title;
 }
 
+const FsrpcEnvelope = struct {
+    raw: []u8,
+    parsed: std.json.Parsed(std.json.Value),
+
+    fn deinit(self: *FsrpcEnvelope, allocator: std.mem.Allocator) void {
+        self.parsed.deinit();
+        allocator.free(self.raw);
+        self.* = undefined;
+    }
+};
+
 const FilesystemEntryKind = panels_bridge.FilesystemEntryKind;
 const FilesystemSortKey = panels_bridge.FilesystemSortKey;
 const FilesystemSortDirection = panels_bridge.FilesystemSortDirection;
@@ -1489,6 +1500,8 @@ const App = struct {
     theme_pack_entries: std.ArrayListUnmanaged(ThemePackEntry) = .{},
     theme_pack_watch_next_scan_ms: i64 = 0,
     theme_pack_watch_stamp_ns: i128 = 0,
+    about_modal_open: bool = false,
+    mount_control_ready: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         panels_bridge.assertAvailable();
@@ -7466,6 +7479,7 @@ const App = struct {
         if (shell.dock_border) |dock_border| self.drawRect(content_rect, dock_border);
 
         const launcher_modal_open = self.ws.launcher_create_modal_open;
+        const about_modal_open = self.about_modal_open;
         const saved_mouse_down = self.mouse_down;
         const saved_mouse_clicked = self.mouse_clicked;
         const saved_mouse_released = self.mouse_released;
@@ -11851,11 +11865,6 @@ const App = struct {
         const selected_workspace_lock_state = self.selectedWorkspaceTokenLocked();
         const selected_workspace_known = selected_workspace_lock_state != null;
         const selected_is_locked = if (selected_workspace_lock_state) |locked| locked else false;
-        const has_detail = self.ws.selected_workspace_detail != null;
-        const has_mount_selection = self.ws.workspace_selected_mount_index != null;
-        const has_bind_selection = self.ws.workspace_selected_bind_index != null;
-        const profile_id = self.config.selectedProfileId();
-        const has_local_node_val = self.config.appLocalNode(profile_id) != null;
         return .{
             .connected = self.connection_state == .connected,
             .has_workspaces = self.ws.projects.items.len > 0,
@@ -12409,125 +12418,6 @@ const App = struct {
                 };
             },
         }
-        if (action_tag == .create_workspace) {
-            self.createWorkspaceFromPanel() catch |err| {
-                self.handleWorkspacePanelError("Workspace create failed", err);
-            };
-            return;
-        }
-        if (action_tag == .refresh_workspace) {
-            self.refreshWorkspaceData() catch |err| {
-                self.handleWorkspacePanelError("Workspace refresh failed", err);
-            };
-            return;
-        }
-        if (action_tag == .activate_workspace) {
-            self.activateSelectedWorkspace() catch |err| {
-                self.handleWorkspacePanelError("Workspace activate failed", err);
-            };
-            return;
-        }
-        if (action_tag == .attach_session) {
-            self.attachSelectedSessionFromPanel() catch |err| {
-                self.handleWorkspacePanelError("Session attach failed", err);
-            };
-            return;
-        }
-        if (action_tag == .lock_workspace) {
-            self.lockSelectedWorkspaceFromPanel() catch |err| {
-                self.handleWorkspacePanelError("Workspace lock failed", err);
-            };
-            return;
-        }
-        if (action_tag == .unlock_workspace) {
-            self.unlockSelectedWorkspaceFromPanel() catch |err| {
-                self.handleWorkspacePanelError("Workspace unlock failed", err);
-            };
-            return;
-        }
-        if (action_tag == .add_mount) {
-            if (self.validateWorkspaceMountAddInput()) |message| {
-                self.setWorkspaceError(message);
-            } else {
-                self.setWorkspaceMountFromPanel() catch |err| {
-                    self.handleWorkspacePanelError("Mount set failed", err);
-                };
-            }
-            return;
-        }
-        if (action_tag == .remove_mount) {
-            if (self.validateWorkspaceMountRemoveInput()) |message| {
-                self.setWorkspaceError(message);
-            } else {
-                self.removeWorkspaceMountFromPanel() catch |err| {
-                    self.handleWorkspacePanelError("Mount remove failed", err);
-                };
-            }
-            return;
-        }
-        if (action_tag == .add_bind) {
-            if (self.validateWorkspaceBindAddInput()) |message| {
-                self.setWorkspaceError(message);
-            } else {
-                self.setWorkspaceBindFromPanel() catch |err| {
-                    self.handleWorkspacePanelError("Bind set failed", err);
-                };
-            }
-            return;
-        }
-        if (action_tag == .remove_bind) {
-            if (self.validateWorkspaceBindRemoveInput()) |message| {
-                self.setWorkspaceError(message);
-            } else {
-                self.removeWorkspaceBindFromPanel() catch |err| {
-                    self.handleWorkspacePanelError("Bind remove failed", err);
-                };
-            }
-            return;
-        }
-        if (action_tag == .auth_status) {
-            self.fetchAuthStatusFromPanel(false) catch |err| {
-                self.handleWorkspacePanelError("Auth status failed", err);
-            };
-            return;
-        }
-        if (action_tag == .rotate_auth_user) {
-            self.rotateAuthTokenFromPanel("user") catch |err| {
-                self.handleWorkspacePanelError("Auth rotate(user) failed", err);
-            };
-            return;
-        }
-        if (action_tag == .rotate_auth_admin) {
-            self.rotateAuthTokenFromPanel("admin") catch |err| {
-                self.handleWorkspacePanelError("Auth rotate(admin) failed", err);
-            };
-            return;
-        }
-        if (action_tag == .reveal_auth_admin) {
-            self.revealAuthTokenFromPanel("admin") catch |err| {
-                self.handleWorkspacePanelError("Reveal admin token failed", err);
-            };
-            return;
-        }
-        if (action_tag == .copy_auth_admin) {
-            self.copyAuthTokenFromPanel("admin") catch |err| {
-                self.handleWorkspacePanelError("Copy admin token failed", err);
-            };
-            return;
-        }
-        if (action_tag == .reveal_auth_user) {
-            self.revealAuthTokenFromPanel("user") catch |err| {
-                self.handleWorkspacePanelError("Reveal user token failed", err);
-            };
-            return;
-        }
-        if (action_tag == .copy_auth_user) {
-            self.copyAuthTokenFromPanel("user") catch |err| {
-                self.handleWorkspacePanelError("Copy user token failed", err);
-            };
-            return;
-        }
-        self.setWorkspaceError("This workspace action is not supported in the current SpiderApp branch yet.");
     }
 
     const VisibleFilesystemEntry = struct {
