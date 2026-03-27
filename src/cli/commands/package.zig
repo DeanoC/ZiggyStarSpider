@@ -418,7 +418,8 @@ pub fn executePackageGet(allocator: std.mem.Allocator, options: args.Options, cm
         package_id = arg;
     }
 
-    const payload = try buildGetPayload(allocator, package_id.?, release_version, source, channel);
+    const selected_package_id = package_id orelse return error.InvalidArguments;
+    const payload = try buildGetPayload(allocator, selected_package_id, release_version, source, channel);
     defer allocator.free(payload);
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try packageClient(allocator, options);
@@ -507,7 +508,8 @@ pub fn executePackageUpdate(allocator: std.mem.Allocator, options: args.Options,
         package_id = arg;
     }
 
-    const payload = try buildUpdatePayload(allocator, package_id.?, release_version, channel, activate);
+    const selected_package_id = package_id orelse return error.InvalidArguments;
+    const payload = try buildUpdatePayload(allocator, selected_package_id, release_version, channel, activate);
     defer allocator.free(payload);
     const stdout = std.fs.File.stdout().deprecatedWriter();
     const client = try packageClient(allocator, options);

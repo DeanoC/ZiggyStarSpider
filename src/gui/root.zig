@@ -16412,10 +16412,12 @@ const App = struct {
 
     pub fn packageManagerUpdateSelected(self: *App, activate: bool) void {
         const entry = self.selectedPackageManagerEntry() orelse return;
+        const escaped_id = jsonEscape(self.allocator, entry.package_id) catch return;
+        defer self.allocator.free(escaped_id);
         const payload = std.fmt.allocPrint(
             self.allocator,
             "{{\"venom_id\":\"{s}\",\"activate\":{s}}}",
-            .{ entry.package_id, if (activate) "true" else "false" },
+            .{ escaped_id, if (activate) "true" else "false" },
         ) catch return;
         defer self.allocator.free(payload);
         self.runPackageManagerOperation(
