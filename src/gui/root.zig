@@ -10315,18 +10315,9 @@ const App = struct {
 
                 const entry = McpEntry{
                     .node_id = self.allocator.dupe(u8, node.node_id) catch continue,
-                    .venom_id = self.allocator.dupe(u8, venom_id_raw) catch |err| {
-                        _ = err;
-                        continue;
-                    },
-                    .state = self.allocator.dupe(u8, state_raw) catch |err| {
-                        _ = err;
-                        continue;
-                    },
-                    .endpoint = self.allocator.dupe(u8, endpoint_raw) catch |err| {
-                        _ = err;
-                        continue;
-                    },
+                    .venom_id = self.allocator.dupe(u8, venom_id_raw) catch continue,
+                    .state = self.allocator.dupe(u8, state_raw) catch continue,
+                    .endpoint = self.allocator.dupe(u8, endpoint_raw) catch continue,
                 };
                 self.ws.mcp_entries.append(self.allocator, entry) catch continue;
             }
@@ -10929,6 +10920,14 @@ const App = struct {
         self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + pad, rect.width() - pad * 2.0, title, self.theme.colors.text_secondary);
         self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + pad + line_h + pad * 0.15, rect.width() - pad * 2.0, value, self.theme.colors.text_primary);
         self.drawTextTrimmed(rect.min[0] + pad * 1.6, rect.min[1] + rect.height() - pad - line_h, rect.width() - pad * 2.0, summary, self.theme.colors.text_secondary);
+    }
+
+    pub fn setSelectedMissionId(self: *App, mission_id: []const u8) void {
+        if (self.mission.selected_id) |existing| {
+            if (std.mem.eql(u8, existing, mission_id)) return;
+            self.allocator.free(existing);
+        }
+        self.mission.selected_id = self.allocator.dupe(u8, mission_id) catch null;
     }
 
     pub fn workspaceRecoveryHeadline(self: *App, buf: []u8) []const u8 {
