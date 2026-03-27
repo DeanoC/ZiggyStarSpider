@@ -23,6 +23,11 @@ const mcp_config_host = @import("panel_hosts/mcp_config.zig");
 const mission_workboard_host = @import("panel_hosts/mission_workboard.zig");
 const mission_helpers = @import("state/mission_helpers.zig");
 const workspace_host_mod = @import("panel_hosts/workspace_host.zig");
+const settings_host_mod = @import("panel_hosts/settings_host.zig");
+const mission_host_mod = @import("panel_hosts/mission_host.zig");
+const terminal_host_mod = @import("panel_hosts/terminal_host.zig");
+const filesystem_host_mod = @import("panel_hosts/filesystem_host.zig");
+const debug_host_mod = @import("panel_hosts/debug_host.zig");
 
 const zapp = zui.ui.app;
 const c = zapp.sdl_app.c;
@@ -514,7 +519,7 @@ fn containsCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
     return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
 }
 
-const SettingsFocusField = enum {
+pub const SettingsFocusField = enum {
     none,
     server_url,
     project_id,
@@ -550,7 +555,7 @@ const PointerInputLayer = enum {
     text_input_context_menu,
 };
 
-fn isSettingsPanelFocusField(field: SettingsFocusField) bool {
+pub fn isSettingsPanelFocusField(field: SettingsFocusField) bool {
     return switch (field) {
         .server_url,
         .default_session,
@@ -563,7 +568,7 @@ fn isSettingsPanelFocusField(field: SettingsFocusField) bool {
 
 // Panel extraction keeps host-owned text storage in SpiderApp, so these helpers
 // translate between the shared panel state enums and the host-local focus enum.
-fn settingsFocusFieldToExternal(field: SettingsFocusField) LauncherSettingsPanel.FocusField {
+pub fn settingsFocusFieldToExternal(field: SettingsFocusField) LauncherSettingsPanel.FocusField {
     return switch (field) {
         .server_url => .server_url,
         .default_session => .default_session,
@@ -573,7 +578,7 @@ fn settingsFocusFieldToExternal(field: SettingsFocusField) LauncherSettingsPanel
     };
 }
 
-fn settingsFocusFieldFromExternal(field: LauncherSettingsPanel.FocusField) SettingsFocusField {
+pub fn settingsFocusFieldFromExternal(field: LauncherSettingsPanel.FocusField) SettingsFocusField {
     return switch (field) {
         .server_url => .server_url,
         .default_session => .default_session,
@@ -650,7 +655,7 @@ fn isFilesystemToolsPanelFocusField(field: SettingsFocusField) bool {
     };
 }
 
-fn debugFocusFieldToExternal(field: SettingsFocusField) DebugPanel.FocusField {
+pub fn debugFocusFieldToExternal(field: SettingsFocusField) DebugPanel.FocusField {
     return switch (field) {
         .perf_benchmark_label => .perf_benchmark_label,
         .node_watch_filter => .node_watch_filter,
@@ -660,7 +665,7 @@ fn debugFocusFieldToExternal(field: SettingsFocusField) DebugPanel.FocusField {
     };
 }
 
-fn debugFocusFieldFromExternal(field: DebugPanel.FocusField) SettingsFocusField {
+pub fn debugFocusFieldFromExternal(field: DebugPanel.FocusField) SettingsFocusField {
     return switch (field) {
         .perf_benchmark_label => .perf_benchmark_label,
         .node_watch_filter => .node_watch_filter,
@@ -670,7 +675,7 @@ fn debugFocusFieldFromExternal(field: DebugPanel.FocusField) SettingsFocusField 
     };
 }
 
-fn isDebugPanelFocusField(field: SettingsFocusField) bool {
+pub fn isDebugPanelFocusField(field: SettingsFocusField) bool {
     return switch (field) {
         .perf_benchmark_label,
         .node_watch_filter,
@@ -702,7 +707,7 @@ fn isTerminalPanelFocusField(field: SettingsFocusField) bool {
     };
 }
 
-fn projectFocusFieldToExternal(field: SettingsFocusField) WorkspacePanel.FocusField {
+pub fn projectFocusFieldToExternal(field: SettingsFocusField) WorkspacePanel.FocusField {
     return switch (field) {
         .project_token => .workspace_token,
         .project_create_name => .create_name,
@@ -718,7 +723,7 @@ fn projectFocusFieldToExternal(field: SettingsFocusField) WorkspacePanel.FocusFi
     };
 }
 
-fn projectFocusFieldFromExternal(field: WorkspacePanel.FocusField) SettingsFocusField {
+pub fn projectFocusFieldFromExternal(field: WorkspacePanel.FocusField) SettingsFocusField {
     return switch (field) {
         .workspace_token => .project_token,
         .create_name => .project_create_name,
@@ -734,7 +739,7 @@ fn projectFocusFieldFromExternal(field: WorkspacePanel.FocusField) SettingsFocus
     };
 }
 
-fn isWorkspacePanelFocusField(field: SettingsFocusField) bool {
+pub fn isWorkspacePanelFocusField(field: SettingsFocusField) bool {
     return switch (field) {
         .project_token,
         .project_create_name,
@@ -1361,7 +1366,7 @@ const WorkspaceState = struct {
     workspace_snapshot_restore_attempted: bool = false,
 };
 
-const App = struct {
+pub const App = struct {
     allocator: std.mem.Allocator,
     window: *c.SDL_Window,
     gpu: zapp.multi_window_renderer.Shared,
@@ -5008,7 +5013,7 @@ const App = struct {
         self.client_context.clearPendingApprovalResolveRequest();
     }
 
-    fn setMissionDashboardError(self: *App, message: []const u8) void {
+    pub fn setMissionDashboardError(self: *App, message: []const u8) void {
         if (self.mission.last_error) |value| {
             self.allocator.free(value);
             self.mission.last_error = null;
@@ -5093,7 +5098,7 @@ const App = struct {
         }
     }
 
-    fn setTerminalStatus(self: *App, message: []const u8) void {
+    pub fn setTerminalStatus(self: *App, message: []const u8) void {
         if (self.terminal.terminal_status) |value| {
             self.allocator.free(value);
             self.terminal.terminal_status = null;
@@ -5108,7 +5113,7 @@ const App = struct {
         }
     }
 
-    fn setTerminalError(self: *App, message: []const u8) void {
+    pub fn setTerminalError(self: *App, message: []const u8) void {
         if (self.terminal.terminal_error) |value| {
             self.allocator.free(value);
             self.terminal.terminal_error = null;
@@ -5116,7 +5121,7 @@ const App = struct {
         self.terminal.terminal_error = self.allocator.dupe(u8, message) catch null;
     }
 
-    fn clearTerminalError(self: *App) void {
+    pub fn clearTerminalError(self: *App) void {
         if (self.terminal.terminal_error) |value| {
             self.allocator.free(value);
             self.terminal.terminal_error = null;
@@ -5185,7 +5190,7 @@ const App = struct {
         self.fs.filesystem_pending_retry_at_ms = std.time.milliTimestamp() + 50;
     }
 
-    fn requestFilesystemBrowserRefresh(self: *App, force_refresh: bool) void {
+    pub fn requestFilesystemBrowserRefresh(self: *App, force_refresh: bool) void {
         const current_path = if (self.fs.filesystem_path.items.len > 0) self.fs.filesystem_path.items else "/";
         self.schedulePendingFilesystemPathLoad(current_path, false, force_refresh);
         self.fs.filesystem_pending_retry_at_ms = 0;
@@ -5701,7 +5706,7 @@ const App = struct {
         }
     }
 
-    fn formatFilesystemOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
+    pub fn formatFilesystemOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
         if (err == error.RemoteError or err == error.RuntimeWarming) {
             if (self.fs.fsrpc_last_remote_error) |remote| {
                 return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, remote }) catch null;
@@ -6391,7 +6396,7 @@ const App = struct {
         return approvals;
     }
 
-    fn resolveMissionApproval(self: *App, action: zui.ui.operator_view.ExecApprovalResolveAction) !void {
+    pub fn resolveMissionApproval(self: *App, action: zui.ui.operator_view.ExecApprovalResolveAction) !void {
         const mission = self.findMissionForApprovalId(action.request_id) orelse return error.NotFound;
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
 
@@ -6449,7 +6454,7 @@ const App = struct {
         return null;
     }
 
-    fn formatMissionDashboardOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
+    pub fn formatMissionDashboardOpError(self: *App, operation: []const u8, err: anyerror) ?[]u8 {
         if (self.mission.last_error) |message| {
             return std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ operation, message }) catch null;
         }
@@ -6627,7 +6632,7 @@ const App = struct {
         return error.InvalidArguments;
     }
 
-    fn copyTextToClipboard(self: *App, text: []const u8) !void {
+    pub fn copyTextToClipboard(self: *App, text: []const u8) !void {
         if (text.len == 0) return;
         const buf = try self.allocator.alloc(u8, text.len + 1);
         defer self.allocator.free(buf);
@@ -7220,7 +7225,7 @@ const App = struct {
         };
     }
 
-    fn chartSeriesThemeColor(self: *const App, idx: usize) [4]f32 {
+    pub fn chartSeriesThemeColor(self: *const App, idx: usize) [4]f32 {
         const charts = self.sharedStyleSheet().charts;
         return switch (idx) {
             0 => charts.series_1 orelse zcolors.rgba(92, 173, 255, 255),
@@ -9559,7 +9564,7 @@ const App = struct {
         }
     }
 
-    fn launcherSettingsDrawFormSectionTitle(
+    pub fn launcherSettingsDrawFormSectionTitle(
         ctx: *anyopaque,
         x: f32,
         y: *f32,
@@ -9571,7 +9576,7 @@ const App = struct {
         self.drawFormSectionTitle(x, y, max_w, layout, text);
     }
 
-    fn launcherSettingsDrawFormFieldLabel(
+    pub fn launcherSettingsDrawFormFieldLabel(
         ctx: *anyopaque,
         x: f32,
         y: *f32,
@@ -9583,7 +9588,7 @@ const App = struct {
         self.drawFormFieldLabel(x, y, max_w, layout, text);
     }
 
-    fn launcherSettingsDrawTextInput(
+    pub fn launcherSettingsDrawTextInput(
         ctx: *anyopaque,
         rect: Rect,
         text: []const u8,
@@ -9594,7 +9599,7 @@ const App = struct {
         return self.drawTextInputWidget(rect, text, focused, opts);
     }
 
-    fn launcherSettingsDrawButton(
+    pub fn launcherSettingsDrawButton(
         ctx: *anyopaque,
         rect: Rect,
         label: []const u8,
@@ -9604,7 +9609,7 @@ const App = struct {
         return self.drawButtonWidget(rect, label, opts);
     }
 
-    fn launcherSettingsDrawLabel(
+    pub fn launcherSettingsDrawLabel(
         ctx: *anyopaque,
         x: f32,
         y: f32,
@@ -9615,7 +9620,7 @@ const App = struct {
         self.drawLabel(x, y, text, color);
     }
 
-    fn launcherSettingsDrawTextTrimmed(
+    pub fn launcherSettingsDrawTextTrimmed(
         ctx: *anyopaque,
         x: f32,
         y: f32,
@@ -9627,7 +9632,7 @@ const App = struct {
         self.drawTextTrimmed(x, y, max_w, text, color);
     }
 
-    fn launcherSettingsDrawVerticalScrollbar(
+    pub fn launcherSettingsDrawVerticalScrollbar(
         ctx: *anyopaque,
         viewport_rect: Rect,
         content_height: f32,
@@ -9652,22 +9657,22 @@ const App = struct {
         self.drawVerticalScrollbar(.projects, viewport_rect, content_height, scroll_y);
     }
 
-    fn filesystemDrawSurfacePanel(ctx: *anyopaque, rect: Rect) void {
+    pub fn filesystemDrawSurfacePanel(ctx: *anyopaque, rect: Rect) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.drawSurfacePanel(rect);
     }
 
-    fn filesystemDrawFilledRect(ctx: *anyopaque, rect: Rect, color: [4]f32) void {
+    pub fn filesystemDrawFilledRect(ctx: *anyopaque, rect: Rect, color: [4]f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.drawFilledRect(rect, color);
     }
 
-    fn filesystemDrawRect(ctx: *anyopaque, rect: Rect, color: [4]f32) void {
+    pub fn filesystemDrawRect(ctx: *anyopaque, rect: Rect, color: [4]f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.drawRect(rect, color);
     }
 
-    fn filesystemDrawTextWrapped(
+    pub fn filesystemDrawTextWrapped(
         ctx: *anyopaque,
         x: f32,
         y: f32,
@@ -9679,12 +9684,12 @@ const App = struct {
         return self.drawTextWrapped(x, y, max_w, text, color);
     }
 
-    fn terminalDrawOutput(ctx: *anyopaque, rect: Rect, inner: f32) void {
+    pub fn terminalDrawOutput(ctx: *anyopaque, rect: Rect, inner: f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         const host = TerminalOutputPanel.Host{
             .ctx = @ptrCast(self),
-            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
-            .draw_line = terminalDrawStyledLineAt,
+            .draw_text_trimmed = App.launcherSettingsDrawTextTrimmed,
+            .draw_line = App.terminalDrawStyledLineAt,
         };
         TerminalOutputPanel.draw(
             host,
@@ -9699,13 +9704,13 @@ const App = struct {
         );
     }
 
-    fn terminalDrawStyledLineAt(ctx: *anyopaque, line_index: usize, x: f32, y: f32, max_w: f32) void {
+    pub fn terminalDrawStyledLineAt(ctx: *anyopaque, line_index: usize, x: f32, y: f32, max_w: f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         const line = self.terminal.terminal_backend.lineAt(line_index) orelse return;
         self.drawTerminalStyledLine(x, y, max_w, line);
     }
 
-    fn debugDrawPerfCharts(
+    pub fn debugDrawPerfCharts(
         ctx: *anyopaque,
         rect: Rect,
         layout: PanelLayoutMetrics,
@@ -9713,94 +9718,94 @@ const App = struct {
         perf_charts: []const panels_bridge.DebugSparklineSeriesView,
     ) f32 {
         const self: *App = @ptrCast(@alignCast(ctx));
-        return self.drawDebugPerfCharts(rect, layout, y, perf_charts);
+        return debug_host_mod.drawDebugPerfCharts(self, rect, layout, y, perf_charts);
     }
 
-    fn debugDrawEventStream(
+    pub fn debugDrawEventStream(
         ctx: *anyopaque,
         output_rect: Rect,
         view: panels_bridge.DebugEventStreamView,
     ) void {
         const self: *App = @ptrCast(@alignCast(ctx));
-        self.drawDebugEventStream(output_rect, view);
+        debug_host_mod.drawDebugEventStream(self, output_rect, view);
     }
 
-    fn debugEventStreamSetOutputRect(ctx: *anyopaque, rect: Rect) void {
+    pub fn debugEventStreamSetOutputRect(ctx: *anyopaque, rect: Rect) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.debug.debug_output_rect = rect;
     }
 
-    fn debugEventStreamFocusPanel(ctx: *anyopaque) void {
+    pub fn debugEventStreamFocusPanel(ctx: *anyopaque) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         if (self.debug.debug_panel_id) |panel_id| self.manager.focusPanel(panel_id);
     }
 
-    fn debugEventStreamPushClip(ctx: *anyopaque, rect: Rect) void {
+    pub fn debugEventStreamPushClip(ctx: *anyopaque, rect: Rect) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.ui_commands.pushClip(.{ .min = rect.min, .max = rect.max });
     }
 
-    fn debugEventStreamPopClip(ctx: *anyopaque) void {
+    pub fn debugEventStreamPopClip(ctx: *anyopaque) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.ui_commands.popClip();
     }
 
-    fn debugEventStreamDrawFilledRect(ctx: *anyopaque, rect: Rect, color: [4]f32) void {
+    pub fn debugEventStreamDrawFilledRect(ctx: *anyopaque, rect: Rect, color: [4]f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.drawFilledRect(rect, color);
     }
 
-    fn debugEventStreamGetScrollY(ctx: *anyopaque) f32 {
+    pub fn debugEventStreamGetScrollY(ctx: *anyopaque) f32 {
         const self: *App = @ptrCast(@alignCast(ctx));
         return self.debug.debug_scroll_y;
     }
 
-    fn debugEventStreamSetScrollY(ctx: *anyopaque, value: f32) void {
+    pub fn debugEventStreamSetScrollY(ctx: *anyopaque, value: f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.debug.debug_scroll_y = value;
     }
 
-    fn debugEventStreamGetScrollbarDragging(ctx: *anyopaque) bool {
+    pub fn debugEventStreamGetScrollbarDragging(ctx: *anyopaque) bool {
         const self: *App = @ptrCast(@alignCast(ctx));
         return self.debug.debug_scrollbar_dragging;
     }
 
-    fn debugEventStreamSetScrollbarDragging(ctx: *anyopaque, value: bool) void {
+    pub fn debugEventStreamSetScrollbarDragging(ctx: *anyopaque, value: bool) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.debug.debug_scrollbar_dragging = value;
     }
 
-    fn debugEventStreamGetDragStartY(ctx: *anyopaque) f32 {
+    pub fn debugEventStreamGetDragStartY(ctx: *anyopaque) f32 {
         const self: *App = @ptrCast(@alignCast(ctx));
         return self.debug.debug_scrollbar_drag_start_y;
     }
 
-    fn debugEventStreamSetDragStartY(ctx: *anyopaque, value: f32) void {
+    pub fn debugEventStreamSetDragStartY(ctx: *anyopaque, value: f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.debug.debug_scrollbar_drag_start_y = value;
     }
 
-    fn debugEventStreamGetDragStartScrollY(ctx: *anyopaque) f32 {
+    pub fn debugEventStreamGetDragStartScrollY(ctx: *anyopaque) f32 {
         const self: *App = @ptrCast(@alignCast(ctx));
         return self.debug.debug_scrollbar_drag_start_scroll_y;
     }
 
-    fn debugEventStreamSetDragStartScrollY(ctx: *anyopaque, value: f32) void {
+    pub fn debugEventStreamSetDragStartScrollY(ctx: *anyopaque, value: f32) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.debug.debug_scrollbar_drag_start_scroll_y = value;
     }
 
-    fn debugEventStreamSetDragCapture(ctx: *anyopaque, capture: bool) void {
+    pub fn debugEventStreamSetDragCapture(ctx: *anyopaque, capture: bool) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.setDragMouseCapture(capture);
     }
 
-    fn debugEventStreamReleaseDragCapture(ctx: *anyopaque) void {
+    pub fn debugEventStreamReleaseDragCapture(ctx: *anyopaque) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         if (self.form_scroll_drag_target == .none) self.setDragMouseCapture(false);
     }
 
-    fn debugEventStreamEntryHeight(
+    pub fn debugEventStreamEntryHeight(
         ctx: *anyopaque,
         filtered_index: usize,
         content_min_x: f32,
@@ -9819,7 +9824,7 @@ const App = struct {
         return layout.line_height * @as(f32, @floatFromInt(visible_lines));
     }
 
-    fn debugEventStreamDrawEntry(
+    pub fn debugEventStreamDrawEntry(
         ctx: *anyopaque,
         filtered_index: usize,
         content_min_x: f32,
@@ -9914,7 +9919,7 @@ const App = struct {
         return clicked_fold_marker;
     }
 
-    fn debugEventStreamSelectEntry(ctx: *anyopaque, filtered_index: usize) void {
+    pub fn debugEventStreamSelectEntry(ctx: *anyopaque, filtered_index: usize) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         if (self.debug.debug_selected_index == null or self.debug.debug_selected_index.? != filtered_index) {
             self.debug.debug_selected_index = filtered_index;
@@ -9922,12 +9927,12 @@ const App = struct {
         }
     }
 
-    fn debugEventStreamCopySelectedEvent(ctx: *anyopaque) void {
+    pub fn debugEventStreamCopySelectedEvent(ctx: *anyopaque) void {
         const self: *App = @ptrCast(@alignCast(ctx));
         self.performDebugPanelAction(&self.manager, .copy_selected_event);
     }
 
-    fn debugEventStreamSelectedEventCount(ctx: *anyopaque) usize {
+    pub fn debugEventStreamSelectedEventCount(ctx: *anyopaque) usize {
         const self: *App = @ptrCast(@alignCast(ctx));
         if (self.debug.debug_selected_index) |sel_idx| {
             return if (sel_idx < self.debug.debug_events.items.len) 1 else 0;
@@ -9936,187 +9941,15 @@ const App = struct {
     }
 
     fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        if (self.ui_stage == .workspace) {
-            self.drawWorkspaceSettingsPanel(rect);
-            return;
-        }
-        const host = LauncherSettingsPanel.Host{
-            .ctx = @ptrCast(self),
-            .draw_form_section_title = launcherSettingsDrawFormSectionTitle,
-            .draw_form_field_label = launcherSettingsDrawFormFieldLabel,
-            .draw_text_input = launcherSettingsDrawTextInput,
-            .draw_button = launcherSettingsDrawButton,
-            .draw_label = launcherSettingsDrawLabel,
-            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
-            .draw_vertical_scrollbar = launcherSettingsDrawVerticalScrollbar,
-        };
-        const panel_rect = Rect{ .min = rect.min, .max = rect.max };
-        var panel_state = LauncherSettingsPanel.State{
-            .focused_field = settingsFocusFieldToExternal(self.settings_panel.focused_field),
-            .scroll_y = self.settings_panel.settings_scroll_y,
-        };
-        var model = self.launcherSettingsModel();
-        var meta_buf: [256]u8 = undefined;
-        model.theme_pack_meta_text = self.themePackMetaText(&meta_buf);
-        var quick_buf: [4]panels_bridge.ThemePackQuickPickView = undefined;
-        var recent_buf: [8]panels_bridge.ThemePackQuickPickView = undefined;
-        var available_buf: [16]panels_bridge.ThemePackQuickPickView = undefined;
-        const picks = self.populateThemePackQuickPicks(&quick_buf, &recent_buf, &available_buf);
-        model.theme_pack_quick_picks = picks.quick;
-        model.theme_pack_recent = picks.recent;
-        model.theme_pack_available = picks.available;
-        const action = LauncherSettingsPanel.draw(
-            host,
-            panel_rect,
-            self.panelLayoutMetrics(),
-            self.ui_scale,
-            .{
-                .text_primary = self.theme.colors.text_primary,
-                .text_secondary = self.theme.colors.text_secondary,
-            },
-            model,
-            .{
-                .server_url = self.settings_panel.server_url.items,
-                .default_session = self.settings_panel.default_session.items,
-                .default_agent = self.settings_panel.default_agent.items,
-                .theme_pack = self.settings_panel.theme_pack.items,
-            },
-            .{
-                .mouse_x = self.mouse_x,
-                .mouse_y = self.mouse_y,
-                .mouse_released = self.mouse_released,
-            },
-            &panel_state,
-            .launcher,
-        );
-        const mapped_focus = settingsFocusFieldFromExternal(panel_state.focused_field);
-        if (mapped_focus != .none or isSettingsPanelFocusField(self.settings_panel.focused_field)) {
-            self.settings_panel.focused_field = mapped_focus;
-        }
-        self.settings_panel.settings_scroll_y = panel_state.scroll_y;
-        if (action) |value| {
-            self.performLauncherSettingsAction(manager, value);
-        }
+        settings_host_mod.drawSettingsPanel(self, manager, rect);
     }
 
-    fn drawWorkspaceSettingsPanel(self: *App, rect: UiRect) void {
-        const host = LauncherSettingsPanel.Host{
-            .ctx = @ptrCast(self),
-            .draw_form_section_title = launcherSettingsDrawFormSectionTitle,
-            .draw_form_field_label = launcherSettingsDrawFormFieldLabel,
-            .draw_text_input = launcherSettingsDrawTextInput,
-            .draw_button = launcherSettingsDrawButton,
-            .draw_label = launcherSettingsDrawLabel,
-            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
-            .draw_vertical_scrollbar = launcherSettingsDrawVerticalScrollbar,
-        };
-        const panel_rect = Rect{ .min = rect.min, .max = rect.max };
-        var panel_state = LauncherSettingsPanel.State{
-            .focused_field = settingsFocusFieldToExternal(self.settings_panel.focused_field),
-            .scroll_y = self.settings_panel.settings_scroll_y,
-        };
-        var model = self.launcherSettingsModel();
-        var meta_buf: [256]u8 = undefined;
-        model.theme_pack_meta_text = self.themePackMetaText(&meta_buf);
-        var quick_buf: [4]panels_bridge.ThemePackQuickPickView = undefined;
-        var recent_buf: [8]panels_bridge.ThemePackQuickPickView = undefined;
-        var available_buf: [16]panels_bridge.ThemePackQuickPickView = undefined;
-        const picks = self.populateThemePackQuickPicks(&quick_buf, &recent_buf, &available_buf);
-        model.theme_pack_quick_picks = picks.quick;
-        model.theme_pack_recent = picks.recent;
-        model.theme_pack_available = picks.available;
-        const action = LauncherSettingsPanel.draw(
-            host,
-            panel_rect,
-            self.panelLayoutMetrics(),
-            self.ui_scale,
-            .{
-                .text_primary = self.theme.colors.text_primary,
-                .text_secondary = self.theme.colors.text_secondary,
-            },
-            model,
-            .{
-                .theme_pack = self.settings_panel.theme_pack.items,
-            },
-            .{
-                .mouse_x = self.mouse_x,
-                .mouse_y = self.mouse_y,
-                .mouse_released = self.mouse_released,
-            },
-            &panel_state,
-            .workspace,
-        );
-        const mapped_focus = settingsFocusFieldFromExternal(panel_state.focused_field);
-        if (mapped_focus != .none or isSettingsPanelFocusField(self.settings_panel.focused_field)) {
-            self.settings_panel.focused_field = mapped_focus;
-        }
-        self.settings_panel.settings_scroll_y = panel_state.scroll_y;
-        if (action) |value| {
-            self.performLauncherSettingsAction(&self.manager, value);
-        }
+    pub fn drawWorkspaceSettingsPanel(self: *App, rect: UiRect) void {
+        settings_host_mod.drawWorkspaceSettingsPanel(self, rect);
     }
 
     fn drawApprovalsInboxPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
-        self.requestMissionDashboardRefresh(false);
-
-        var action: panels_bridge.UiAction = .{};
-        var pending_attachment: ?panels_bridge.AttachmentOpen = null;
-        var bridge_cfg = zui.client.config.Config{
-            .server_url = self.config.server_url,
-            .token = self.config.activeRoleToken(),
-            .insecure_tls = self.config.insecure_tls,
-            .auto_connect_on_launch = self.config.auto_connect_on_launch,
-            .connect_host_override = self.config.connect_host_override,
-            .update_manifest_url = self.config.update_manifest_url,
-            .default_session = self.config.default_session,
-            .theme_mode = switch (self.config.theme_mode) {
-                .pack_default => .pack_default,
-                .light => .light,
-                .dark => .dark,
-            },
-            .theme_pack = self.config.theme_pack,
-            .watch_theme_pack = self.config.watch_theme_pack,
-            .theme_pack_recent = self.config.theme_pack_recent,
-            .theme_profile = switch (self.config.theme_profile) {
-                .auto => .auto,
-                .desktop => .desktop,
-                .phone => .phone,
-                .tablet => .tablet,
-                .fullscreen => .fullscreen,
-            },
-            .ui_expressive_enabled = true,
-            .ui_3d_enabled = true,
-        };
-        _ = panels_bridge.runtime.drawContentsWithHost(
-            self.allocator,
-            &self.client_context,
-            &bridge_cfg,
-            &self.agent_registry,
-            self.connection_state == .connected,
-            build_options.app_version,
-            panel,
-            rect,
-            &self.ui_inbox,
-            manager,
-            &action,
-            &pending_attachment,
-            null,
-            false,
-            null,
-        );
-        if (pending_attachment) |*value| value.deinit(self.allocator);
-
-        if (action.resolve_approval) |resolve| {
-            defer resolve.deinit(self.allocator);
-            self.resolveMissionApproval(resolve) catch |err| {
-                if (self.formatMissionDashboardOpError("Resolve mission approval", err)) |message| {
-                    defer self.allocator.free(message);
-                    self.setMissionDashboardError(message);
-                } else {
-                    self.setMissionDashboardError("Resolve mission approval failed");
-                }
-            };
-        }
+        mission_host_mod.drawApprovalsInboxPanel(self, manager, panel, rect);
     }
 
     fn drawMissionWorkboardPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
@@ -10976,62 +10809,7 @@ const App = struct {
     }
 
     fn drawWorkspacePanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        _ = manager;
-        var view = self.buildWorkspacePanelView();
-        defer view.deinit(self.allocator);
-        const host = WorkspacePanel.Host{
-            .ctx = @ptrCast(self),
-            .draw_form_section_title = launcherSettingsDrawFormSectionTitle,
-            .draw_form_field_label = launcherSettingsDrawFormFieldLabel,
-            .draw_text_input = launcherSettingsDrawTextInput,
-            .draw_button = launcherSettingsDrawButton,
-            .draw_label = launcherSettingsDrawLabel,
-            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
-            .draw_status_row = projectDrawStatusRow,
-            .draw_vertical_scrollbar = projectDrawVerticalScrollbar,
-        };
-        var panel_state = WorkspacePanel.State{
-            .focused_field = projectFocusFieldToExternal(self.settings_panel.focused_field),
-            .scroll_y = self.settings_panel.workspaces_scroll_y,
-        };
-        const action = WorkspacePanel.draw(
-            host,
-            Rect{ .min = rect.min, .max = rect.max },
-            self.panelLayoutMetrics(),
-            self.ui_scale,
-            .{
-                .text_primary = self.theme.colors.text_primary,
-                .text_secondary = self.theme.colors.text_secondary,
-                .warning_text = zcolors.rgba(236, 174, 36, 255),
-                .error_text = zcolors.rgba(220, 80, 80, 255),
-            },
-            self.workspacePanelModel(),
-            view.view,
-            .{
-                .workspace_token = self.settings_panel.project_token.items,
-                .create_name = self.settings_panel.project_create_name.items,
-                .create_vision = self.settings_panel.project_create_vision.items,
-                .template_id = self.settings_panel.workspace_template_id.items,
-                .operator_token = self.settings_panel.project_operator_token.items,
-                .mount_path = self.settings_panel.project_mount_path.items,
-                .mount_node_id = self.settings_panel.project_mount_node_id.items,
-                .mount_export_name = self.settings_panel.project_mount_export_name.items,
-                .bind_path = self.settings_panel.workspace_bind_path.items,
-                .bind_target_path = self.settings_panel.workspace_bind_target_path.items,
-            },
-            .{
-                .mouse_x = self.mouse_x,
-                .mouse_y = self.mouse_y,
-                .mouse_released = self.mouse_released,
-            },
-            &panel_state,
-        );
-        const mapped_focus = projectFocusFieldFromExternal(panel_state.focused_field);
-        if (mapped_focus != .none or isWorkspacePanelFocusField(self.settings_panel.focused_field)) {
-            self.settings_panel.focused_field = mapped_focus;
-        }
-        self.settings_panel.workspaces_scroll_y = panel_state.scroll_y;
-        if (action) |value| self.performWorkspacePanelAction(value);
+        workspace_host_mod.drawWorkspacePanel(self, manager, rect);
     }
 
     fn pathWithinMount(path: []const u8, mount_path: []const u8) bool {
@@ -11480,7 +11258,7 @@ const App = struct {
         return self.readFsPathTextGui(client, path);
     }
 
-    fn ensureTerminalSession(self: *App) !void {
+    pub fn ensureTerminalSession(self: *App) !void {
         if (self.terminal.terminal_session_id != null) return;
 
         const session_id = try std.fmt.allocPrint(self.allocator, "gui-{d}", .{std.time.milliTimestamp()});
@@ -11502,7 +11280,7 @@ const App = struct {
         self.terminal.terminal_next_poll_at_ms = std.time.milliTimestamp() + TERMINAL_READ_POLL_INTERVAL_MS;
     }
 
-    fn closeTerminalSession(self: *App) !void {
+    pub fn closeTerminalSession(self: *App) !void {
         if (self.terminal.terminal_session_id == null) return;
         const session_id = self.terminal.terminal_session_id.?;
         const escaped_session = try jsonEscape(self.allocator, session_id);
@@ -11518,7 +11296,7 @@ const App = struct {
         self.setTerminalStatus("Terminal session closed");
     }
 
-    fn resizeTerminalSession(self: *App, cols: u32, rows: u32) !void {
+    pub fn resizeTerminalSession(self: *App, cols: u32, rows: u32) !void {
         if (self.terminal.terminal_session_id == null) return error.InvalidState;
         const session_id = self.terminal.terminal_session_id.?;
         const escaped_session = try jsonEscape(self.allocator, session_id);
@@ -11535,7 +11313,7 @@ const App = struct {
         self.setTerminalStatus(status);
     }
 
-    fn sendTerminalControlC(self: *App) !void {
+    pub fn sendTerminalControlC(self: *App) !void {
         try self.ensureTerminalSession();
         if (self.terminal.terminal_session_id == null) return error.InvalidState;
         const session_id = self.terminal.terminal_session_id.?;
@@ -11580,7 +11358,7 @@ const App = struct {
         self.setTerminalStatus(status);
     }
 
-    fn sendTerminalInputFromUi(self: *App) !void {
+    pub fn sendTerminalInputFromUi(self: *App) !void {
         const input = std.mem.trim(u8, self.terminal.terminal_input.items, " \t\r\n");
         if (input.len == 0) return;
         try self.sendTerminalInputRaw(input, true);
@@ -11591,7 +11369,7 @@ const App = struct {
         };
     }
 
-    fn terminalReadOnce(self: *App, timeout_ms: u32) !void {
+    pub fn terminalReadOnce(self: *App, timeout_ms: u32) !void {
         if (self.terminal.terminal_session_id == null) return;
         const session_id = self.terminal.terminal_session_id.?;
         const escaped_session = try jsonEscape(self.allocator, session_id);
@@ -11705,44 +11483,7 @@ const App = struct {
     }
 
     fn drawTerminalPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        _ = manager;
-        const host = TerminalPanel.Host{
-            .ctx = @ptrCast(self),
-            .draw_label = launcherSettingsDrawLabel,
-            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
-            .draw_text_input = launcherSettingsDrawTextInput,
-            .draw_button = launcherSettingsDrawButton,
-            .draw_surface_panel = filesystemDrawSurfacePanel,
-            .draw_output = terminalDrawOutput,
-        };
-        var panel_state = TerminalPanel.State{
-            .focused_field = terminalFocusFieldToExternal(self.settings_panel.focused_field),
-        };
-        var owned_view = self.terminalPanelViewOwned();
-        defer owned_view.deinit(self.allocator);
-        const action = TerminalPanel.draw(
-            host,
-            Rect{ .min = rect.min, .max = rect.max },
-            self.panelLayoutMetrics(),
-            .{
-                .text_primary = self.theme.colors.text_primary,
-                .text_secondary = self.theme.colors.text_secondary,
-                .error_text = zcolors.rgba(220, 80, 80, 255),
-            },
-            self.terminalPanelModel(),
-            owned_view.view,
-            .{
-                .mouse_x = self.mouse_x,
-                .mouse_y = self.mouse_y,
-                .mouse_released = self.mouse_released,
-            },
-            &panel_state,
-        );
-        const mapped_focus = terminalFocusFieldFromExternal(panel_state.focused_field);
-        if (mapped_focus != .none or isTerminalPanelFocusField(self.settings_panel.focused_field)) {
-            self.settings_panel.focused_field = mapped_focus;
-        }
-        if (action) |value| self.performTerminalPanelAction(value);
+        terminal_host_mod.drawTerminalPanel(self, manager, rect);
     }
 
     fn terminalIndexedColor(index: u8) [4]f32 {
@@ -12246,7 +11987,7 @@ const App = struct {
         return self.allocFilesystemTypeLabel(std.fs.path.basename(path), kind) catch null;
     }
 
-    fn filesystemPanelModel(self: *App) panels_bridge.FilesystemPanelModel {
+    pub fn filesystemPanelModel(self: *App) panels_bridge.FilesystemPanelModel {
         return .{
             .connected = self.connection_state == .connected,
             .busy = self.fs.filesystem_busy,
@@ -12270,7 +12011,7 @@ const App = struct {
         }
     }
 
-    fn filesystemToolsPanelModel(self: *App) panels_bridge.FilesystemToolsPanelModel {
+    pub fn filesystemToolsPanelModel(self: *App) panels_bridge.FilesystemToolsPanelModel {
         return .{
             .connected = self.connection_state == .connected,
             .busy = self.fs.filesystem_busy,
@@ -12280,7 +12021,7 @@ const App = struct {
         };
     }
 
-    fn performFilesystemPanelAction(self: *App, action: panels_bridge.FilesystemPanelAction, path_label: []const u8) void {
+    pub fn performFilesystemPanelAction(self: *App, action: panels_bridge.FilesystemPanelAction, path_label: []const u8) void {
         switch (action) {
             .refresh => {
                 self.refreshFilesystemBrowser() catch |err| {
@@ -12384,7 +12125,7 @@ const App = struct {
         }
     }
 
-    fn performFilesystemToolsPanelAction(self: *App, action: panels_bridge.FilesystemToolsPanelAction) void {
+    pub fn performFilesystemToolsPanelAction(self: *App, action: panels_bridge.FilesystemToolsPanelAction) void {
         switch (action) {
             .runtime_read => |target| {
                 const file_name: []const u8 = switch (target) {
@@ -12484,7 +12225,7 @@ const App = struct {
         owned_strings: std.ArrayListUnmanaged([]u8) = .{},
         view: panels_bridge.FilesystemPanelView = .{},
 
-        fn deinit(self: *OwnedFilesystemPanelView, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *OwnedFilesystemPanelView, allocator: std.mem.Allocator) void {
             for (self.owned_strings.items) |value| allocator.free(value);
             self.owned_strings.deinit(allocator);
             self.entries.deinit(allocator);
@@ -12496,13 +12237,13 @@ const App = struct {
         selected_contract_label: ?[]u8 = null,
         view: panels_bridge.FilesystemToolsPanelView = .{},
 
-        fn deinit(self: *OwnedFilesystemToolsPanelView, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *OwnedFilesystemToolsPanelView, allocator: std.mem.Allocator) void {
             if (self.selected_contract_label) |value| allocator.free(value);
             self.* = undefined;
         }
     };
 
-    fn buildFilesystemPanelView(self: *App) OwnedFilesystemPanelView {
+    pub fn buildFilesystemPanelView(self: *App) OwnedFilesystemPanelView {
         var owned: OwnedFilesystemPanelView = .{};
         const path_label = if (self.fs.filesystem_path.items.len > 0) self.fs.filesystem_path.items else "/";
 
@@ -12637,7 +12378,7 @@ const App = struct {
         return owned;
     }
 
-    fn buildFilesystemToolsPanelView(self: *App) OwnedFilesystemToolsPanelView {
+    pub fn buildFilesystemToolsPanelView(self: *App) OwnedFilesystemToolsPanelView {
         var owned: OwnedFilesystemToolsPanelView = .{};
         owned.selected_contract_label = if (self.selectedContractService()) |entry|
             std.fmt.allocPrint(
@@ -12655,7 +12396,7 @@ const App = struct {
         return owned;
     }
 
-    fn debugPanelModel(self: *App) panels_bridge.DebugPanelModel {
+    pub fn debugPanelModel(self: *App) panels_bridge.DebugPanelModel {
         const search_trimmed = std.mem.trim(u8, self.debug.debug_search_filter.items, " \t\r\n");
         const selected_node_event = self.selectedNodeServiceEventInfo();
         const selected_idx = selected_node_event.index;
@@ -12697,7 +12438,7 @@ const App = struct {
         view: panels_bridge.DebugPanelView = .{},
         event_stream_view: panels_bridge.DebugEventStreamView = .{},
 
-        fn deinit(self: *OwnedDebugPanelView, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *OwnedDebugPanelView, allocator: std.mem.Allocator) void {
             if (self.perf_summary) |value| allocator.free(value);
             if (self.perf_history) |value| allocator.free(value);
             if (self.perf_command_stats) |value| allocator.free(value);
@@ -12714,7 +12455,7 @@ const App = struct {
         }
     };
 
-    fn buildDebugPanelView(self: *App) OwnedDebugPanelView {
+    pub fn buildDebugPanelView(self: *App) OwnedDebugPanelView {
         var owned: OwnedDebugPanelView = .{};
         const perf_other_ms = @max(
             0.0,
@@ -12905,7 +12646,7 @@ const App = struct {
         return owned;
     }
 
-    fn performDebugPanelAction(self: *App, manager: *panel_manager.PanelManager, action: panels_bridge.DebugPanelAction) void {
+    pub fn performDebugPanelAction(self: *App, manager: *panel_manager.PanelManager, action: panels_bridge.DebugPanelAction) void {
         switch (action) {
             .toggle_stream => {
                 self.debug.debug_stream_enabled = !self.debug.debug_stream_enabled;
@@ -13091,7 +12832,7 @@ const App = struct {
         }
     }
 
-    fn launcherSettingsModel(self: *App) panels_bridge.LauncherSettingsModel {
+    pub fn launcherSettingsModel(self: *App) panels_bridge.LauncherSettingsModel {
         const connection_state: panels_bridge.SettingsConnectionState = switch (self.connection_state) {
             .disconnected => .disconnected,
             .connecting => .connecting,
@@ -13142,7 +12883,7 @@ const App = struct {
         return if (idx + 1 < path.len) path[idx + 1 ..] else path;
     }
 
-    fn themePackMetaText(self: *const App, buf: []u8) ?[]const u8 {
+    pub fn themePackMetaText(self: *const App, buf: []u8) ?[]const u8 {
         _ = self;
         const meta: UiThemePackMeta = zui.ui.theme_engine.runtime.getPackMeta() orelse return null;
         const name = if (meta.name.len > 0) meta.name else meta.id;
@@ -13153,7 +12894,7 @@ const App = struct {
         ) catch null;
     }
 
-    fn populateThemePackQuickPicks(
+    pub fn populateThemePackQuickPicks(
         self: *const App,
         quick_buf: []panels_bridge.ThemePackQuickPickView,
         recent_buf: []panels_bridge.ThemePackQuickPickView,
@@ -13216,7 +12957,7 @@ const App = struct {
         if (value) |text| buf.appendSlice(self.allocator, text) catch {};
     }
 
-    fn performLauncherSettingsAction(self: *App, manager: *panel_manager.PanelManager, action: panels_bridge.LauncherSettingsAction) void {
+    pub fn performLauncherSettingsAction(self: *App, manager: *panel_manager.PanelManager, action: panels_bridge.LauncherSettingsAction) void {
         switch (action) {
             .set_connect_role => |role| {
                 const target_role = switch (role) {
@@ -13443,161 +13184,15 @@ const App = struct {
     }
 
     fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        _ = manager;
-        if (self.connection_state == .connected and
-            self.fs.filesystem_entries.items.len == 0 and
-            self.fs.filesystem_active_request == null and
-            self.fs.filesystem_pending_path == null)
-        {
-            self.requestFilesystemBrowserRefresh(true);
-        }
-
-        const model = self.filesystemPanelModel();
-        const host = FilesystemPanel.Host{
-            .ctx = @ptrCast(self),
-            .draw_label = launcherSettingsDrawLabel,
-            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
-            .draw_text_input = launcherSettingsDrawTextInput,
-            .draw_button = launcherSettingsDrawButton,
-            .draw_surface_panel = filesystemDrawSurfacePanel,
-            .draw_text_wrapped = filesystemDrawTextWrapped,
-            .draw_filled_rect = filesystemDrawFilledRect,
-            .draw_rect = filesystemDrawRect,
-        };
-        const path_label = if (self.fs.filesystem_path.items.len > 0) self.fs.filesystem_path.items else "/";
-        var view = self.buildFilesystemPanelView();
-        defer view.deinit(self.allocator);
-        var panel_state = FilesystemPanel.State{
-            .entry_page = self.fs.filesystem_entry_page,
-            .last_clicked_entry_index = self.fs.filesystem_last_clicked_entry_index,
-            .last_click_ms = self.fs.filesystem_last_click_ms,
-            .type_column_width = self.fs.filesystem_type_column_width,
-            .modified_column_width = self.fs.filesystem_modified_column_width,
-            .size_column_width = self.fs.filesystem_size_column_width,
-            .column_resize = self.fs.filesystem_column_resize_handle,
-            .preview_split_ratio = self.fs.filesystem_preview_split_ratio,
-            .preview_split_dragging = self.fs.filesystem_preview_split_dragging,
-        };
-        const action = FilesystemPanel.draw(
-            host,
-            Rect{ .min = rect.min, .max = rect.max },
-            self.panelLayoutMetrics(),
-            model,
-            view.view,
-            .{
-                .text_primary = self.theme.colors.text_primary,
-                .text_secondary = self.theme.colors.text_secondary,
-                .primary = self.theme.colors.primary,
-                .border = self.theme.colors.border,
-                .surface = self.theme.colors.surface,
-                .error_text = zcolors.rgba(220, 80, 80, 255),
-            },
-            .{
-                .mouse_x = self.mouse_x,
-                .mouse_y = self.mouse_y,
-                .mouse_down = self.mouse_down,
-                .mouse_clicked = self.mouse_clicked,
-                .mouse_released = self.mouse_released,
-            },
-            &panel_state,
-        );
-        self.fs.filesystem_entry_page = panel_state.entry_page;
-        self.fs.filesystem_last_clicked_entry_index = panel_state.last_clicked_entry_index;
-        self.fs.filesystem_last_click_ms = panel_state.last_click_ms;
-        self.fs.filesystem_type_column_width = panel_state.type_column_width;
-        self.fs.filesystem_modified_column_width = panel_state.modified_column_width;
-        self.fs.filesystem_size_column_width = panel_state.size_column_width;
-        self.fs.filesystem_column_resize_handle = panel_state.column_resize;
-        self.fs.filesystem_preview_split_ratio = panel_state.preview_split_ratio;
-        self.fs.filesystem_preview_split_dragging = panel_state.preview_split_dragging;
-        if (action) |value| {
-            self.performFilesystemPanelAction(value, path_label);
-        }
+        filesystem_host_mod.drawFilesystemPanel(self, manager, rect);
     }
 
     fn drawFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        _ = manager;
-        const model = self.filesystemToolsPanelModel();
-        const host = FilesystemToolsPanel.Host{
-            .ctx = @ptrCast(self),
-            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
-            .draw_text_input = launcherSettingsDrawTextInput,
-            .draw_button = launcherSettingsDrawButton,
-            .draw_surface_panel = filesystemDrawSurfacePanel,
-            .draw_text_wrapped = filesystemDrawTextWrapped,
-            .draw_rect = filesystemDrawRect,
-        };
-        var view = self.buildFilesystemToolsPanelView();
-        defer view.deinit(self.allocator);
-        var panel_state = FilesystemToolsPanel.State{
-            .focused_field = filesystemToolsFocusFieldToExternal(self.settings_panel.focused_field),
-        };
-        const action = FilesystemToolsPanel.draw(
-            host,
-            Rect{ .min = rect.min, .max = rect.max },
-            self.panelLayoutMetrics(),
-            model,
-            view.view,
-            .{
-                .mouse_x = self.mouse_x,
-                .mouse_y = self.mouse_y,
-                .mouse_released = self.mouse_released,
-            },
-            .{
-                .text_primary = self.theme.colors.text_primary,
-                .text_secondary = self.theme.colors.text_secondary,
-                .primary = self.theme.colors.primary,
-                .border = self.theme.colors.border,
-                .surface = self.theme.colors.surface,
-            },
-            &panel_state,
-        );
-        const mapped_focus = filesystemToolsFocusFieldFromExternal(panel_state.focused_field);
-        if (mapped_focus != .none or isFilesystemToolsPanelFocusField(self.settings_panel.focused_field)) {
-            self.settings_panel.focused_field = mapped_focus;
-        }
-        if (action) |value| self.performFilesystemToolsPanelAction(value);
+        filesystem_host_mod.drawFilesystemToolsPanel(self, manager, rect);
     }
 
     fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
-        const host = DebugPanel.Host{
-            .ctx = @ptrCast(self),
-            .draw_label = launcherSettingsDrawLabel,
-            .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
-            .draw_text_input = launcherSettingsDrawTextInput,
-            .draw_button = launcherSettingsDrawButton,
-            .draw_text_wrapped = filesystemDrawTextWrapped,
-            .draw_perf_charts = debugDrawPerfCharts,
-            .draw_event_stream = debugDrawEventStream,
-        };
-        var view = self.buildDebugPanelView();
-        defer view.deinit(self.allocator);
-        var panel_state = DebugPanel.State{
-            .focused_field = debugFocusFieldToExternal(self.settings_panel.focused_field),
-        };
-        const action = DebugPanel.draw(
-            host,
-            Rect{ .min = rect.min, .max = rect.max },
-            self.panelLayoutMetrics(),
-            .{
-                .text_primary = self.theme.colors.text_primary,
-                .text_secondary = self.theme.colors.text_secondary,
-            },
-            self.debugPanelModel(),
-            view.view,
-            view.event_stream_view,
-            .{
-                .mouse_x = self.mouse_x,
-                .mouse_y = self.mouse_y,
-                .mouse_released = self.mouse_released,
-            },
-            &panel_state,
-        );
-        const mapped_focus = debugFocusFieldFromExternal(panel_state.focused_field);
-        if (mapped_focus != .none or isDebugPanelFocusField(self.settings_panel.focused_field)) {
-            self.settings_panel.focused_field = mapped_focus;
-        }
-        if (action) |value| self.performDebugPanelAction(manager, value);
+        debug_host_mod.drawDebugPanel(self, manager, rect);
     }
 
     const SparklinePointsCtx = struct {
@@ -13671,28 +13266,28 @@ const App = struct {
     fn drawDebugEventStream(self: *App, output_rect: Rect, view: panels_bridge.DebugEventStreamView) void {
         const host = DebugEventStreamPanel.Host{
             .ctx = @ptrCast(self),
-            .set_output_rect = debugEventStreamSetOutputRect,
-            .focus_panel = debugEventStreamFocusPanel,
-            .draw_surface_panel = filesystemDrawSurfacePanel,
-            .push_clip = debugEventStreamPushClip,
-            .pop_clip = debugEventStreamPopClip,
-            .draw_filled_rect = debugEventStreamDrawFilledRect,
-            .draw_button = launcherSettingsDrawButton,
-            .get_scroll_y = debugEventStreamGetScrollY,
-            .set_scroll_y = debugEventStreamSetScrollY,
-            .get_scrollbar_dragging = debugEventStreamGetScrollbarDragging,
-            .set_scrollbar_dragging = debugEventStreamSetScrollbarDragging,
-            .get_drag_start_y = debugEventStreamGetDragStartY,
-            .set_drag_start_y = debugEventStreamSetDragStartY,
-            .get_drag_start_scroll_y = debugEventStreamGetDragStartScrollY,
-            .set_drag_start_scroll_y = debugEventStreamSetDragStartScrollY,
-            .set_drag_capture = debugEventStreamSetDragCapture,
-            .release_drag_capture = debugEventStreamReleaseDragCapture,
-            .entry_height = debugEventStreamEntryHeight,
-            .draw_entry = debugEventStreamDrawEntry,
-            .select_entry = debugEventStreamSelectEntry,
-            .copy_selected_event = debugEventStreamCopySelectedEvent,
-            .selected_event_count = debugEventStreamSelectedEventCount,
+            .set_output_rect = App.debugEventStreamSetOutputRect,
+            .focus_panel = App.debugEventStreamFocusPanel,
+            .draw_surface_panel = App.filesystemDrawSurfacePanel,
+            .push_clip = App.debugEventStreamPushClip,
+            .pop_clip = App.debugEventStreamPopClip,
+            .draw_filled_rect = App.debugEventStreamDrawFilledRect,
+            .draw_button = App.launcherSettingsDrawButton,
+            .get_scroll_y = App.debugEventStreamGetScrollY,
+            .set_scroll_y = App.debugEventStreamSetScrollY,
+            .get_scrollbar_dragging = App.debugEventStreamGetScrollbarDragging,
+            .set_scrollbar_dragging = App.debugEventStreamSetScrollbarDragging,
+            .get_drag_start_y = App.debugEventStreamGetDragStartY,
+            .set_drag_start_y = App.debugEventStreamSetDragStartY,
+            .get_drag_start_scroll_y = App.debugEventStreamGetDragStartScrollY,
+            .set_drag_start_scroll_y = App.debugEventStreamSetDragStartScrollY,
+            .set_drag_capture = App.debugEventStreamSetDragCapture,
+            .release_drag_capture = App.debugEventStreamReleaseDragCapture,
+            .entry_height = App.debugEventStreamEntryHeight,
+            .draw_entry = App.debugEventStreamDrawEntry,
+            .select_entry = App.debugEventStreamSelectEntry,
+            .copy_selected_event = App.debugEventStreamCopySelectedEvent,
+            .selected_event_count = App.debugEventStreamSelectedEventCount,
         };
         DebugEventStreamPanel.draw(
             host,
@@ -20282,7 +19877,7 @@ const App = struct {
         return width;
     }
 
-    fn drawTextCenteredTrimmed(self: *App, center_x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
+    pub fn drawTextCenteredTrimmed(self: *App, center_x: f32, y: f32, max_w: f32, text: []const u8, color: [4]f32) void {
         if (max_w <= 0.0) return;
         const measured = self.measureTextFast(text);
         if (measured <= max_w) {
@@ -20627,3 +20222,41 @@ fn appendGuiDiagnosticLog(line: []const u8) void {
     defer allocator.free(payload);
     _ = file.writeAll(payload) catch return;
 }
+
+// Module-level re-exports of App methods, allowing panel host files to reference
+// them as `@import("../root.zig").methodName` for use as function pointer callbacks.
+pub const launcherSettingsDrawFormSectionTitle = App.launcherSettingsDrawFormSectionTitle;
+pub const launcherSettingsDrawFormFieldLabel = App.launcherSettingsDrawFormFieldLabel;
+pub const launcherSettingsDrawTextInput = App.launcherSettingsDrawTextInput;
+pub const launcherSettingsDrawButton = App.launcherSettingsDrawButton;
+pub const launcherSettingsDrawLabel = App.launcherSettingsDrawLabel;
+pub const launcherSettingsDrawTextTrimmed = App.launcherSettingsDrawTextTrimmed;
+pub const launcherSettingsDrawVerticalScrollbar = App.launcherSettingsDrawVerticalScrollbar;
+pub const filesystemDrawSurfacePanel = App.filesystemDrawSurfacePanel;
+pub const filesystemDrawFilledRect = App.filesystemDrawFilledRect;
+pub const filesystemDrawRect = App.filesystemDrawRect;
+pub const filesystemDrawTextWrapped = App.filesystemDrawTextWrapped;
+pub const terminalDrawOutput = App.terminalDrawOutput;
+pub const terminalDrawStyledLineAt = App.terminalDrawStyledLineAt;
+pub const debugDrawPerfCharts = App.debugDrawPerfCharts;
+pub const debugDrawEventStream = App.debugDrawEventStream;
+pub const debugEventStreamSetOutputRect = App.debugEventStreamSetOutputRect;
+pub const debugEventStreamFocusPanel = App.debugEventStreamFocusPanel;
+pub const debugEventStreamPushClip = App.debugEventStreamPushClip;
+pub const debugEventStreamPopClip = App.debugEventStreamPopClip;
+pub const debugEventStreamDrawFilledRect = App.debugEventStreamDrawFilledRect;
+pub const debugEventStreamGetScrollY = App.debugEventStreamGetScrollY;
+pub const debugEventStreamSetScrollY = App.debugEventStreamSetScrollY;
+pub const debugEventStreamGetScrollbarDragging = App.debugEventStreamGetScrollbarDragging;
+pub const debugEventStreamSetScrollbarDragging = App.debugEventStreamSetScrollbarDragging;
+pub const debugEventStreamGetDragStartY = App.debugEventStreamGetDragStartY;
+pub const debugEventStreamSetDragStartY = App.debugEventStreamSetDragStartY;
+pub const debugEventStreamGetDragStartScrollY = App.debugEventStreamGetDragStartScrollY;
+pub const debugEventStreamSetDragStartScrollY = App.debugEventStreamSetDragStartScrollY;
+pub const debugEventStreamSetDragCapture = App.debugEventStreamSetDragCapture;
+pub const debugEventStreamReleaseDragCapture = App.debugEventStreamReleaseDragCapture;
+pub const debugEventStreamEntryHeight = App.debugEventStreamEntryHeight;
+pub const debugEventStreamDrawEntry = App.debugEventStreamDrawEntry;
+pub const debugEventStreamSelectEntry = App.debugEventStreamSelectEntry;
+pub const debugEventStreamCopySelectedEvent = App.debugEventStreamCopySelectedEvent;
+pub const debugEventStreamSelectedEventCount = App.debugEventStreamSelectedEventCount;

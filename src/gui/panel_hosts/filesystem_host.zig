@@ -27,7 +27,7 @@ fn filesystemToolsFocusFieldToExternal(field: anytype) FilesystemToolsPanel.Focu
     };
 }
 
-fn filesystemToolsFocusFieldFromExternal(field: FilesystemToolsPanel.FocusField) anytype {
+fn filesystemToolsFocusFieldFromExternal(field: FilesystemToolsPanel.FocusField) @import("../root.zig").SettingsFocusField {
     return switch (field) {
         .contract_payload => .filesystem_contract_payload,
         .none => .none,

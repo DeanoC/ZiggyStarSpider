@@ -32,7 +32,7 @@ fn terminalFocusFieldToExternal(field: anytype) TerminalPanel.FocusField {
     };
 }
 
-fn terminalFocusFieldFromExternal(field: TerminalPanel.FocusField) anytype {
+fn terminalFocusFieldFromExternal(field: TerminalPanel.FocusField) @import("../root.zig").SettingsFocusField {
     return switch (field) {
         .command_input => .terminal_command_input,
         .none => .none,

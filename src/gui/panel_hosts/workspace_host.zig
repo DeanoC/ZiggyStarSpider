@@ -1333,10 +1333,8 @@ pub fn projectFocusFieldToExternal(field: anytype) WorkspacePanel.FocusField {
     };
 }
 
-pub fn projectFocusFieldFromExternal(field: WorkspacePanel.FocusField) u8 {
-    // Placeholder — real mapping lives in root.zig.
-    _ = field;
-    return 0;
+pub fn projectFocusFieldFromExternal(field: WorkspacePanel.FocusField) @import("../root.zig").SettingsFocusField {
+    return @import("../root.zig").projectFocusFieldFromExternal(field);
 }
 
 pub fn isWorkspacePanelFocusField(field: anytype) bool {

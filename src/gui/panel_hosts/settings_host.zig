@@ -25,23 +25,24 @@ const LauncherSettingsPanel = zui_panels.launcher_settings_panel;
 // must be provided by the including namespace (e.g. via usingnamespace in root.zig).
 
 pub fn drawSettingsPanel(self: anytype, manager: anytype, rect: anytype) void {
+    const root = @import("../root.zig");
     if (self.ui_stage == .workspace) {
         self.drawWorkspaceSettingsPanel(rect);
         return;
     }
     const host = LauncherSettingsPanel.Host{
         .ctx = @ptrCast(self),
-        .draw_form_section_title = launcherSettingsDrawFormSectionTitle,
-        .draw_form_field_label = launcherSettingsDrawFormFieldLabel,
-        .draw_text_input = launcherSettingsDrawTextInput,
-        .draw_button = launcherSettingsDrawButton,
-        .draw_label = launcherSettingsDrawLabel,
-        .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
-        .draw_vertical_scrollbar = launcherSettingsDrawVerticalScrollbar,
+        .draw_form_section_title = root.launcherSettingsDrawFormSectionTitle,
+        .draw_form_field_label = root.launcherSettingsDrawFormFieldLabel,
+        .draw_text_input = root.launcherSettingsDrawTextInput,
+        .draw_button = root.launcherSettingsDrawButton,
+        .draw_label = root.launcherSettingsDrawLabel,
+        .draw_text_trimmed = root.launcherSettingsDrawTextTrimmed,
+        .draw_vertical_scrollbar = root.launcherSettingsDrawVerticalScrollbar,
     };
     const panel_rect = Rect{ .min = rect.min, .max = rect.max };
     var panel_state = LauncherSettingsPanel.State{
-        .focused_field = settingsFocusFieldToExternal(self.settings_panel.focused_field),
+        .focused_field = root.settingsFocusFieldToExternal(self.settings_panel.focused_field),
         .scroll_y = self.settings_panel.settings_scroll_y,
     };
     var model = self.launcherSettingsModel();
@@ -78,8 +79,8 @@ pub fn drawSettingsPanel(self: anytype, manager: anytype, rect: anytype) void {
         &panel_state,
         .launcher,
     );
-    const mapped_focus = settingsFocusFieldFromExternal(panel_state.focused_field);
-    if (mapped_focus != .none or isSettingsPanelFocusField(self.settings_panel.focused_field)) {
+    const mapped_focus = root.settingsFocusFieldFromExternal(panel_state.focused_field);
+    if (mapped_focus != .none or root.isSettingsPanelFocusField(self.settings_panel.focused_field)) {
         self.settings_panel.focused_field = mapped_focus;
     }
     self.settings_panel.settings_scroll_y = panel_state.scroll_y;
@@ -89,19 +90,20 @@ pub fn drawSettingsPanel(self: anytype, manager: anytype, rect: anytype) void {
 }
 
 pub fn drawWorkspaceSettingsPanel(self: anytype, rect: anytype) void {
+    const root = @import("../root.zig");
     const host = LauncherSettingsPanel.Host{
         .ctx = @ptrCast(self),
-        .draw_form_section_title = launcherSettingsDrawFormSectionTitle,
-        .draw_form_field_label = launcherSettingsDrawFormFieldLabel,
-        .draw_text_input = launcherSettingsDrawTextInput,
-        .draw_button = launcherSettingsDrawButton,
-        .draw_label = launcherSettingsDrawLabel,
-        .draw_text_trimmed = launcherSettingsDrawTextTrimmed,
-        .draw_vertical_scrollbar = launcherSettingsDrawVerticalScrollbar,
+        .draw_form_section_title = root.launcherSettingsDrawFormSectionTitle,
+        .draw_form_field_label = root.launcherSettingsDrawFormFieldLabel,
+        .draw_text_input = root.launcherSettingsDrawTextInput,
+        .draw_button = root.launcherSettingsDrawButton,
+        .draw_label = root.launcherSettingsDrawLabel,
+        .draw_text_trimmed = root.launcherSettingsDrawTextTrimmed,
+        .draw_vertical_scrollbar = root.launcherSettingsDrawVerticalScrollbar,
     };
     const panel_rect = Rect{ .min = rect.min, .max = rect.max };
     var panel_state = LauncherSettingsPanel.State{
-        .focused_field = settingsFocusFieldToExternal(self.settings_panel.focused_field),
+        .focused_field = root.settingsFocusFieldToExternal(self.settings_panel.focused_field),
         .scroll_y = self.settings_panel.settings_scroll_y,
     };
     var model = self.launcherSettingsModel();
@@ -135,8 +137,8 @@ pub fn drawWorkspaceSettingsPanel(self: anytype, rect: anytype) void {
         &panel_state,
         .workspace,
     );
-    const mapped_focus = settingsFocusFieldFromExternal(panel_state.focused_field);
-    if (mapped_focus != .none or isSettingsPanelFocusField(self.settings_panel.focused_field)) {
+    const mapped_focus = root.settingsFocusFieldFromExternal(panel_state.focused_field);
+    if (mapped_focus != .none or root.isSettingsPanelFocusField(self.settings_panel.focused_field)) {
         self.settings_panel.focused_field = mapped_focus;
     }
     self.settings_panel.settings_scroll_y = panel_state.scroll_y;

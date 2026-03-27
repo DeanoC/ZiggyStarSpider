@@ -25,7 +25,7 @@ const DEBUG_SYNTAX_COLOR_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 const PERF_SPARKLINE_MAX_COLUMNS: usize = 24;
 
 pub fn drawDebugPanel(self: anytype, manager: anytype, rect: anytype) void {
-    const DebugPanel = @import("../panels_bridge.zig").DebugPanel;
+    const DebugPanel = @import("ziggy-ui-panels").debug_panel;
     const host = DebugPanel.Host{
         .ctx = @ptrCast(self),
         .draw_label = @import("../root.zig").launcherSettingsDrawLabel,
@@ -136,7 +136,7 @@ pub fn drawDebugPerfCharts(
 }
 
 pub fn drawDebugEventStream(self: anytype, output_rect: anytype, view: anytype) void {
-    const DebugEventStreamPanel = @import("../panels_bridge.zig").DebugEventStreamPanel;
+    const DebugEventStreamPanel = @import("ziggy-ui-panels").debug_event_stream;
     const host = DebugEventStreamPanel.Host{
         .ctx = @ptrCast(self),
         .set_output_rect = @import("../root.zig").debugEventStreamSetOutputRect,
