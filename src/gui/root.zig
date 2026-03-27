@@ -70,7 +70,7 @@ const ConnectionState = enum {
 
 const UiStage = stage_machine.Stage;
 
-const IdeMenuDomain = enum {
+pub const IdeMenuDomain = enum {
     file,
     edit,
     view,
@@ -7452,323 +7452,11 @@ pub const App = struct {
     }
 
     fn drawPackageManagerModal(self: *App, fb_width: u32, fb_height: u32) void {
-        const layout = self.panelLayoutMetrics();
-        const pad = @max(layout.inset, 12.0 * self.ui_scale);
-        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
-        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
-
-        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
-
-        const modal_w = std.math.clamp(
-            screen_rect.width() * 0.72,
-            560.0 * self.ui_scale,
-            980.0 * self.ui_scale,
-        );
-        const modal_h = std.math.clamp(
-            screen_rect.height() * 0.78,
-            420.0 * self.ui_scale,
-            760.0 * self.ui_scale,
-        );
-        const modal_rect = Rect.fromXYWH(
-            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
-            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
-            modal_w,
-            modal_h,
-        );
-
-        self.drawSurfacePanel(modal_rect);
-        self.drawRect(modal_rect, self.theme.colors.border);
-
-        const left_w = @max(220.0 * self.ui_scale, modal_rect.width() * 0.38);
-        const right_w = modal_rect.width() - left_w - pad * 3.0;
-        const left_rect = Rect.fromXYWH(modal_rect.min[0] + pad, modal_rect.min[1] + pad, left_w, modal_rect.height() - pad * 2.0);
-        const right_rect = Rect.fromXYWH(left_rect.max[0] + pad, modal_rect.min[1] + pad, right_w, modal_rect.height() - pad * 2.0);
-
-        self.drawLabel(left_rect.min[0], left_rect.min[1], "Packages", self.theme.colors.text_primary);
-        self.drawLabel(right_rect.min[0], right_rect.min[1], "Package Manager", self.theme.colors.text_primary);
-
-        const left_y = left_rect.min[1] + layout.line_height + layout.row_gap * 0.6;
-        const list_h = @max(120.0 * self.ui_scale, left_rect.height() - row_h - layout.row_gap - (left_y - left_rect.min[1]));
-        const list_rect = Rect.fromXYWH(left_rect.min[0], left_y, left_rect.width(), list_h);
-        self.drawSurfacePanel(list_rect);
-        self.drawRect(list_rect, self.theme.colors.border);
-
-        var row_y = list_rect.min[1] + layout.inner_inset;
-        const row_w = list_rect.width() - layout.inner_inset * 2.0;
-        for (self.package_manager_packages.items, 0..) |entry, idx| {
-            if (row_y + row_h > list_rect.max[1] - layout.inner_inset) break;
-            const label = std.fmt.allocPrint(
-                self.allocator,
-                "{s} [{s}]",
-                .{ entry.package_id, if (entry.enabled) "enabled" else "disabled" },
-            ) catch null;
-            defer if (label) |value| self.allocator.free(value);
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(list_rect.min[0] + layout.inner_inset, row_y, row_w, row_h),
-                label orelse entry.package_id,
-                .{ .variant = if (idx == self.package_manager_selected_index) .primary else .secondary },
-            )) {
-                self.package_manager_selected_index = idx;
-                self.clearPackageManagerModalNotice();
-                self.clearPackageManagerModalError();
-            }
-            row_y += row_h + layout.row_gap * 0.35;
-        }
-
-        const refresh_rect = Rect.fromXYWH(
-            left_rect.min[0],
-            left_rect.max[1] - row_h,
-            left_rect.width(),
-            row_h,
-        );
-        if (self.drawButtonWidget(
-            refresh_rect,
-            "Refresh Packages",
-            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-        )) {
-            self.clearPackageManagerModalNotice();
-            self.requestPackageManagerRefresh(true);
-        }
-
-        var right_y = right_rect.min[1] + layout.line_height + layout.row_gap * 0.6;
-        if (self.package_manager_modal_notice) |message| {
-            self.drawTextTrimmed(right_rect.min[0], right_y, right_rect.width(), message, self.theme.colors.text_secondary);
-            right_y += layout.line_height + layout.row_gap * 0.45;
-        }
-        if (self.package_manager_modal_error) |message| {
-            self.drawTextTrimmed(right_rect.min[0], right_y, right_rect.width(), message, zcolors.rgba(220, 80, 80, 255));
-            right_y += layout.line_height + layout.row_gap * 0.45;
-        }
-
-        const selected_entry = self.selectedPackageManagerEntry();
-        const detail_rect = Rect.fromXYWH(
-            right_rect.min[0],
-            right_y,
-            right_rect.width(),
-            @max(150.0 * self.ui_scale, right_rect.height() * 0.36),
-        );
-        self.drawSurfacePanel(detail_rect);
-        self.drawRect(detail_rect, self.theme.colors.border);
-
-        if (selected_entry) |entry| {
-            const header = std.fmt.allocPrint(
-                self.allocator,
-                "{s} ({s}) v{s}",
-                .{ entry.package_id, entry.kind, entry.version },
-            ) catch null;
-            const runtime_line = std.fmt.allocPrint(
-                self.allocator,
-                "Runtime: {s} | Enabled: {s}",
-                .{ entry.runtime_kind, if (entry.enabled) "true" else "false" },
-            ) catch null;
-            defer if (header) |value| self.allocator.free(value);
-            defer if (runtime_line) |value| self.allocator.free(value);
-            self.drawTextTrimmed(
-                detail_rect.min[0] + layout.inner_inset,
-                detail_rect.min[1] + layout.inner_inset * 0.7,
-                detail_rect.width() - layout.inner_inset * 2.0,
-                header orelse entry.package_id,
-                self.theme.colors.text_primary,
-            );
-            self.drawTextTrimmed(
-                detail_rect.min[0] + layout.inner_inset,
-                detail_rect.min[1] + layout.inner_inset * 0.7 + layout.line_height,
-                detail_rect.width() - layout.inner_inset * 2.0,
-                runtime_line orelse "",
-                self.theme.colors.text_secondary,
-            );
-            if (entry.help_md) |help_md| {
-                self.drawTextTrimmed(
-                    detail_rect.min[0] + layout.inner_inset,
-                    detail_rect.min[1] + layout.inner_inset * 0.7 + layout.line_height * 2.0,
-                    detail_rect.width() - layout.inner_inset * 2.0,
-                    help_md,
-                    self.theme.colors.text_secondary,
-                );
-            }
-        } else {
-            self.drawTextTrimmed(
-                detail_rect.min[0] + layout.inner_inset,
-                detail_rect.min[1] + layout.inner_inset * 0.7,
-                detail_rect.width() - layout.inner_inset * 2.0,
-                "No packages loaded yet. Refresh the list to inspect package lifecycle state.",
-                self.theme.colors.text_secondary,
-            );
-        }
-
-        right_y = detail_rect.max[1] + layout.row_gap * 0.7;
-        const action_w = (right_rect.width() - pad * 2.0) / 3.0;
-        const selected_disabled = selected_entry == null or self.connection_state != .connected;
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(right_rect.min[0], right_y, action_w, row_h),
-            if (selected_entry != null and !selected_entry.?.enabled) "Enable" else "Disable",
-            .{ .variant = .secondary, .disabled = selected_disabled },
-        )) {
-            if (selected_entry) |entry| {
-                const payload = self.buildPackageManagerIdPayload(entry.package_id) catch null;
-                defer if (payload) |value| self.allocator.free(value);
-                if (payload) |value| {
-                    const control_name = if (entry.enabled) "disable.json" else "enable.json";
-                    const notice = if (entry.enabled) "Package disabled." else "Package enabled.";
-                    self.runPackageManagerOperation(control_name, value, notice) catch |err| {
-                        if (err != error.RemoteError) {
-                            const msg = self.formatControlOpError("Package update failed", err);
-                            if (msg) |text| {
-                                defer self.allocator.free(text);
-                                self.setPackageManagerModalError(text);
-                            }
-                        }
-                    };
-                }
-            }
-        }
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(right_rect.min[0] + action_w + pad, right_y, action_w, row_h),
-            "Remove",
-            .{ .variant = .secondary, .disabled = selected_disabled },
-        )) {
-            if (selected_entry) |entry| {
-                const payload = self.buildPackageManagerIdPayload(entry.package_id) catch null;
-                defer if (payload) |value| self.allocator.free(value);
-                if (payload) |value| {
-                    self.runPackageManagerOperation("remove.json", value, "Package removed.") catch |err| {
-                        if (err != error.RemoteError) {
-                            const msg = self.formatControlOpError("Package remove failed", err);
-                            if (msg) |text| {
-                                defer self.allocator.free(text);
-                                self.setPackageManagerModalError(text);
-                            }
-                        }
-                    };
-                }
-            }
-        }
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(right_rect.min[0] + (action_w + pad) * 2.0, right_y, action_w, row_h),
-            "Close",
-            .{ .variant = .primary },
-        )) {
-            self.closePackageManagerModal();
-            return;
-        }
-
-        right_y += row_h + layout.row_gap * 0.75;
-        self.drawLabel(right_rect.min[0], right_y, "Install Package JSON", self.theme.colors.text_secondary);
-        right_y += layout.line_height + layout.row_gap * 0.25;
-        const payload_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(right_rect.min[0], right_y, right_rect.width(), layout.input_height),
-            self.package_manager_install_payload.items,
-            self.settings_panel.focused_field == .package_manager_install_payload,
-            .{ .placeholder = "{\"package\":{...}}" },
-        );
-        if (payload_focused) self.settings_panel.focused_field = .package_manager_install_payload;
-        right_y += layout.input_height + layout.row_gap * 0.55;
-
-        const install_payload = std.mem.trim(u8, self.package_manager_install_payload.items, " \t\r\n");
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(right_rect.min[0], right_y, right_rect.width(), row_h),
-            "Install From JSON",
-            .{ .variant = .primary, .disabled = self.connection_state != .connected or install_payload.len == 0 },
-        )) {
-            self.runPackageManagerOperation("install.json", install_payload, "Package installed.") catch |err| {
-                if (err != error.RemoteError) {
-                    const msg = self.formatControlOpError("Package install failed", err);
-                    if (msg) |text| {
-                        defer self.allocator.free(text);
-                        self.setPackageManagerModalError(text);
-                    }
-                }
-            };
-        }
-
-        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
-            self.closePackageManagerModal();
-        }
+        workspace_host_mod.drawPackageManagerModal(self, fb_width, fb_height);
     }
 
     pub fn drawAboutModal(self: *App, fb_width: u32, fb_height: u32) void {
-        const layout = self.panelLayoutMetrics();
-        const pad = @max(layout.inset, 12.0 * self.ui_scale);
-        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
-        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
-
-        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
-
-        const modal_w = std.math.clamp(
-            screen_rect.width() * 0.42,
-            420.0 * self.ui_scale,
-            720.0 * self.ui_scale,
-        );
-        const modal_h = std.math.clamp(
-            screen_rect.height() * 0.34,
-            220.0 * self.ui_scale,
-            360.0 * self.ui_scale,
-        );
-        const modal_rect = Rect.fromXYWH(
-            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
-            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
-            modal_w,
-            modal_h,
-        );
-
-        self.drawSurfacePanel(modal_rect);
-        self.drawRect(modal_rect, self.theme.colors.border);
-
-        var y = modal_rect.min[1] + pad;
-        const content_w = modal_rect.width() - pad * 2.0;
-        self.drawLabel(modal_rect.min[0] + pad, y, "About SpiderApp", self.theme.colors.text_primary);
-        y += layout.line_height + layout.row_gap * 0.4;
-        self.drawTextTrimmed(
-            modal_rect.min[0] + pad,
-            y,
-            content_w,
-            "Build identity for diagnostics and demo verification.",
-            self.theme.colors.text_secondary,
-        );
-        y += layout.line_height + layout.row_gap * 0.7;
-        self.drawLabel(modal_rect.min[0] + pad, y, "Version", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.25;
-        const focused = self.drawTextInputWidget(
-            Rect.fromXYWH(modal_rect.min[0] + pad, y, content_w, layout.input_height),
-            self.about_modal_build_label.items,
-            self.settings_panel.focused_field == .about_modal_build_label,
-            .{ .read_only = true },
-        );
-        if (focused) self.settings_panel.focused_field = .about_modal_build_label;
-        y += layout.input_height + layout.row_gap * 0.55;
-
-        if (self.about_modal_notice) |notice| {
-            self.drawTextTrimmed(
-                modal_rect.min[0] + pad,
-                y,
-                content_w,
-                notice,
-                self.theme.colors.text_secondary,
-            );
-        }
-
-        const button_w = (content_w - pad) * 0.5;
-        const button_y = modal_rect.max[1] - pad - row_h;
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(modal_rect.min[0] + pad, button_y, button_w, row_h),
-            "Copy Version",
-            .{ .variant = .secondary },
-        )) {
-            self.copyTextToClipboard(self.about_modal_build_label.items) catch {};
-            self.setAboutModalNotice("Copied build string to clipboard.");
-        }
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(modal_rect.min[0] + pad + button_w + pad, button_y, button_w, row_h),
-            "Close",
-            .{ .variant = .primary },
-        )) {
-            self.closeAboutModal();
-            return;
-        }
-
-        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
-            self.closeAboutModal();
-        }
+        workspace_host_mod.drawAboutModal(self, fb_width, fb_height);
     }
 
     fn drawWorkspaceUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
@@ -9418,7 +9106,7 @@ pub const App = struct {
         };
     }
 
-    fn closeWorkspaceWizard(self: *App) void {
+    pub fn closeWorkspaceWizard(self: *App) void {
         self.ws.workspace_wizard_open = false;
         for (self.ws.workspace_wizard_mounts.items) |*m| m.deinit(self.allocator);
         self.ws.workspace_wizard_mounts.clearAndFree(self.allocator);
@@ -9430,7 +9118,7 @@ pub const App = struct {
         self.ws.workspace_wizard_selected_node_index = null;
     }
 
-    fn wizardAddCurrentMount(self: *App) void {
+    pub fn wizardAddCurrentMount(self: *App) void {
         const path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t\r\n");
         const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t\r\n");
         if (path.len == 0 or node_id.len == 0) return;
@@ -9448,7 +9136,7 @@ pub const App = struct {
         self.settings_panel.project_mount_node_id.clearRetainingCapacity();
     }
 
-    fn wizardAddCurrentBind(self: *App) void {
+    pub fn wizardAddCurrentBind(self: *App) void {
         const bind_path = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t\r\n");
         const target_path = std.mem.trim(u8, self.settings_panel.workspace_bind_target_path.items, " \t\r\n");
         if (bind_path.len == 0 or target_path.len == 0) return;
@@ -9466,7 +9154,7 @@ pub const App = struct {
         self.settings_panel.workspace_bind_target_path.clearRetainingCapacity();
     }
 
-    fn wizardExecuteCreate(self: *App) void {
+    pub fn wizardExecuteCreate(self: *App) void {
         // Delegate to existing createWorkspaceFromPanel which reads settings_panel fields.
         // Mounts and binds are handled separately after creation via the workspace panel.
         self.createWorkspaceFromPanel() catch |err| {
@@ -9485,373 +9173,27 @@ pub const App = struct {
     }
 
     pub fn drawWorkspaceWizardModal(self: *App, fb_width: u32, fb_height: u32) void {
-        const layout = self.panelLayoutMetrics();
-        const pad = @max(layout.inset, 12.0 * self.ui_scale);
-        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
-
-        const modal_w = @min(740.0 * self.ui_scale, @as(f32, @floatFromInt(fb_width)) - pad * 4.0);
-        const modal_h = @min(520.0 * self.ui_scale, @as(f32, @floatFromInt(fb_height)) - pad * 4.0);
-        const modal_x = (@as(f32, @floatFromInt(fb_width)) - modal_w) * 0.5;
-        const modal_y = (@as(f32, @floatFromInt(fb_height)) - modal_h) * 0.5;
-        const modal_rect = Rect.fromXYWH(modal_x, modal_y, modal_w, modal_h);
-
-        // Dim backdrop
-        self.drawFilledRect(
-            Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height)),
-            zcolors.withAlpha(self.theme.colors.background, 0.72),
-        );
-        self.drawSurfacePanel(modal_rect);
-        self.drawRect(modal_rect, self.theme.colors.border);
-
-        // Title bar
-        const step_names = [_][]const u8{ "Template", "Name & Vision", "Mounts", "Binds", "Review" };
-        const current_step_name = if (self.ws.workspace_wizard_step < step_names.len) step_names[self.ws.workspace_wizard_step] else "?";
-        const title_str = std.fmt.allocPrint(
-            self.allocator,
-            "Workspace Wizard — Step {d}/5: {s}",
-            .{ self.ws.workspace_wizard_step + 1, current_step_name },
-        ) catch null;
-        defer if (title_str) |v| self.allocator.free(v);
-        var y = modal_rect.min[1] + pad;
-        self.drawText(
-            modal_rect.min[0] + pad,
-            y,
-            title_str orelse "Workspace Wizard",
-            self.theme.colors.text_primary,
-        );
-        y += layout.line_height + layout.row_gap * 0.5;
-
-        // Step indicator dots
-        const dot_r = 5.0 * self.ui_scale;
-        const dot_spacing = 18.0 * self.ui_scale;
-        var dot_x = modal_rect.min[0] + pad;
-        for (0..5) |i| {
-            const dot_rect = Rect.fromXYWH(dot_x, y, dot_r * 2.0, dot_r * 2.0);
-            const dot_color = if (i == self.ws.workspace_wizard_step)
-                self.theme.colors.primary
-            else if (i < self.ws.workspace_wizard_step)
-                zcolors.blend(self.theme.colors.primary, self.theme.colors.background, 0.5)
-            else
-                self.theme.colors.border;
-            self.drawFilledRect(dot_rect, dot_color);
-            dot_x += dot_r * 2.0 + dot_spacing;
-        }
-        y += dot_r * 2.0 + layout.row_gap * 0.8;
-
-        // Divider
-        self.drawFilledRect(
-            Rect.fromXYWH(modal_rect.min[0] + pad, y, modal_w - pad * 2.0, 1.0),
-            self.theme.colors.border,
-        );
-        y += 1.0 + layout.row_gap * 0.5;
-
-        // Error message
-        if (self.ws.workspace_wizard_error) |msg| {
-            self.drawTextTrimmed(
-                modal_rect.min[0] + pad,
-                y,
-                modal_w - pad * 2.0,
-                msg,
-                zcolors.rgba(220, 80, 80, 255),
-            );
-            y += layout.line_height + layout.row_gap * 0.5;
-        }
-
-        // Content area (above action buttons)
-        const action_h = row_h + pad * 2.0;
-        const content_rect = Rect.fromXYWH(
-            modal_rect.min[0] + pad,
-            y,
-            modal_w - pad * 2.0,
-            modal_rect.max[1] - y - action_h,
-        );
-
-        switch (self.ws.workspace_wizard_step) {
-            0 => self.drawWizardStepTemplate(content_rect, layout, pad),
-            1 => self.drawWizardStepNameVision(content_rect, layout, pad),
-            2 => self.drawWizardStepMounts(content_rect, layout, pad),
-            3 => self.drawWizardStepBinds(content_rect, layout, pad),
-            4 => self.drawWizardStepReview(content_rect, layout, pad),
-            else => {},
-        }
-
-        // Action buttons
-        const btn_area_y = modal_rect.max[1] - pad - row_h;
-        const btn_w = (modal_w - pad * 3.0) * 0.5;
-
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(modal_rect.min[0] + pad, btn_area_y, btn_w, row_h),
-            if (self.ws.workspace_wizard_step == 0) "Cancel" else "Back",
-            .{ .variant = .secondary },
-        )) {
-            if (self.ws.workspace_wizard_step == 0) {
-                self.closeWorkspaceWizard();
-            } else {
-                self.ws.workspace_wizard_step -= 1;
-                if (self.ws.workspace_wizard_error) |v| self.allocator.free(v);
-                self.ws.workspace_wizard_error = null;
-            }
-            return;
-        }
-
-        const is_last_step = self.ws.workspace_wizard_step == 4;
-        const next_label: []const u8 = if (is_last_step) "Create Workspace" else "Next";
-        const next_disabled = switch (self.ws.workspace_wizard_step) {
-            0 => self.ws.launcher_create_templates.items.len == 0,
-            1 => std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n").len == 0,
-            else => false,
-        };
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(modal_rect.min[0] + pad * 2.0 + btn_w, btn_area_y, btn_w, row_h),
-            next_label,
-            .{ .variant = .primary, .disabled = next_disabled or self.connection_state != .connected },
-        )) {
-            if (is_last_step) {
-                self.wizardExecuteCreate();
-            } else {
-                self.ws.workspace_wizard_step += 1;
-                if (self.ws.workspace_wizard_error) |v| self.allocator.free(v);
-                self.ws.workspace_wizard_error = null;
-                // Focus appropriate field when entering step
-                self.settings_panel.focused_field = switch (self.ws.workspace_wizard_step) {
-                    1 => .project_create_name,
-                    2 => .project_mount_path,
-                    3 => .workspace_bind_path,
-                    else => .none,
-                };
-            }
-        }
-
-        // Close on outside click
-        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
-            self.closeWorkspaceWizard();
-        }
+        workspace_host_mod.drawWorkspaceWizardModal(self, fb_width, fb_height);
     }
 
     fn drawWizardStepTemplate(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
-        const template_count = self.ws.launcher_create_templates.items.len;
-        if (template_count == 0) {
-            self.drawTextTrimmed(
-                rect.min[0], rect.min[1], rect.width(),
-                "No templates available. Ensure you are connected.",
-                self.theme.colors.text_secondary,
-            );
-            return;
-        }
-        const row_h = @max(layout.button_height, 30.0 * self.ui_scale);
-        const row_gap = layout.row_gap * 0.45;
-        var row_y = rect.min[1];
-        self.drawText(rect.min[0], row_y, "Select a workspace template:", self.theme.colors.text_secondary);
-        row_y += layout.line_height + layout.row_gap * 0.4;
-        for (self.ws.launcher_create_templates.items, 0..) |template, idx| {
-            if (row_y + row_h > rect.max[1]) break;
-            const is_selected = idx == self.ws.launcher_create_selected_template_index;
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(rect.min[0], row_y, rect.width(), row_h),
-                template.id,
-                .{ .variant = if (is_selected) .primary else .secondary },
-            )) {
-                self.ws.launcher_create_selected_template_index = idx;
-                self.syncLauncherCreateSelectedTemplateToSettings() catch {};
-            }
-            row_y += row_h + row_gap;
-        }
-        // Show description of selected template
-        if (self.selectedLauncherCreateWorkspaceTemplate()) |tmpl| {
-            if (tmpl.description.len > 0) {
-                const desc_y = @min(row_y + layout.row_gap, rect.max[1] - layout.line_height * 2.0);
-                self.drawTextTrimmed(rect.min[0], desc_y, rect.width(), tmpl.description, self.theme.colors.text_secondary);
-            }
-        }
-        _ = pad;
+        workspace_host_mod.drawWizardStepTemplate(self, rect, layout, pad);
     }
 
     fn drawWizardStepNameVision(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
-        var y = rect.min[1];
-        self.drawLabel(rect.min[0], y, "Workspace Name", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.25;
-        const name_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
-            self.settings_panel.project_create_name.items,
-            self.settings_panel.focused_field == .project_create_name,
-            .{ .placeholder = "my-workspace" },
-        );
-        if (name_focused) self.settings_panel.focused_field = .project_create_name;
-        y += layout.input_height + layout.row_gap * 0.8;
-
-        self.drawLabel(rect.min[0], y, "Vision (optional)", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.25;
-        const vision_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
-            self.settings_panel.project_create_vision.items,
-            self.settings_panel.focused_field == .project_create_vision,
-            .{ .placeholder = "Describe the workspace goal..." },
-        );
-        if (vision_focused) self.settings_panel.focused_field = .project_create_vision;
-        _ = pad;
+        workspace_host_mod.drawWizardStepNameVision(self, rect, layout, pad);
     }
 
     fn drawWizardStepMounts(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
-        var y = rect.min[1];
-        // Existing mounts
-        self.drawText(rect.min[0], y, "Mounts (optional — press Add to add each)", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.4;
-        const row_h = @max(layout.button_height, 26.0 * self.ui_scale);
-        for (self.ws.workspace_wizard_mounts.items, 0..) |m, idx| {
-            if (y + row_h > rect.max[1] - layout.input_height * 3.0 - row_h * 1.5) break;
-            const line = std.fmt.allocPrint(self.allocator, "{s}  →  {s}", .{ m.path, m.node_id }) catch null;
-            defer if (line) |v| self.allocator.free(v);
-            self.drawText(rect.min[0] + pad * 0.5, y + (row_h - layout.line_height) * 0.5, line orelse m.path, self.theme.colors.text_primary);
-            // Remove button
-            const rm_w = @max(60.0 * self.ui_scale, self.measureText("Remove") + pad);
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(rect.max[0] - rm_w, y, rm_w, row_h),
-                "Remove",
-                .{ .variant = .secondary },
-            )) {
-                var entry = self.ws.workspace_wizard_mounts.orderedRemove(idx);
-                entry.deinit(self.allocator);
-                return;
-            }
-            y += row_h + layout.row_gap * 0.3;
-        }
-        // Add form
-        const form_top = rect.max[1] - layout.input_height * 2.0 - layout.row_gap * 1.0 - row_h;
-        y = @max(y, form_top);
-        self.drawLabel(rect.min[0], y, "Mount Path", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.2;
-        const mp_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
-            self.settings_panel.project_mount_path.items,
-            self.settings_panel.focused_field == .project_mount_path,
-            .{ .placeholder = "/workspace/path" },
-        );
-        if (mp_focused) self.settings_panel.focused_field = .project_mount_path;
-        y += layout.input_height + layout.row_gap * 0.4;
-        self.drawLabel(rect.min[0], y, "Node ID", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.2;
-        const ni_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
-            self.settings_panel.project_mount_node_id.items,
-            self.settings_panel.focused_field == .project_mount_node_id,
-            .{ .placeholder = "node-id" },
-        );
-        if (ni_focused) self.settings_panel.focused_field = .project_mount_node_id;
-        y += layout.input_height + layout.row_gap * 0.4;
-        const add_w = @max(80.0 * self.ui_scale, self.measureText("Add Mount") + pad);
-        const can_add = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t\r\n").len > 0 and
-            std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t\r\n").len > 0;
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(rect.min[0], y, add_w, row_h),
-            "Add Mount",
-            .{ .variant = .secondary, .disabled = !can_add },
-        )) {
-            self.wizardAddCurrentMount();
-        }
+        workspace_host_mod.drawWizardStepMounts(self, rect, layout, pad);
     }
 
     fn drawWizardStepBinds(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
-        var y = rect.min[1];
-        self.drawText(rect.min[0], y, "Binds (optional — press Add to add each)", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.4;
-        const row_h = @max(layout.button_height, 26.0 * self.ui_scale);
-        for (self.ws.workspace_wizard_binds.items, 0..) |b, idx| {
-            if (y + row_h > rect.max[1] - layout.input_height * 3.0 - row_h * 1.5) break;
-            const line = std.fmt.allocPrint(self.allocator, "{s}  →  {s}", .{ b.bind_path, b.target_path }) catch null;
-            defer if (line) |v| self.allocator.free(v);
-            self.drawText(rect.min[0] + pad * 0.5, y + (row_h - layout.line_height) * 0.5, line orelse b.bind_path, self.theme.colors.text_primary);
-            const rm_w = @max(60.0 * self.ui_scale, self.measureText("Remove") + pad);
-            if (self.drawButtonWidget(
-                Rect.fromXYWH(rect.max[0] - rm_w, y, rm_w, row_h),
-                "Remove",
-                .{ .variant = .secondary },
-            )) {
-                var entry = self.ws.workspace_wizard_binds.orderedRemove(idx);
-                entry.deinit(self.allocator);
-                return;
-            }
-            y += row_h + layout.row_gap * 0.3;
-        }
-        const form_top = rect.max[1] - layout.input_height * 2.0 - layout.row_gap * 1.0 - row_h;
-        y = @max(y, form_top);
-        self.drawLabel(rect.min[0], y, "Bind Path", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.2;
-        const bp_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
-            self.settings_panel.workspace_bind_path.items,
-            self.settings_panel.focused_field == .workspace_bind_path,
-            .{ .placeholder = "/bind/path" },
-        );
-        if (bp_focused) self.settings_panel.focused_field = .workspace_bind_path;
-        y += layout.input_height + layout.row_gap * 0.4;
-        self.drawLabel(rect.min[0], y, "Target Path", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.2;
-        const tp_focused = self.drawTextInputWidget(
-            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
-            self.settings_panel.workspace_bind_target_path.items,
-            self.settings_panel.focused_field == .workspace_bind_target_path,
-            .{ .placeholder = "/target/path" },
-        );
-        if (tp_focused) self.settings_panel.focused_field = .workspace_bind_target_path;
-        y += layout.input_height + layout.row_gap * 0.4;
-        const add_w = @max(80.0 * self.ui_scale, self.measureText("Add Bind") + pad);
-        const can_add = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t\r\n").len > 0 and
-            std.mem.trim(u8, self.settings_panel.workspace_bind_target_path.items, " \t\r\n").len > 0;
-        if (self.drawButtonWidget(
-            Rect.fromXYWH(rect.min[0], y, add_w, row_h),
-            "Add Bind",
-            .{ .variant = .secondary, .disabled = !can_add },
-        )) {
-            self.wizardAddCurrentBind();
-        }
+        workspace_host_mod.drawWizardStepBinds(self, rect, layout, pad);
     }
 
     fn drawWizardStepReview(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
-        var y = rect.min[1];
-        self.drawText(rect.min[0], y, "Review your workspace configuration:", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.6;
-
-        const label_w = 120.0 * self.ui_scale;
-        // Template
-        const tmpl_id = if (self.selectedLauncherCreateWorkspaceTemplate()) |t| t.id else "(none)";
-        self.drawTextTrimmed(rect.min[0], y, label_w, "Template:", self.theme.colors.text_secondary);
-        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, tmpl_id, self.theme.colors.text_primary);
-        y += layout.line_height + layout.row_gap * 0.35;
-        // Name
-        const name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
-        self.drawTextTrimmed(rect.min[0], y, label_w, "Name:", self.theme.colors.text_secondary);
-        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, if (name.len > 0) name else "(none)", self.theme.colors.text_primary);
-        y += layout.line_height + layout.row_gap * 0.35;
-        // Vision
-        const vision = std.mem.trim(u8, self.settings_panel.project_create_vision.items, " \t\r\n");
-        self.drawTextTrimmed(rect.min[0], y, label_w, "Vision:", self.theme.colors.text_secondary);
-        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, if (vision.len > 0) vision else "(none)", self.theme.colors.text_primary);
-        y += layout.line_height + layout.row_gap * 0.6;
-        // Mounts
-        const mount_count_str = std.fmt.allocPrint(self.allocator, "Mounts ({d}):", .{self.ws.workspace_wizard_mounts.items.len}) catch null;
-        defer if (mount_count_str) |v| self.allocator.free(v);
-        self.drawTextTrimmed(rect.min[0], y, label_w, mount_count_str orelse "Mounts:", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.2;
-        for (self.ws.workspace_wizard_mounts.items) |m| {
-            if (y + layout.line_height > rect.max[1] - layout.line_height * 3.0) break;
-            const line = std.fmt.allocPrint(self.allocator, "  {s}  →  {s}", .{ m.path, m.node_id }) catch null;
-            defer if (line) |v| self.allocator.free(v);
-            self.drawTextTrimmed(rect.min[0] + pad * 0.5, y, rect.width() - pad * 0.5, line orelse m.path, self.theme.colors.text_primary);
-            y += layout.line_height + layout.row_gap * 0.2;
-        }
-        y += layout.row_gap * 0.4;
-        // Binds
-        const bind_count_str = std.fmt.allocPrint(self.allocator, "Binds ({d}):", .{self.ws.workspace_wizard_binds.items.len}) catch null;
-        defer if (bind_count_str) |v| self.allocator.free(v);
-        self.drawTextTrimmed(rect.min[0], y, label_w, bind_count_str orelse "Binds:", self.theme.colors.text_secondary);
-        y += layout.line_height + layout.row_gap * 0.2;
-        for (self.ws.workspace_wizard_binds.items) |b| {
-            if (y + layout.line_height > rect.max[1]) break;
-            const line = std.fmt.allocPrint(self.allocator, "  {s}  →  {s}", .{ b.bind_path, b.target_path }) catch null;
-            defer if (line) |v| self.allocator.free(v);
-            self.drawTextTrimmed(rect.min[0] + pad * 0.5, y, rect.width() - pad * 0.5, line orelse b.bind_path, self.theme.colors.text_primary);
-            y += layout.line_height + layout.row_gap * 0.2;
-        }
+        workspace_host_mod.drawWizardStepReview(self, rect, layout, pad);
     }
 
     fn ensureMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
@@ -13884,7 +13226,7 @@ pub const App = struct {
         };
     }
 
-    fn setAboutModalNotice(self: *App, message: []const u8) void {
+    pub fn setAboutModalNotice(self: *App, message: []const u8) void {
         if (self.about_modal_notice) |existing| self.allocator.free(existing);
         self.about_modal_notice = self.allocator.dupe(u8, message) catch null;
     }
@@ -13925,7 +13267,7 @@ pub const App = struct {
         self.clearAboutModalNotice();
     }
 
-    fn closeAboutModal(self: *App) void {
+    pub fn closeAboutModal(self: *App) void {
         self.about_modal_open = false;
         self.clearAboutModalNotice();
         if (self.settings_panel.focused_field == .about_modal_build_label) {
