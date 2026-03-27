@@ -181,7 +181,7 @@ pub fn drawDebugEventStream(self: anytype, output_rect: anytype, view: anytype) 
     );
 }
 
-fn makeDebugFoldKey(event_id: u64, line_index: usize) @import("../root.zig").DebugFoldKey {
+pub fn makeDebugFoldKey(event_id: u64, line_index: usize) @import("../root.zig").DebugFoldKey {
     return .{
         .event_id = event_id,
         .line_index = @intCast(line_index),
@@ -275,7 +275,7 @@ pub fn ensureDebugPayloadWrapRows(self: anytype, output_min_x: f32, content_max_
     entry.cached_visible_rows_valid = false;
 }
 
-fn payloadLineRowsFromCache(entry: anytype, line_index: usize) usize {
+pub fn payloadLineRowsFromCache(entry: anytype, line_index: usize) usize {
     if (line_index >= entry.payload_wrap_rows.items.len) return 1;
     const rows = @as(usize, @intCast(entry.payload_wrap_rows.items[line_index]));
     return if (rows == 0) 1 else rows;
@@ -536,7 +536,7 @@ pub fn drawJsonTokenWrapped(
     }
 }
 
-fn isJsonDelimiter(ch: u8) bool {
+pub fn isJsonDelimiter(ch: u8) bool {
     return ch == ' ' or ch == '\t' or ch == ',' or ch == ':' or ch == ']' or ch == '}' or ch == '[' or ch == '{';
 }
 
