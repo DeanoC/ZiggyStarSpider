@@ -68,7 +68,7 @@ const ConnectionState = enum {
     error_state,
 };
 
-const UiStage = stage_machine.Stage;
+pub const UiStage = stage_machine.Stage;
 
 pub const IdeMenuDomain = enum {
     file,
@@ -148,7 +148,7 @@ const TerminalOutputPanel = zui_panels.terminal_output_panel;
 
 const PanelLayoutMetrics = form_layout.Metrics;
 
-const DockTabMetrics = struct {
+pub const DockTabMetrics = struct {
     pad: f32,
     height: f32,
     min_width: f32,
@@ -489,7 +489,7 @@ fn normalizeWorkspaceToken(workspace_token: ?[]const u8) ?[]const u8 {
     return trimmed;
 }
 
-fn platformSupportsMultiWindow() bool {
+pub fn platformSupportsMultiWindow() bool {
     return storage.supportsMultiWindow();
 }
 
@@ -2251,7 +2251,7 @@ pub const App = struct {
         return ws;
     }
 
-    fn spawnUiWindow(self: *App) !void {
+    pub fn spawnUiWindow(self: *App) !void {
         if (!platformSupportsMultiWindow()) return error.UnsupportedPlatform;
         const width: c_int = 960;
         const height: c_int = 720;
@@ -7469,7 +7469,7 @@ pub const App = struct {
         return @max(layout.button_height + layout.inner_inset * 1.2, 30.0 * self.ui_scale);
     }
 
-    fn ideMenuDomainLabel(domain: IdeMenuDomain) []const u8 {
+    pub fn ideMenuDomainLabel(domain: IdeMenuDomain) []const u8 {
         return switch (domain) {
             .file => "File",
             .edit => "Edit",
@@ -7481,7 +7481,7 @@ pub const App = struct {
         };
     }
 
-    fn ideMenuRowCount(domain: IdeMenuDomain, stage: UiStage) usize {
+    pub fn ideMenuRowCount(domain: IdeMenuDomain, stage: UiStage) usize {
         return switch (domain) {
             .file => if (stage == .launcher) 1 else 2,
             .edit => 2,
@@ -7494,261 +7494,7 @@ pub const App = struct {
     }
 
     pub fn drawWindowMenuBar(self: *App, ui_window: *UiWindow, fb_width: u32) f32 {
-        if (storage.isAndroid()) {
-            return 0.0;
-        }
-        const layout = self.panelLayoutMetrics();
-        const bar_h = self.windowMenuBarHeight();
-        const bar_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), bar_h);
-        const shell = self.sharedStyleSheet().shell;
-        const surfaces = self.sharedStyleSheet().surfaces;
-        self.drawPaintRect(
-            bar_rect,
-            shell.menu_bar_fill orelse surfaces.menu_bar orelse Paint{ .solid = self.theme.colors.background },
-        );
-        self.drawRect(bar_rect, self.theme.colors.border);
-
-        const domains: []const IdeMenuDomain = if (self.ui_stage == .launcher)
-            &[_]IdeMenuDomain{ .file, .help }
-        else
-            &[_]IdeMenuDomain{ .file, .edit, .view, .project, .tools, .window, .help };
-
-        const button_y = bar_rect.min[1] + @max(0.0, (bar_h - layout.button_height) * 0.5);
-        var x = layout.inset;
-        var selected_button_rect: ?Rect = null;
-        var dropdown_rect: ?Rect = null;
-
-        for (domains) |domain| {
-            const label = ideMenuDomainLabel(domain);
-            const button_w = @max(86.0 * self.ui_scale, self.measureText(label) + layout.inner_inset * 2.0);
-            const button_rect = Rect.fromXYWH(x, button_y, button_w, layout.button_height);
-            const is_open = self.ide_menu_open != null and self.ide_menu_open.? == domain;
-            if (self.drawButtonWidget(
-                button_rect,
-                label,
-                .{ .variant = if (is_open) .primary else .secondary },
-            )) {
-                self.ide_menu_open = if (is_open) null else domain;
-            }
-            if (is_open) selected_button_rect = button_rect;
-            x += button_w + layout.row_gap * 0.4;
-        }
-
-        if (self.ide_menu_open) |open_domain| {
-            const menu_w = @max(228.0 * self.ui_scale, 200.0 * self.ui_scale);
-            const row_h = layout.button_height;
-            const row_gap = @max(1.0, layout.inner_inset * 0.2);
-            const row_count: usize = ideMenuRowCount(open_domain, self.ui_stage);
-            const menu_h = layout.inner_inset * 2.0 +
-                @as(f32, @floatFromInt(row_count)) * row_h +
-                @as(f32, @floatFromInt(@max(@as(usize, 1), row_count) - 1)) * row_gap;
-            const menu_x = if (selected_button_rect) |rect| rect.min[0] else layout.inset;
-            const menu_y = bar_rect.max[1] + @max(1.0, layout.inner_inset * 0.2);
-            const menu_rect = Rect.fromXYWH(menu_x, menu_y, menu_w, menu_h);
-            dropdown_rect = menu_rect;
-
-            self.drawSurfacePanel(menu_rect);
-            self.drawRect(menu_rect, self.theme.colors.border);
-
-            var row_y = menu_rect.min[1] + layout.inner_inset;
-            const row_x = menu_rect.min[0] + layout.inner_inset;
-            const row_w = menu_rect.width() - layout.inner_inset * 2.0;
-
-            switch (open_domain) {
-                .file => {
-                    if (self.ui_stage == .launcher) {
-                        if (self.drawButtonWidget(
-                            Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                            if (self.connection_state == .connected) "Disconnect" else "Connect",
-                            .{ .variant = .secondary },
-                        )) {
-                            if (self.connection_state == .connected) {
-                                self.disconnect();
-                                self.setConnectionState(.disconnected, "Disconnected");
-                            } else {
-                                self.tryConnect(&self.manager) catch {};
-                            }
-                            self.ide_menu_open = null;
-                        }
-                        row_y += row_h + row_gap;
-                    } else {
-                        if (self.drawButtonWidget(
-                            Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                            "Switch Workspace",
-                            .{ .variant = .secondary },
-                        )) {
-                            self.returnToLauncher(.switched_workspace);
-                            self.ide_menu_open = null;
-                        }
-                        row_y += row_h + row_gap;
-                        if (self.drawButtonWidget(
-                            Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                            "Disconnect",
-                            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-                        )) {
-                            self.disconnect();
-                            self.setConnectionState(.disconnected, "Disconnected");
-                            self.returnToLauncher(.disconnected);
-                            self.ide_menu_open = null;
-                        }
-                    }
-                },
-                .edit => {
-                    _ = self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "Undo (coming soon)",
-                        .{ .variant = .secondary, .disabled = true },
-                    );
-                    row_y += row_h + row_gap;
-                    _ = self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "Redo (coming soon)",
-                        .{ .variant = .secondary, .disabled = true },
-                    );
-                },
-                .view => {
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.ws.dashboard_panel_id != null) "Dashboard (Focus)" else "Dashboard (Open)",
-                        .{ .variant = .secondary },
-                    )) {
-                        _ = self.ensureDashboardPanel(&self.manager) catch {};
-                        self.ide_menu_open = null;
-                    }
-                    row_y += row_h + row_gap;
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.manager.hasPanel(.Chat)) "Chat (Focus)" else "Chat (Open)",
-                        .{ .variant = .secondary },
-                    )) {
-                        self.manager.ensurePanel(.Chat);
-                        self.ide_menu_open = null;
-                    }
-                    row_y += row_h + row_gap;
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.fs.filesystem_panel_id != null) "Explorer (Focus)" else "Explorer (Open)",
-                        .{ .variant = .secondary },
-                    )) {
-                        _ = self.ensureFilesystemPanel(&self.manager) catch {};
-                        self.ide_menu_open = null;
-                    }
-                    row_y += row_h + row_gap;
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.ws.node_topology_panel_id != null) "Node Topology (Focus)" else "Node Topology (Open)",
-                        .{ .variant = .secondary },
-                    )) {
-                        _ = self.ensureNodeTopologyPanel(&self.manager) catch {};
-                        self.ide_menu_open = null;
-                    }
-                },
-                .project => {
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "Workspace Wizard...",
-                        .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-                    )) {
-                        self.openWorkspaceWizard();
-                        self.ide_menu_open = null;
-                    }
-                    row_y += row_h + row_gap;
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "Refresh Workspace",
-                        .{ .variant = .secondary, .disabled = self.connection_state != .connected },
-                    )) {
-                        self.refreshWorkspaceData() catch {};
-                        self.ide_menu_open = null;
-                    }
-                    row_y += row_h + row_gap;
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "Activate Selected",
-                        .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.selectedWorkspaceId() == null },
-                    )) {
-                        self.activateSelectedWorkspace() catch {};
-                        self.ide_menu_open = null;
-                    }
-                },
-                .tools => {
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "Settings",
-                        .{ .variant = .secondary },
-                    )) {
-                        self.ensureSettingsPanel(&self.manager);
-                        self.ide_menu_open = null;
-                    }
-                    row_y += row_h + row_gap;
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.fs.filesystem_tools_panel_id != null) "Explorer Tools (Focus)" else "Explorer Tools (Open)",
-                        .{ .variant = .secondary },
-                    )) {
-                        _ = self.ensureFilesystemToolsPanel(&self.manager) catch {};
-                        self.ide_menu_open = null;
-                    }
-                    row_y += row_h + row_gap;
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "Terminal",
-                        .{ .variant = .secondary },
-                    )) {
-                        _ = self.ensureTerminalPanel(&self.manager) catch {};
-                        self.ide_menu_open = null;
-                    }
-                    row_y += row_h + row_gap;
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.ws.venom_manager_panel_id != null) "Packages (Focus)" else "Packages (Open)",
-                        .{ .variant = .secondary },
-                    )) {
-                        _ = self.ensureVenomManagerPanel(&self.manager) catch {};
-                        self.ide_menu_open = null;
-                    }
-                    row_y += row_h + row_gap;
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        if (self.ws.mcp_config_panel_id != null) "MCP Servers (Focus)" else "MCP Servers (Open)",
-                        .{ .variant = .secondary },
-                    )) {
-                        _ = self.ensureMcpConfigPanel(&self.manager) catch {};
-                        self.ide_menu_open = null;
-                    }
-                },
-                .window => {
-                    if (platformSupportsMultiWindow() and self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "New Window",
-                        .{ .variant = .secondary },
-                    )) {
-                        self.spawnUiWindow() catch {};
-                        self.ide_menu_open = null;
-                    }
-                },
-                .help => {
-                    if (self.drawButtonWidget(
-                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
-                        "About SpiderApp",
-                        .{ .variant = .secondary },
-                    )) {
-                        self.openAboutModal();
-                        self.ide_menu_open = null;
-                    }
-                },
-            }
-        }
-
-        if (self.mouse_clicked and self.ide_menu_open != null) {
-            const in_button = if (selected_button_rect) |rect| rect.contains(.{ self.mouse_x, self.mouse_y }) else false;
-            const in_dropdown = if (dropdown_rect) |rect| rect.contains(.{ self.mouse_x, self.mouse_y }) else false;
-            if (!in_button and !in_dropdown) self.ide_menu_open = null;
-        }
-
-        _ = ui_window;
-
-        return bar_h;
+        return workspace_host_mod.drawWindowMenuBar(self, ui_window, fb_width);
     }
 
     fn drawUnavailableWorkspaceFrame(self: *App, ui_window: *UiWindow, message: []const u8) void {
@@ -8070,106 +7816,11 @@ pub const App = struct {
         }
     }
 
-    fn drawTabsPanel(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode, rect: UiRect) void {
-        if (!self.isTabsNodeUsable(manager, tabs)) return;
-        const line_height = self.textLineHeight();
-        const tab_metrics = self.dockTabMetrics();
-        const tab_height = tab_metrics.height;
-
-        // Draw panel background
-        self.ui_commands.pushRect(
-            .{ .min = rect.min, .max = rect.max },
-            .{ .fill = self.theme.colors.surface },
-        );
-
-        // Draw tab bar
-        const tab_bar_rect = UiRect.fromMinSize(
-            rect.min,
-            .{ rect.max[0] - rect.min[0], tab_height },
-        );
-        self.ui_commands.pushRect(
-            .{ .min = tab_bar_rect.min, .max = tab_bar_rect.max },
-            .{ .fill = self.theme.colors.background },
-        );
-
-        var tab_x = rect.min[0] + tab_metrics.pad;
-        const rect_w = rect.max[0] - rect.min[0];
-        var active_tab_id = if (tabs.active < tabs.tabs.items.len)
-            tabs.tabs.items[tabs.active]
-        else
-            null;
-        if (active_tab_id == null) {
-            for (tabs.tabs.items) |candidate_panel_id| {
-                if (self.findPanelById(manager, candidate_panel_id) != null) {
-                    active_tab_id = candidate_panel_id;
-                    break;
-                }
-            }
-        }
-
-        // Draw each tab
-        for (tabs.tabs.items) |panel_id| {
-            const panel = self.findPanelById(manager, panel_id) orelse continue;
-            const is_active = panel_id == active_tab_id;
-
-            const desired_tab_width = self.measureText(panel.title) + tab_metrics.pad * 2.0;
-            const tab_width = self.dockTabWidth(panel.title, rect_w, tab_metrics);
-            const tab_rect = UiRect.fromMinSize(
-                .{ tab_x, rect.min[1] },
-                .{ tab_width, tab_height },
-            );
-
-            // Tab background
-            const tab_color = if (is_active)
-                self.theme.colors.surface
-            else
-                self.theme.colors.background;
-            self.ui_commands.pushRect(
-                .{ .min = tab_rect.min, .max = tab_rect.max },
-                .{ .fill = tab_color },
-            );
-
-            // Tab border
-            self.ui_commands.pushRect(
-                .{ .min = tab_rect.min, .max = tab_rect.max },
-                .{ .stroke = self.theme.colors.border },
-            );
-
-            // Tab text
-            if (desired_tab_width > tab_width) {
-                self.drawTextTrimmed(
-                    tab_x + tab_metrics.pad,
-                    rect.min[1] + @max(0.0, (tab_height - line_height) * 0.5),
-                    tab_width - tab_metrics.pad * 2.0,
-                    panel.title,
-                    self.theme.colors.text_primary,
-                );
-            } else {
-                self.drawText(
-                    tab_x + tab_metrics.pad,
-                    rect.min[1] + @max(0.0, (tab_height - line_height) * 0.5),
-                    panel.title,
-                    self.theme.colors.text_primary,
-                );
-            }
-
-            tab_x += tab_width + tab_metrics.pad;
-        }
-
-        // Draw content area for active tab
-        const content_rect = UiRect.fromMinSize(
-            .{ rect.min[0], rect.min[1] + tab_height },
-            .{ rect.max[0] - rect.min[0], rect.max[1] - rect.min[1] - tab_height },
-        );
-
-        if (active_tab_id) |panel_id| {
-            self.ui_commands.pushClip(.{ .min = content_rect.min, .max = content_rect.max });
-            defer self.ui_commands.popClip();
-            self.drawPanelContent(manager, panel_id, content_rect);
-        }
+    pub fn drawTabsPanel(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode, rect: UiRect) void {
+        workspace_host_mod.drawTabsPanel(self, manager, tabs, rect);
     }
 
-    fn isTabsNodeUsable(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode) bool {
+    pub fn isTabsNodeUsable(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode) bool {
         if (tabs.tabs.items.len == 0) return false;
         if (tabs.tabs.items.len > MAX_REASONABLE_PANEL_COUNT) return false;
         if (tabs.active >= tabs.tabs.items.len) {
@@ -8193,14 +7844,14 @@ pub const App = struct {
         return true;
     }
 
-    fn findPanelById(_: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId) ?*workspace.Panel {
+    pub fn findPanelById(_: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId) ?*workspace.Panel {
         for (manager.workspace.panels.items) |*panel| {
             if (panel.id == panel_id) return panel;
         }
         return null;
     }
 
-    fn drawPanelContent(self: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId, rect: UiRect) void {
+    pub fn drawPanelContent(self: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId, rect: UiRect) void {
         const panel = self.findPanelById(manager, panel_id) orelse return;
         self.promoteLegacyHostPanel(manager, panel);
         const inset = self.panelLayoutMetrics().inset;
@@ -8328,7 +7979,7 @@ pub const App = struct {
         app: *App,
     };
 
-    fn drawHostPanelWithRuntime(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) bool {
+    pub fn drawHostPanelWithRuntime(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) bool {
         if (panel.kind != .WorkspaceOverview and panel.kind != .FilesystemBrowser and panel.kind != .FilesystemTools and panel.kind != .DebugStream) {
             return false;
         }
@@ -8425,7 +8076,7 @@ pub const App = struct {
         runtime_ctx.app.drawDebugPanel(manager, panel_rect orelse return);
     }
 
-    fn promoteLegacyHostPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel) void {
+    pub fn promoteLegacyHostPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel) void {
         if (panel.kind != .ToolOutput) return;
 
         const target_kind: ?workspace.PanelKind = blk: {
@@ -8829,7 +8480,7 @@ pub const App = struct {
         return 0;
     }
 
-    fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    pub fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         settings_host_mod.drawSettingsPanel(self, manager, rect);
     }
 
@@ -8837,11 +8488,11 @@ pub const App = struct {
         settings_host_mod.drawWorkspaceSettingsPanel(self, rect);
     }
 
-    fn drawApprovalsInboxPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
+    pub fn drawApprovalsInboxPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
         mission_host_mod.drawApprovalsInboxPanel(self, manager, panel, rect);
     }
 
-    fn drawMissionWorkboardPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
+    pub fn drawMissionWorkboardPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
         mission_workboard_host.draw(self, manager, panel, rect);
     }
 
@@ -8858,7 +8509,7 @@ pub const App = struct {
         self.refreshWorkspaceData() catch {};
     }
 
-    fn drawDashboardPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    pub fn drawDashboardPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         dashboard_host.draw(self, manager, rect);
     }
 
@@ -8979,13 +8630,13 @@ pub const App = struct {
         self.refreshVenomManager();
     }
 
-    fn drawVenomManagerPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    pub fn drawVenomManagerPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         venom_manager_host.draw(self, manager, rect);
     }
 
 
 
-    fn drawNodeTopologyPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    pub fn drawNodeTopologyPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         node_topology_host.draw(self, manager, rect);
     }
 
@@ -9069,7 +8720,7 @@ pub const App = struct {
         self.ws.mcp_selected_runtime = text;
     }
 
-    fn drawMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    pub fn drawMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         mcp_config_host.draw(self, manager, rect);
     }
 
@@ -9077,7 +8728,7 @@ pub const App = struct {
 
     // ── Workspace Setup Wizard ────────────────────────────────────────────────
 
-    fn openWorkspaceWizard(self: *App) void {
+    pub fn openWorkspaceWizard(self: *App) void {
         self.ws.workspace_wizard_open = true;
         self.ws.workspace_wizard_step = 0;
         self.ws.workspace_wizard_selected_node_index = null;
@@ -9196,7 +8847,7 @@ pub const App = struct {
         workspace_host_mod.drawWizardStepReview(self, rect, layout, pad);
     }
 
-    fn ensureMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    pub fn ensureMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.ws.mcp_config_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -9221,7 +8872,7 @@ pub const App = struct {
         return panel_id;
     }
 
-    fn ensureNodeTopologyPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    pub fn ensureNodeTopologyPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.ws.node_topology_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -9246,7 +8897,7 @@ pub const App = struct {
         return panel_id;
     }
 
-    fn ensureVenomManagerPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    pub fn ensureVenomManagerPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.ws.venom_manager_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -9271,7 +8922,7 @@ pub const App = struct {
         return panel_id;
     }
 
-    fn ensureDashboardPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    pub fn ensureDashboardPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.ws.dashboard_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -9351,7 +9002,7 @@ pub const App = struct {
         return std.fmt.bufPrint(buf, "Live mission data refreshed {s}", .{relative}) catch "Live mission data";
     }
 
-    fn drawWorkspacePanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    pub fn drawWorkspacePanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         workspace_host_mod.drawWorkspacePanel(self, manager, rect);
     }
 
@@ -9995,7 +9646,7 @@ pub const App = struct {
         };
     }
 
-    fn drawTerminalPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    pub fn drawTerminalPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         terminal_host_mod.drawTerminalPanel(self, manager, rect);
     }
 
@@ -11429,15 +11080,15 @@ pub const App = struct {
         }
     }
 
-    fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    pub fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         filesystem_host_mod.drawFilesystemPanel(self, manager, rect);
     }
 
-    fn drawFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    pub fn drawFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         filesystem_host_mod.drawFilesystemToolsPanel(self, manager, rect);
     }
 
-    fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    pub fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         debug_host_mod.drawDebugPanel(self, manager, rect);
     }
 
@@ -11651,7 +11302,7 @@ pub const App = struct {
         try self.queueFilesystemPathLoad(node_path, true, false);
     }
 
-    fn drawChatPanel(self: *App, rect: UiRect) void {
+    pub fn drawChatPanel(self: *App, rect: UiRect) void {
         if (self.render_input_queue == null) {
             self.drawText(
                 rect.min[0] + 8.0,
@@ -12939,7 +12590,7 @@ pub const App = struct {
         }
     }
 
-    fn ensureSettingsPanel(self: *App, manager: *panel_manager.PanelManager) void {
+    pub fn ensureSettingsPanel(self: *App, manager: *panel_manager.PanelManager) void {
         for (manager.workspace.panels.items) |*panel| {
             if (panel.kind == .Settings or panel.kind == .Control) {
                 manager.focusPanel(panel.id);
@@ -13259,7 +12910,7 @@ pub const App = struct {
         }
     }
 
-    fn openAboutModal(self: *App) void {
+    pub fn openAboutModal(self: *App) void {
         self.about_modal_open = true;
         self.settings_panel.focused_field = .about_modal_build_label;
         self.about_modal_build_label.clearRetainingCapacity();
@@ -13438,7 +13089,7 @@ pub const App = struct {
         _ = c.SDL_SetWindowTitle(self.window, platformWindowTitle("SpiderApp - Workspace"));
     }
 
-    fn returnToLauncher(self: *App, reason: stage_machine.ReturnReason) void {
+    pub fn returnToLauncher(self: *App, reason: stage_machine.ReturnReason) void {
         self.saveActiveWorkspaceLayout();
         self.closePackageManagerModal();
         self.closeAboutModal();
@@ -16537,7 +16188,7 @@ pub const App = struct {
         }
     }
 
-    fn ensureFilesystemPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    pub fn ensureFilesystemPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.fs.filesystem_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -16576,7 +16227,7 @@ pub const App = struct {
         return panel_id;
     }
 
-    fn ensureFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    pub fn ensureFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.fs.filesystem_tools_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -16610,7 +16261,7 @@ pub const App = struct {
         return panel_id;
     }
 
-    fn ensureTerminalPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    pub fn ensureTerminalPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.terminal.terminal_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -16880,7 +16531,7 @@ pub const App = struct {
         return form_layout.defaultMetrics(zui.ui.theme.activeTheme(), line_height, self.ui_scale);
     }
 
-    fn dockTabMetrics(self: *App) DockTabMetrics {
+    pub fn dockTabMetrics(self: *App) DockTabMetrics {
         const line_height = self.textLineHeight();
         const tab_pad = @max(self.theme.spacing.sm, self.theme.spacing.xs * 1.4);
         return .{
@@ -16891,7 +16542,7 @@ pub const App = struct {
         };
     }
 
-    fn dockTabWidth(self: *App, title: []const u8, group_width: f32, metrics: DockTabMetrics) f32 {
+    pub fn dockTabWidth(self: *App, title: []const u8, group_width: f32, metrics: DockTabMetrics) f32 {
         const desired = self.measureText(title) + metrics.pad * 2.0;
         const max_width = @max(metrics.min_width, (group_width - metrics.pad * 2.0) * metrics.max_width_ratio);
         return @min(max_width, desired);

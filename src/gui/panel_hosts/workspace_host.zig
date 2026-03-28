@@ -2157,3 +2157,494 @@ fn drawWizardStepReview(self: anytype, rect: Rect, layout: PanelLayoutMetrics, p
         y += layout.line_height + layout.row_gap * 0.2;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Extracted from root.zig: drawWindowMenuBar, drawTabsPanel, drawPanelContent
+// ---------------------------------------------------------------------------
+
+pub fn drawWindowMenuBar(self: anytype, ui_window: anytype, fb_width: u32) f32 {
+    const root_mod = @import("../root.zig");
+    const UiRect = zui.ui.draw_context.Rect;
+    _ = UiRect;
+    const storage = @import("platform_storage");
+    if (storage.isAndroid()) {
+        return 0.0;
+    }
+    const layout = self.panelLayoutMetrics();
+    const bar_h = self.windowMenuBarHeight();
+    const bar_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), bar_h);
+    const shell = self.sharedStyleSheet().shell;
+    const surfaces = self.sharedStyleSheet().surfaces;
+    self.drawPaintRect(
+        bar_rect,
+        shell.menu_bar_fill orelse surfaces.menu_bar orelse Paint{ .solid = self.theme.colors.background },
+    );
+    self.drawRect(bar_rect, self.theme.colors.border);
+
+    const IdeMenuDomain = root_mod.IdeMenuDomain;
+    const domains: []const IdeMenuDomain = if (self.ui_stage == .launcher)
+        &[_]IdeMenuDomain{ .file, .help }
+    else
+        &[_]IdeMenuDomain{ .file, .edit, .view, .project, .tools, .window, .help };
+
+    const button_y = bar_rect.min[1] + @max(0.0, (bar_h - layout.button_height) * 0.5);
+    var x = layout.inset;
+    var selected_button_rect: ?Rect = null;
+    var dropdown_rect: ?Rect = null;
+
+    for (domains) |domain| {
+        const label = root_mod.App.ideMenuDomainLabel(domain);
+        const button_w = @max(86.0 * self.ui_scale, self.measureText(label) + layout.inner_inset * 2.0);
+        const button_rect = Rect.fromXYWH(x, button_y, button_w, layout.button_height);
+        const is_open = self.ide_menu_open != null and self.ide_menu_open.? == domain;
+        if (self.drawButtonWidget(
+            button_rect,
+            label,
+            .{ .variant = if (is_open) .primary else .secondary },
+        )) {
+            self.ide_menu_open = if (is_open) null else domain;
+        }
+        if (is_open) selected_button_rect = button_rect;
+        x += button_w + layout.row_gap * 0.4;
+    }
+
+    if (self.ide_menu_open) |open_domain| {
+        const menu_w = @max(228.0 * self.ui_scale, 200.0 * self.ui_scale);
+        const row_h = layout.button_height;
+        const row_gap = @max(1.0, layout.inner_inset * 0.2);
+        const row_count: usize = root_mod.App.ideMenuRowCount(open_domain, self.ui_stage);
+        const menu_h = layout.inner_inset * 2.0 +
+            @as(f32, @floatFromInt(row_count)) * row_h +
+            @as(f32, @floatFromInt(@max(@as(usize, 1), row_count) - 1)) * row_gap;
+        const menu_x = if (selected_button_rect) |rect| rect.min[0] else layout.inset;
+        const menu_y = bar_rect.max[1] + @max(1.0, layout.inner_inset * 0.2);
+        const menu_rect = Rect.fromXYWH(menu_x, menu_y, menu_w, menu_h);
+        dropdown_rect = menu_rect;
+
+        self.drawSurfacePanel(menu_rect);
+        self.drawRect(menu_rect, self.theme.colors.border);
+
+        var row_y = menu_rect.min[1] + layout.inner_inset;
+        const row_x = menu_rect.min[0] + layout.inner_inset;
+        const row_w = menu_rect.width() - layout.inner_inset * 2.0;
+
+        switch (open_domain) {
+            .file => {
+                if (self.ui_stage == .launcher) {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.connection_state == .connected) "Disconnect" else "Connect",
+                        .{ .variant = .secondary },
+                    )) {
+                        if (self.connection_state == .connected) {
+                            self.disconnect();
+                            self.setConnectionState(.disconnected, "Disconnected");
+                        } else {
+                            self.tryConnect(&self.manager) catch {};
+                        }
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                } else {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Switch Workspace",
+                        .{ .variant = .secondary },
+                    )) {
+                        self.returnToLauncher(.switched_workspace);
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Disconnect",
+                        .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+                    )) {
+                        self.disconnect();
+                        self.setConnectionState(.disconnected, "Disconnected");
+                        self.returnToLauncher(.disconnected);
+                        self.ide_menu_open = null;
+                    }
+                }
+            },
+            .edit => {
+                _ = self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    "Undo (coming soon)",
+                    .{ .variant = .secondary, .disabled = true },
+                );
+                row_y += row_h + row_gap;
+                _ = self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    "Redo (coming soon)",
+                    .{ .variant = .secondary, .disabled = true },
+                );
+            },
+            .view => {
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    if (self.ws.dashboard_panel_id != null) "Dashboard (Focus)" else "Dashboard (Open)",
+                    .{ .variant = .secondary },
+                )) {
+                    _ = self.ensureDashboardPanel(&self.manager) catch {};
+                    self.ide_menu_open = null;
+                }
+                row_y += row_h + row_gap;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    if (self.manager.hasPanel(.Chat)) "Chat (Focus)" else "Chat (Open)",
+                    .{ .variant = .secondary },
+                )) {
+                    self.manager.ensurePanel(.Chat);
+                    self.ide_menu_open = null;
+                }
+                row_y += row_h + row_gap;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    if (self.fs.filesystem_panel_id != null) "Explorer (Focus)" else "Explorer (Open)",
+                    .{ .variant = .secondary },
+                )) {
+                    _ = self.ensureFilesystemPanel(&self.manager) catch {};
+                    self.ide_menu_open = null;
+                }
+                row_y += row_h + row_gap;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    if (self.ws.node_topology_panel_id != null) "Node Topology (Focus)" else "Node Topology (Open)",
+                    .{ .variant = .secondary },
+                )) {
+                    _ = self.ensureNodeTopologyPanel(&self.manager) catch {};
+                    self.ide_menu_open = null;
+                }
+            },
+            .project => {
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    "Workspace Wizard...",
+                    .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+                )) {
+                    self.openWorkspaceWizard();
+                    self.ide_menu_open = null;
+                }
+                row_y += row_h + row_gap;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    "Refresh Workspace",
+                    .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+                )) {
+                    self.refreshWorkspaceData() catch {};
+                    self.ide_menu_open = null;
+                }
+                row_y += row_h + row_gap;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    "Activate Selected",
+                    .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.selectedWorkspaceId() == null },
+                )) {
+                    self.activateSelectedWorkspace() catch {};
+                    self.ide_menu_open = null;
+                }
+            },
+            .tools => {
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    "Settings",
+                    .{ .variant = .secondary },
+                )) {
+                    self.ensureSettingsPanel(&self.manager);
+                    self.ide_menu_open = null;
+                }
+                row_y += row_h + row_gap;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    if (self.fs.filesystem_tools_panel_id != null) "Explorer Tools (Focus)" else "Explorer Tools (Open)",
+                    .{ .variant = .secondary },
+                )) {
+                    _ = self.ensureFilesystemToolsPanel(&self.manager) catch {};
+                    self.ide_menu_open = null;
+                }
+                row_y += row_h + row_gap;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    "Terminal",
+                    .{ .variant = .secondary },
+                )) {
+                    _ = self.ensureTerminalPanel(&self.manager) catch {};
+                    self.ide_menu_open = null;
+                }
+                row_y += row_h + row_gap;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    if (self.ws.venom_manager_panel_id != null) "Packages (Focus)" else "Packages (Open)",
+                    .{ .variant = .secondary },
+                )) {
+                    _ = self.ensureVenomManagerPanel(&self.manager) catch {};
+                    self.ide_menu_open = null;
+                }
+                row_y += row_h + row_gap;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    if (self.ws.mcp_config_panel_id != null) "MCP Servers (Focus)" else "MCP Servers (Open)",
+                    .{ .variant = .secondary },
+                )) {
+                    _ = self.ensureMcpConfigPanel(&self.manager) catch {};
+                    self.ide_menu_open = null;
+                }
+            },
+            .window => {
+                if (root_mod.platformSupportsMultiWindow() and self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    "New Window",
+                    .{ .variant = .secondary },
+                )) {
+                    self.spawnUiWindow() catch {};
+                    self.ide_menu_open = null;
+                }
+            },
+            .help => {
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                    "About SpiderApp",
+                    .{ .variant = .secondary },
+                )) {
+                    self.openAboutModal();
+                    self.ide_menu_open = null;
+                }
+            },
+        }
+    }
+
+    if (self.mouse_clicked and self.ide_menu_open != null) {
+        const in_button = if (selected_button_rect) |rect| rect.contains(.{ self.mouse_x, self.mouse_y }) else false;
+        const in_dropdown = if (dropdown_rect) |rect| rect.contains(.{ self.mouse_x, self.mouse_y }) else false;
+        if (!in_button and !in_dropdown) self.ide_menu_open = null;
+    }
+
+    _ = ui_window;
+
+    return bar_h;
+}
+
+pub fn drawTabsPanel(self: anytype, manager: anytype, tabs: anytype, rect: anytype) void {
+    const UiRect = zui.ui.draw_context.Rect;
+    if (!self.isTabsNodeUsable(manager, tabs)) return;
+    const line_height = self.textLineHeight();
+    const tab_metrics = self.dockTabMetrics();
+    const tab_height = tab_metrics.height;
+
+    // Draw panel background
+    self.ui_commands.pushRect(
+        .{ .min = rect.min, .max = rect.max },
+        .{ .fill = self.theme.colors.surface },
+    );
+
+    // Draw tab bar
+    const tab_bar_rect = UiRect.fromMinSize(
+        rect.min,
+        .{ rect.max[0] - rect.min[0], tab_height },
+    );
+    self.ui_commands.pushRect(
+        .{ .min = tab_bar_rect.min, .max = tab_bar_rect.max },
+        .{ .fill = self.theme.colors.background },
+    );
+
+    var tab_x = rect.min[0] + tab_metrics.pad;
+    const rect_w = rect.max[0] - rect.min[0];
+    var active_tab_id = if (tabs.active < tabs.tabs.items.len)
+        tabs.tabs.items[tabs.active]
+    else
+        null;
+    if (active_tab_id == null) {
+        for (tabs.tabs.items) |candidate_panel_id| {
+            if (self.findPanelById(manager, candidate_panel_id) != null) {
+                active_tab_id = candidate_panel_id;
+                break;
+            }
+        }
+    }
+
+    // Draw each tab
+    for (tabs.tabs.items) |panel_id| {
+        const panel = self.findPanelById(manager, panel_id) orelse continue;
+        const is_active = panel_id == active_tab_id;
+
+        const desired_tab_width = self.measureText(panel.title) + tab_metrics.pad * 2.0;
+        const tab_width = self.dockTabWidth(panel.title, rect_w, tab_metrics);
+        const tab_rect = UiRect.fromMinSize(
+            .{ tab_x, rect.min[1] },
+            .{ tab_width, tab_height },
+        );
+
+        // Tab background
+        const tab_color = if (is_active)
+            self.theme.colors.surface
+        else
+            self.theme.colors.background;
+        self.ui_commands.pushRect(
+            .{ .min = tab_rect.min, .max = tab_rect.max },
+            .{ .fill = tab_color },
+        );
+
+        // Tab border
+        self.ui_commands.pushRect(
+            .{ .min = tab_rect.min, .max = tab_rect.max },
+            .{ .stroke = self.theme.colors.border },
+        );
+
+        // Tab text
+        if (desired_tab_width > tab_width) {
+            self.drawTextTrimmed(
+                tab_x + tab_metrics.pad,
+                rect.min[1] + @max(0.0, (tab_height - line_height) * 0.5),
+                tab_width - tab_metrics.pad * 2.0,
+                panel.title,
+                self.theme.colors.text_primary,
+            );
+        } else {
+            self.drawText(
+                tab_x + tab_metrics.pad,
+                rect.min[1] + @max(0.0, (tab_height - line_height) * 0.5),
+                panel.title,
+                self.theme.colors.text_primary,
+            );
+        }
+
+        tab_x += tab_width + tab_metrics.pad;
+    }
+
+    // Draw content area for active tab
+    const content_rect = UiRect.fromMinSize(
+        .{ rect.min[0], rect.min[1] + tab_height },
+        .{ rect.max[0] - rect.min[0], rect.max[1] - rect.min[1] - tab_height },
+    );
+
+    if (active_tab_id) |panel_id| {
+        self.ui_commands.pushClip(.{ .min = content_rect.min, .max = content_rect.max });
+        defer self.ui_commands.popClip();
+        drawPanelContent(self, manager, panel_id, content_rect);
+    }
+}
+
+pub fn drawPanelContent(self: anytype, manager: anytype, panel_id: zui.ui.workspace.PanelId, rect: anytype) void {
+    const panel = self.findPanelById(manager, panel_id) orelse return;
+    self.promoteLegacyHostPanel(manager, panel);
+    const inset = self.panelLayoutMetrics().inset;
+
+    switch (panel.kind) {
+        .Chat => {
+            const started_ns = std.time.nanoTimestamp();
+            self.drawChatPanel(rect);
+            self.perf_frame_panel_ns.chat += std.time.nanoTimestamp() - started_ns;
+        },
+        .Settings, .Control => {
+            const started_ns = std.time.nanoTimestamp();
+            self.drawSettingsPanel(manager, rect);
+            self.perf_frame_panel_ns.settings += std.time.nanoTimestamp() - started_ns;
+        },
+        .WorkspaceOverview => {
+            const started_ns = std.time.nanoTimestamp();
+            if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
+                self.drawWorkspacePanel(manager, rect);
+            }
+            self.ws.workspace_panel_id = panel.id;
+            self.perf_frame_panel_ns.projects += std.time.nanoTimestamp() - started_ns;
+        },
+        .FilesystemBrowser => {
+            const started_ns = std.time.nanoTimestamp();
+            if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
+                self.drawFilesystemPanel(manager, rect);
+            }
+            self.fs.filesystem_panel_id = panel.id;
+            self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
+        },
+        .FilesystemTools => {
+            const started_ns = std.time.nanoTimestamp();
+            if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
+                self.drawFilesystemToolsPanel(manager, rect);
+            }
+            self.fs.filesystem_tools_panel_id = panel.id;
+            self.perf_frame_panel_ns.filesystem += std.time.nanoTimestamp() - started_ns;
+        },
+        .DebugStream => {
+            const started_ns = std.time.nanoTimestamp();
+            if (!self.drawHostPanelWithRuntime(manager, panel, rect)) {
+                self.drawDebugPanel(manager, rect);
+            }
+            self.debug.debug_panel_id = panel.id;
+            self.perf_frame_panel_ns.debug += std.time.nanoTimestamp() - started_ns;
+        },
+        .Workboard => {
+            const started_ns = std.time.nanoTimestamp();
+            self.drawMissionWorkboardPanel(manager, panel, rect);
+            self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+        },
+        .ApprovalsInbox => {
+            const started_ns = std.time.nanoTimestamp();
+            self.drawApprovalsInboxPanel(manager, panel, rect);
+            self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+        },
+        .ToolOutput => {
+            if (self.terminal.terminal_panel_id != null and self.terminal.terminal_panel_id.? == panel.id) {
+                const started_ns = std.time.nanoTimestamp();
+                self.drawTerminalPanel(manager, rect);
+                self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
+            } else if (std.mem.eql(u8, panel.title, "Debug Stream") or
+                std.mem.eql(u8, panel.title, "Filesystem Browser") or
+                std.mem.eql(u8, panel.title, "Filesystem Tools"))
+            {
+                // Upgrade legacy ToolOutput-backed host panels in-place.
+                self.promoteLegacyHostPanel(manager, panel);
+                drawPanelContent(self, manager, panel_id, rect);
+            } else if (std.mem.eql(u8, panel.title, "Terminal")) {
+                self.terminal.terminal_panel_id = panel.id;
+                const started_ns = std.time.nanoTimestamp();
+                self.drawTerminalPanel(manager, rect);
+                self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
+            } else {
+                const started_ns = std.time.nanoTimestamp();
+                self.drawText(
+                    rect.min[0] + inset,
+                    rect.min[1] + inset,
+                    panel.title,
+                    self.theme.colors.text_primary,
+                );
+                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+            }
+        },
+        .Dashboard => {
+            const started_ns = std.time.nanoTimestamp();
+            self.ws.dashboard_panel_id = panel.id;
+            self.drawDashboardPanel(&self.manager, rect);
+            self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+        },
+        .VenomManager => {
+            const started_ns = std.time.nanoTimestamp();
+            self.ws.venom_manager_panel_id = panel.id;
+            self.drawVenomManagerPanel(&self.manager, rect);
+            self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+        },
+        .NodeTopology => {
+            const started_ns = std.time.nanoTimestamp();
+            self.ws.node_topology_panel_id = panel.id;
+            self.drawNodeTopologyPanel(&self.manager, rect);
+            self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+        },
+        .McpConfig => {
+            const started_ns = std.time.nanoTimestamp();
+            self.ws.mcp_config_panel_id = panel.id;
+            self.drawMcpConfigPanel(&self.manager, rect);
+            self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+        },
+        else => {
+            // Draw placeholder for other panel types
+            const started_ns = std.time.nanoTimestamp();
+            self.drawText(
+                rect.min[0] + inset,
+                rect.min[1] + inset,
+                panel.title,
+                self.theme.colors.text_primary,
+            );
+            self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+        },
+    }
+}
