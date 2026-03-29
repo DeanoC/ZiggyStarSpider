@@ -8368,12 +8368,20 @@ pub const App = struct {
     fn runLauncherRecipeSecondaryAction(self: *App, recipe: LauncherRecipe) void {
         self.closeLauncherRecipeModal();
         switch (recipe) {
-            .create_workspace, .run_remote_service => {
+            .create_workspace => {
                 self.ws.home_route = .workspace;
                 self.openSelectedHomeRoute() catch {};
             },
-            .add_second_device, .connect_another_machine, .contribute_this_mac, .workspace_tokens => {
+            .run_remote_service => {
+                self.ws.home_route = .capabilities;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .add_second_device, .contribute_this_mac, .workspace_tokens => {
                 self.ws.home_route = .settings;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .connect_another_machine => {
+                self.ws.home_route = .devices;
                 self.openSelectedHomeRoute() catch {};
             },
             .install_package => {
@@ -8395,7 +8403,7 @@ pub const App = struct {
             .run_remote_service => can_open,
             .connect_to_spiderweb => self.connection_state != .connecting,
             .workspace_tokens => can_open,
-            .connect_another_machine => self.connection_state == .connected,
+            .connect_another_machine => can_open,
             .contribute_this_mac => self.connection_state == .connected,
         };
     }
