@@ -79,9 +79,9 @@ spider workspace create "Distributed Workspace"
 spider workspace create --template github "PR Review Workspace"
 spider workspace use ws-demo ws-token-abc
 spider workspace template list
-spider workspace bind add /.spiderweb/venoms/git /nodes/local/venoms/git
+spider workspace bind add /.spiderweb/venoms/git /nodes/node-1/venoms/git
 spider workspace mount add /workspace node-1 work
-spider workspace up "Distributed Workspace" --template dev --mount /workspace=node-1:work --bind /.spiderweb/venoms/git=/nodes/local/venoms/git
+spider workspace up "Distributed Workspace" --template dev --mount /workspace=node-1:work --bind /.spiderweb/venoms/git=/nodes/node-1/venoms/git
 spider workspace doctor
 spider workspace handoff show codex_app --mount-path ./workspace
 spider workspace status

@@ -60,6 +60,8 @@ pub fn drawFilesystemPanel(self: anytype, manager: anytype, rect: anytype) void 
         .draw_button = @import("../root.zig").launcherSettingsDrawButton,
         .draw_surface_panel = @import("../root.zig").filesystemDrawSurfacePanel,
         .draw_text_wrapped = @import("../root.zig").filesystemDrawTextWrapped,
+        .push_clip = @import("../root.zig").debugEventStreamPushClip,
+        .pop_clip = @import("../root.zig").debugEventStreamPopClip,
         .draw_filled_rect = @import("../root.zig").filesystemDrawFilledRect,
         .draw_rect = @import("../root.zig").filesystemDrawRect,
     };
@@ -67,7 +69,10 @@ pub fn drawFilesystemPanel(self: anytype, manager: anytype, rect: anytype) void 
     var view = self.buildFilesystemPanelView();
     defer view.deinit(self.allocator);
     var panel_state = FilesystemPanel.State{
-        .entry_page = self.fs.filesystem_entry_page,
+        .entry_scroll_y = self.fs.filesystem_entry_scroll_y,
+        .entry_scrollbar_dragging = self.fs.filesystem_entry_scrollbar_dragging,
+        .entry_scrollbar_drag_anchor = self.fs.filesystem_entry_scrollbar_drag_anchor,
+        .entry_scrollbar_drag_scroll = self.fs.filesystem_entry_scrollbar_drag_scroll,
         .last_clicked_entry_index = self.fs.filesystem_last_clicked_entry_index,
         .last_click_ms = self.fs.filesystem_last_click_ms,
         .type_column_width = self.fs.filesystem_type_column_width,
@@ -100,7 +105,10 @@ pub fn drawFilesystemPanel(self: anytype, manager: anytype, rect: anytype) void 
         },
         &panel_state,
     );
-    self.fs.filesystem_entry_page = panel_state.entry_page;
+    self.fs.filesystem_entry_scroll_y = panel_state.entry_scroll_y;
+    self.fs.filesystem_entry_scrollbar_dragging = panel_state.entry_scrollbar_dragging;
+    self.fs.filesystem_entry_scrollbar_drag_anchor = panel_state.entry_scrollbar_drag_anchor;
+    self.fs.filesystem_entry_scrollbar_drag_scroll = panel_state.entry_scrollbar_drag_scroll;
     self.fs.filesystem_last_clicked_entry_index = panel_state.last_clicked_entry_index;
     self.fs.filesystem_last_click_ms = panel_state.last_click_ms;
     self.fs.filesystem_type_column_width = panel_state.type_column_width;

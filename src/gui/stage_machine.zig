@@ -5,6 +5,20 @@ pub const Stage = enum {
     workspace,
 };
 
+pub const OnboardingStage = enum {
+    connect,
+    choose_workspace,
+    workspace_ready,
+};
+
+pub const HomeRoute = enum {
+    workspace,
+    devices,
+    capabilities,
+    explore,
+    settings,
+};
+
 pub const ReturnReason = enum {
     none,
     switched_workspace,
@@ -17,9 +31,20 @@ pub const State = struct {
     connected: bool = false,
     selected_workspace_id: ?[]const u8 = null,
     last_return_reason: ReturnReason = .none,
+    onboarding_stage: OnboardingStage = .connect,
+    home_route: HomeRoute = .workspace,
 
     pub fn canEnterWorkspace(self: *const State) bool {
         return self.connected and self.selected_workspace_id != null;
+    }
+
+    pub fn syncOnboardingStage(self: *State) void {
+        self.onboarding_stage = if (!self.connected)
+            .connect
+        else if (self.selected_workspace_id == null)
+            .choose_workspace
+        else
+            .workspace_ready;
     }
 
     pub fn setConnected(self: *State, connected: bool) void {
@@ -27,6 +52,7 @@ pub const State = struct {
         if (!connected and self.stage == .workspace) {
             self.returnToLauncher(.disconnected);
         }
+        self.syncOnboardingStage();
     }
 
     pub fn setSelectedWorkspace(self: *State, workspace_id: ?[]const u8) void {
@@ -34,6 +60,7 @@ pub const State = struct {
         if (workspace_id == null and self.stage == .workspace) {
             self.returnToLauncher(.disconnected);
         }
+        self.syncOnboardingStage();
     }
 
     pub fn openWorkspace(self: *State, workspace_id: []const u8) !void {
@@ -42,11 +69,13 @@ pub const State = struct {
         self.stage = .workspace;
         self.selected_workspace_id = workspace_id;
         self.last_return_reason = .none;
+        self.syncOnboardingStage();
     }
 
     pub fn returnToLauncher(self: *State, reason: ReturnReason) void {
         self.stage = .launcher;
         self.last_return_reason = reason;
+        self.syncOnboardingStage();
     }
 
     pub fn handleConnectionLoss(self: *State) void {

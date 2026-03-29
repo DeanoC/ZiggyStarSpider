@@ -296,7 +296,7 @@ pub const AppVenomHost = struct {
 
         return std.fmt.allocPrint(
             self.allocator,
-            "{{\"node_id\":\"{s}\",\"node_secret\":\"{s}\",\"platform\":{{\"os\":\"{s}\",\"arch\":\"{s}\",\"runtime_kind\":\"spiderapp\"}},\"venoms\":[{s},{s},{s},{s},{s}]}}",
+            "{{\"node_id\":\"{s}\",\"node_secret\":\"{s}\",\"platform\":{{\"os\":\"{s}\",\"arch\":\"{s}\",\"runtime_kind\":\"spiderapp\"}},\"labels\":{{\"spider.host_type\":\"app_local\"}},\"venoms\":[{s},{s},{s},{s},{s}]}}",
             .{
                 escaped_node_id,
                 escaped_node_secret,

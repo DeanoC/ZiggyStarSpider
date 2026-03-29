@@ -120,7 +120,7 @@ pub const WorkspaceNodeEntryView = if (has_panel_interfaces) zui.ui.panel_interf
     line: []const u8 = "",
     degraded: bool = false,
 };
-pub const WorkspaceMountEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspaceMountEntryView else struct {
+pub const WorkspaceMountEntryView = if (has_panel_interfaces and @hasDecl(zui.ui.panel_interfaces, "WorkspaceMountEntryView")) zui.ui.panel_interfaces.WorkspaceMountEntryView else struct {
     index: usize = 0,
     mount_path: []const u8 = "",
     node_id: []const u8 = "",
@@ -128,14 +128,14 @@ pub const WorkspaceMountEntryView = if (has_panel_interfaces) zui.ui.panel_inter
     export_name: []const u8 = "",
     selected: bool = false,
 };
-pub const WorkspaceBindEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspaceBindEntryView else struct {
+pub const WorkspaceBindEntryView = if (has_panel_interfaces and @hasDecl(zui.ui.panel_interfaces, "WorkspaceBindEntryView")) zui.ui.panel_interfaces.WorkspaceBindEntryView else struct {
     index: usize = 0,
     bind_path: []const u8 = "",
     target_path: []const u8 = "",
     host_role: []const u8 = "",
     selected: bool = false,
 };
-pub const WorkspaceNodePickerEntryView = if (has_panel_interfaces) zui.ui.panel_interfaces.WorkspaceNodePickerEntryView else struct {
+pub const WorkspaceNodePickerEntryView = if (has_panel_interfaces and @hasDecl(zui.ui.panel_interfaces, "WorkspaceNodePickerEntryView")) zui.ui.panel_interfaces.WorkspaceNodePickerEntryView else struct {
     index: usize = 0,
     node_id: []const u8 = "",
     line: []const u8 = "",

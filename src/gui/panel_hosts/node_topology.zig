@@ -1,4 +1,4 @@
-//! Node Topology panel host.
+//! Devices panel host.
 //! Pure draw logic; receives `self: anytype` (*App duck-typed) so this file
 //! never imports root.zig and therefore has no circular dependency.
 
@@ -28,7 +28,7 @@ pub fn draw(self: anytype, manager: anytype, rect: anytype) void {
         panel_rect.min[0] + inset,
         panel_rect.min[1] + (title_h - layout.line_height) * 0.5,
         panel_rect.width() - inset * 2.0,
-        "Node Topology",
+        "Devices",
         self.theme.colors.text_primary,
     );
 
@@ -104,7 +104,7 @@ fn drawTableView(self: anytype, rect: Rect) void {
         self.drawText(
             rect.min[0] + inset,
             y + inset,
-            if (self.connection_state == .connected) "No nodes registered." else "Not connected.",
+            if (self.connection_state == .connected) "No devices registered." else "Not connected.",
             zcolors.withAlpha(self.theme.colors.text_primary, 100),
         );
         return;
@@ -209,7 +209,7 @@ fn drawTreeView(self: anytype, rect: Rect) void {
             if (!has_unmounted) {
                 if (y + row_h * 1.5 > rect.max[1]) break;
                 y += row_gap * 3.0;
-                self.drawText(rect.min[0] + inset, y + (row_h - layout.line_height) * 0.5, "Unmounted nodes:", zcolors.withAlpha(self.theme.colors.text_primary, 140));
+                self.drawText(rect.min[0] + inset, y + (row_h - layout.line_height) * 0.5, "Devices without drives:", zcolors.withAlpha(self.theme.colors.text_primary, 140));
                 y += row_h + row_gap;
                 has_unmounted = true;
             }
@@ -231,7 +231,7 @@ fn drawTreeView(self: anytype, rect: Rect) void {
         self.drawText(
             rect.min[0] + inset,
             y,
-            if (self.connection_state == .connected) "No nodes registered." else "Not connected.",
+            if (self.connection_state == .connected) "No devices registered." else "Not connected.",
             zcolors.withAlpha(self.theme.colors.text_primary, 100),
         );
     }

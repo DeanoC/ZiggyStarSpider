@@ -296,13 +296,13 @@ pub fn buildWorkspacePanelView(self: anytype) OwnedWorkspacePanelView {
         if (bind_hint) |hint| {
             owned.binds_line = std.fmt.allocPrint(
                 self.allocator,
-                "Workspace binds: {d}. {s}",
+                "Workspace packages: {d}. {s}",
                 .{ summary.bind_count, hint },
             ) catch null;
         } else {
             owned.binds_line = std.fmt.allocPrint(
                 self.allocator,
-                "Workspace binds: {d}",
+                "Workspace packages: {d}",
                 .{summary.bind_count},
             ) catch null;
         }
@@ -320,7 +320,7 @@ pub fn buildWorkspacePanelView(self: anytype) OwnedWorkspacePanelView {
             status.mounts.items.len;
         owned.workspace_summary_line = std.fmt.allocPrint(
             self.allocator,
-            "Workspace root: {s} | mounts: {d}",
+            "Workspace root: {s} | drives: {d}",
             .{ root_text, mounted_count },
         ) catch null;
 
@@ -346,14 +346,14 @@ pub fn buildWorkspacePanelView(self: anytype) OwnedWorkspacePanelView {
 
     owned.counts_line = std.fmt.allocPrint(
         self.allocator,
-        "Workspaces: {d} | Nodes: {d}",
+        "Workspaces: {d} | Devices: {d}",
         .{ self.ws.projects.items.len, self.ws.nodes.items.len },
     ) catch null;
 
     for (self.ws.projects.items, 0..) |project, idx| {
         const line = std.fmt.allocPrint(
             self.allocator,
-            "{s} [{s}] access={s} template={s} mounts={d} binds={d}",
+            "{s} [{s}] access={s} template={s} drives={d} packages={d}",
             .{
                 project.id,
                 project.status,
@@ -400,7 +400,7 @@ pub fn buildWorkspacePanelView(self: anytype) OwnedWorkspacePanelView {
                 .index = idx,
                 .mount_path = mount.mount_path,
                 .node_id = mount.node_id,
-                .node_name = mount.node_name,
+                .node_name = mount.node_name orelse "",
                 .export_name = mount.export_name,
                 .selected = self.ws.workspace_selected_mount_index == idx,
             }) catch {};
@@ -416,31 +416,6 @@ pub fn buildWorkspacePanelView(self: anytype) OwnedWorkspacePanelView {
         if (detail.workspace_token) |token| {
             owned.token_display = maskTokenForDisplay(self.allocator, token) catch null;
         }
-    }
-
-    if (self.ws.node_browser_open) {
-        const now_ms_for_nodes = std.time.milliTimestamp();
-        for (self.ws.nodes.items, 0..) |*node, idx| {
-            const node_online = node.lease_expires_at_ms > now_ms_for_nodes;
-            owned.node_picker_entries.append(self.allocator, .{
-                .index = idx,
-                .node_id = node.node_id,
-                .node_name = node.node_name,
-                .online = node_online,
-                .selected = self.ws.node_browser_selected_index == idx,
-            }) catch {};
-        }
-    }
-
-    const profile_id = self.config.selectedProfileId();
-    var local_node_id_val: ?[]const u8 = null;
-    var local_node_name_val: ?[]const u8 = null;
-    var local_node_bootstrapped_val: bool = false;
-    if (self.config.appLocalNode(profile_id)) |local_node| {
-        local_node_id_val = local_node.node_id;
-        local_node_name_val = local_node.node_name;
-        local_node_bootstrapped_val = true;
-        owned.local_node_ttl_text = buildLocalNodeTtlText(self.allocator, self.ws.nodes.items, local_node.node_id) catch null;
     }
 
     owned.view = .{
@@ -478,16 +453,6 @@ pub fn buildWorkspacePanelView(self: anytype) OwnedWorkspacePanelView {
             "External workers can use the workspace without live chat. Use Attach Session only when you want a Spiderweb runtime.",
         .workspaces = owned.projects.items,
         .nodes = owned.nodes.items,
-        .mounts = owned.mount_entries.items,
-        .binds = owned.bind_entries.items,
-        .nodes_for_picker = owned.node_picker_entries.items,
-        .token_display = owned.token_display,
-        .local_node_id = local_node_id_val,
-        .local_node_name = local_node_name_val,
-        .local_node_ttl_text = owned.local_node_ttl_text,
-        .local_node_bootstrapped = local_node_bootstrapped_val,
-        .workspace_op_busy = self.ws.workspace_op_busy,
-        .workspace_op_error = null,
     };
     return owned;
 }
@@ -569,7 +534,7 @@ pub fn drawLauncherUi(self: anytype, ui_window: anytype, fb_width: u32, fb_heigh
     self.drawRect(right_rect, sidebar_border);
 
     var left_y = left_rect.min[1] + pad;
-    const title = "Spider Web Connections";
+    const title = "Spiderweb Connections";
     self.drawLabel(left_rect.min[0] + pad, left_y, title, self.theme.colors.text_primary);
     left_y += layout.line_height + layout.row_gap;
 
@@ -1083,7 +1048,7 @@ pub fn drawLauncherCreateWorkspaceModal(self: anytype, fb_width: u32, fb_height:
         const desc = if (template.description.len > 0) template.description else "(no description)";
         const binds_line = std.fmt.allocPrint(
             self.allocator,
-            "Selected: {s} | binds: {d}",
+            "Selected: {s} | packages: {d}",
             .{ template.id, template.binds.items.len },
         ) catch null;
         defer if (binds_line) |value| self.allocator.free(value);

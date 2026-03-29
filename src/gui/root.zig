@@ -68,9 +68,37 @@ const ConnectionState = enum {
     error_state,
 };
 
-pub const UiStage = stage_machine.Stage;
+const LauncherRecipe = enum {
+    create_workspace,
+    add_second_device,
+    install_package,
+    run_remote_service,
+    connect_to_spiderweb,
+    workspace_tokens,
+    connect_another_machine,
+    contribute_this_mac,
+};
 
-pub const IdeMenuDomain = enum {
+const LauncherRecipeSpec = struct {
+    eyebrow: []const u8,
+    title: []const u8,
+    summary: []const u8,
+    steps: [3][]const u8,
+    primary_label: []const u8,
+    secondary_label: ?[]const u8 = null,
+};
+
+const LauncherRecipeProgress = enum {
+    guide,
+    ready,
+    done,
+};
+
+const UiStage = stage_machine.Stage;
+const OnboardingStage = stage_machine.OnboardingStage;
+const HomeRoute = stage_machine.HomeRoute;
+
+const IdeMenuDomain = enum {
     file,
     edit,
     view,
@@ -148,7 +176,7 @@ const TerminalOutputPanel = zui_panels.terminal_output_panel;
 
 const PanelLayoutMetrics = form_layout.Metrics;
 
-pub const DockTabMetrics = struct {
+const DockTabMetrics = struct {
     pad: f32,
     height: f32,
     min_width: f32,
@@ -489,7 +517,7 @@ fn normalizeWorkspaceToken(workspace_token: ?[]const u8) ?[]const u8 {
     return trimmed;
 }
 
-pub fn platformSupportsMultiWindow() bool {
+fn platformSupportsMultiWindow() bool {
     return storage.supportsMultiWindow();
 }
 
@@ -914,12 +942,12 @@ const DebugPayloadLine = struct {
     matching_close_index: ?u32 = null,
 };
 
-pub const DebugFoldKey = struct {
+const DebugFoldKey = struct {
     event_id: u64,
     line_index: u32,
 };
 
-pub const JsonTokenKind = enum {
+const JsonTokenKind = enum {
     key,
     string,
     number,
@@ -941,32 +969,32 @@ const DockDropTarget = struct {
     rect: UiRect,
 };
 
-const DockTabHitListImpl = struct {
+const DockTabHitList = struct {
     items: [96]DockTabHit = undefined,
     len: usize = 0,
 
-    fn append(self: *DockTabHitListImpl, item: DockTabHit) void {
+    fn append(self: *DockTabHitList, item: DockTabHit) void {
         if (self.len >= self.items.len) return;
         self.items[self.len] = item;
         self.len += 1;
     }
 
-    fn slice(self: *const DockTabHitListImpl) []const DockTabHit {
+    fn slice(self: *const DockTabHitList) []const DockTabHit {
         return self.items[0..self.len];
     }
 };
 
-const DockDropTargetListImpl = struct {
+const DockDropTargetList = struct {
     items: [96]DockDropTarget = undefined,
     len: usize = 0,
 
-    fn append(self: *DockDropTargetListImpl, item: DockDropTarget) void {
+    fn append(self: *DockDropTargetList, item: DockDropTarget) void {
         if (self.len >= self.items.len) return;
         self.items[self.len] = item;
         self.len += 1;
     }
 
-    fn findAt(self: *const DockDropTargetListImpl, pos: [2]f32) ?DockDropTarget {
+    fn findAt(self: *const DockDropTargetList, pos: [2]f32) ?DockDropTarget {
         for (self.items[0..self.len]) |tgt| {
             if (tgt.location != .center) continue;
             if (tgt.rect.contains(pos)) return tgt;
@@ -978,7 +1006,7 @@ const DockDropTargetListImpl = struct {
         return null;
     }
 
-    fn clear(self: *DockDropTargetListImpl) void {
+    fn clear(self: *DockDropTargetList) void {
         self.len = 0;
     }
 };
@@ -989,7 +1017,7 @@ const DockInteractionResult = struct {
     detach_panel_id: ?workspace.PanelId = null,
 };
 
-pub const PerfSample = struct {
+const PerfSample = struct {
     timestamp_ms: i64,
     fps: f32,
     frame_ms: f32,
@@ -1057,7 +1085,7 @@ const RenderCommandFrameStats = struct {
     text_bytes: u64 = 0,
 };
 
-pub const SelectedNodeServiceEventInfo = struct {
+const SelectedNodeServiceEventInfo = struct {
     index: ?usize = null,
     node_id: ?[]const u8 = null,
     diagnostics: ?[]const u8 = null,
@@ -1068,7 +1096,7 @@ const WindowMouseHit = struct {
     local_pos: [2]f32,
 };
 
-fn findTabHitAt(tab_hits: *const DockTabHitListImpl, pos: [2]f32) ?DockTabHit {
+fn findTabHitAt(tab_hits: *const DockTabHitList, pos: [2]f32) ?DockTabHit {
     var idx = tab_hits.len;
     while (idx > 0) {
         idx -= 1;
@@ -1156,6 +1184,10 @@ const FilesystemState = struct {
     filesystem_hide_runtime_noise: bool = false,
     filesystem_selected_path: ?[]u8 = null,
     filesystem_entry_page: usize = 0,
+    filesystem_entry_scroll_y: f32 = 0.0,
+    filesystem_entry_scrollbar_dragging: bool = false,
+    filesystem_entry_scrollbar_drag_anchor: f32 = 0.0,
+    filesystem_entry_scrollbar_drag_scroll: f32 = 0.0,
     filesystem_last_clicked_entry_index: ?usize = null,
     filesystem_last_click_ms: i64 = 0,
     // Column widths (non-zero defaults — set by App.init)
@@ -1312,6 +1344,9 @@ const WorkspaceState = struct {
     launcher_create_template_page: usize = 0,
     launcher_create_templates: std.ArrayListUnmanaged(workspace_types.WorkspaceTemplate) = .{},
     launcher_create_modal_error: ?[]u8 = null,
+    launcher_recipe_modal: ?LauncherRecipe = null,
+    onboarding_stage: OnboardingStage = .connect,
+    home_route: HomeRoute = .workspace,
     workspace_recovery_blocked_until: u64 = 0,
     workspace_recovery_blocked_for_manager: usize = 0,
     workspace_recovery_suspended_until: u64 = 0,
@@ -1324,10 +1359,6 @@ const WorkspaceState = struct {
 };
 
 pub const App = struct {
-    // Type aliases exposed for panel host delegation (anytype self access).
-    pub const DockTabHitList = DockTabHitListImpl;
-    pub const DockDropTargetList = DockDropTargetListImpl;
-
     allocator: std.mem.Allocator,
     window: *c.SDL_Window,
     gpu: zapp.multi_window_renderer.Shared,
@@ -2251,7 +2282,7 @@ pub const App = struct {
         return ws;
     }
 
-    pub fn spawnUiWindow(self: *App) !void {
+    fn spawnUiWindow(self: *App) !void {
         if (!platformSupportsMultiWindow()) return error.UnsupportedPlatform;
         const width: c_int = 960;
         const height: c_int = 720;
@@ -5957,6 +5988,7 @@ pub const App = struct {
         self.ws.workspace_selected_mount_index = null;
         self.ws.workspace_selected_bind_index = null;
         try self.syncSettingsToConfig();
+        self.syncHomeOnboardingStage();
     }
 
     pub fn refreshWorkspaceData(self: *App) !void {
@@ -6060,6 +6092,7 @@ pub const App = struct {
                 self.setMissionDashboardError("Refresh missions failed");
             }
         };
+        self.syncHomeOnboardingStage();
     }
 
     fn refreshMissionDashboardData(self: *App) !void {
@@ -7174,7 +7207,7 @@ pub const App = struct {
         };
     }
 
-    pub fn syntaxThemeColor(self: *const App, kind: JsonTokenKind) [4]f32 {
+    fn syntaxThemeColor(self: *const App, kind: JsonTokenKind) [4]f32 {
         const syntax = self.sharedStyleSheet().syntax;
         return switch (kind) {
             .key => syntax.key orelse zcolors.blend(self.theme.colors.text_primary, self.theme.colors.primary, 0.5),
@@ -7444,23 +7477,2334 @@ pub const App = struct {
     }
 
     fn drawLauncherUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
-        workspace_host_mod.drawLauncherUi(self, ui_window, fb_width, fb_height);
+        self.ui_commands.clear();
+        ui_draw_context.setGlobalCommandList(&self.ui_commands);
+        defer ui_draw_context.clearGlobalCommandList();
+
+        const menu_h = self.windowMenuBarHeight();
+        const status_h: f32 = 24.0 * self.ui_scale;
+        const content_rect = Rect.fromXYWH(
+            0,
+            menu_h,
+            @floatFromInt(fb_width),
+            @max(1.0, @as(f32, @floatFromInt(fb_height)) - menu_h - status_h),
+        );
+        ui_window.ui_state.last_dock_content_rect = UiRect.fromMinSize(content_rect.min, .{
+            content_rect.width(),
+            content_rect.height(),
+        });
+
+        const shell = self.sharedStyleSheet().shell;
+        const surfaces = self.sharedStyleSheet().surfaces;
+        const full_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+        self.drawPaintRect(
+            full_rect,
+            surfaces.background orelse Paint{ .solid = self.theme.colors.background },
+        );
+        self.drawPaintRect(
+            content_rect,
+            shell.dock_fill orelse surfaces.surface orelse Paint{ .solid = self.theme.colors.surface },
+        );
+        if (shell.dock_border) |dock_border| self.drawRect(content_rect, dock_border);
+
+        const launcher_modal_open = self.ws.launcher_create_modal_open;
+        const about_modal_open = self.about_modal_open;
+        const recipe_modal_open = self.ws.launcher_recipe_modal != null;
+        const saved_mouse_down = self.mouse_down;
+        const saved_mouse_clicked = self.mouse_clicked;
+        const saved_mouse_released = self.mouse_released;
+        const saved_mouse_right_clicked = self.mouse_right_clicked;
+        if (launcher_modal_open or about_modal_open or recipe_modal_open) {
+            // Keep launcher visible under the modal, but route pointer input only to modal widgets.
+            self.mouse_down = false;
+            self.mouse_clicked = false;
+            self.mouse_released = false;
+            self.mouse_right_clicked = false;
+        }
+
+        const layout = self.panelLayoutMetrics();
+        const pad = layout.inset;
+        const gap = layout.section_gap;
+        const left_width = @max(260.0 * self.ui_scale, content_rect.width() * 0.33);
+        const right_width = @max(320.0 * self.ui_scale, content_rect.width() - left_width - gap - pad * 2.0);
+        const left_rect = Rect.fromXYWH(
+            content_rect.min[0] + pad,
+            content_rect.min[1] + pad,
+            left_width,
+            @max(1.0, content_rect.height() - pad * 2.0),
+        );
+        const right_rect = Rect.fromXYWH(
+            left_rect.max[0] + gap,
+            content_rect.min[1] + pad,
+            right_width,
+            @max(1.0, content_rect.height() - pad * 2.0),
+        );
+
+        const sidebar_fill = shell.sidebar_fill orelse surfaces.surface orelse Paint{ .solid = self.theme.colors.surface };
+        const sidebar_border = self.sharedStyleSheet().panel.border orelse self.theme.colors.border;
+        self.drawPaintRect(left_rect, sidebar_fill);
+        self.drawRect(left_rect, sidebar_border);
+        self.drawPaintRect(right_rect, sidebar_fill);
+        self.drawRect(right_rect, sidebar_border);
+
+        var left_y = left_rect.min[1] + pad;
+        const title = "Spiderweb Connections";
+        self.drawLabel(left_rect.min[0] + pad, left_y, title, self.theme.colors.text_primary);
+        left_y += layout.line_height + layout.row_gap;
+
+        const profile_row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const profile_row_w = left_rect.width() - pad * 2.0;
+        const profiles_rect_h = @max(140.0 * self.ui_scale, left_rect.height() * 0.30);
+        const profiles_rect = Rect.fromXYWH(
+            left_rect.min[0] + pad,
+            left_y,
+            profile_row_w,
+            profiles_rect_h,
+        );
+        self.drawSurfacePanel(profiles_rect);
+        self.drawRect(profiles_rect, self.theme.colors.border);
+
+        const selected_index = @min(
+            self.ws.launcher_selected_profile_index,
+            if (self.config.connection_profiles.len > 0) self.config.connection_profiles.len - 1 else 0,
+        );
+        var profile_row_y = profiles_rect.min[1] + layout.inner_inset;
+        if (self.config.connection_profiles.len == 0) {
+            self.drawTextTrimmed(
+                profiles_rect.min[0] + layout.inner_inset,
+                profile_row_y,
+                profiles_rect.width() - layout.inner_inset * 2.0,
+                "No connection profiles. Create one below.",
+                self.theme.colors.text_secondary,
+            );
+        } else {
+            for (self.config.connection_profiles, 0..) |profile, idx| {
+                if (profile_row_y + profile_row_h > profiles_rect.max[1] - layout.inner_inset) break;
+                const label = if (std.mem.eql(u8, profile.id, self.config.selectedProfileId()))
+                    profile.name
+                else
+                    profile.server_url;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(
+                        profiles_rect.min[0] + layout.inner_inset,
+                        profile_row_y,
+                        profiles_rect.width() - layout.inner_inset * 2.0,
+                        profile_row_h,
+                    ),
+                    label,
+                    .{ .variant = if (idx == selected_index) .primary else .secondary },
+                )) {
+                    self.ws.launcher_selected_profile_index = idx;
+                    self.applyLauncherSelectedProfile() catch |err| {
+                        std.log.warn("Failed to apply selected profile: {s}", .{@errorName(err)});
+                    };
+                }
+                profile_row_y += profile_row_h + layout.row_gap * 0.6;
+            }
+        }
+        left_y = profiles_rect.max[1] + layout.section_gap * 0.6;
+
+        self.drawLabel(left_rect.min[0] + pad, left_y, "Profile Name", self.theme.colors.text_secondary);
+        left_y += layout.line_height + layout.row_gap * 0.25;
+        const profile_name_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
+            self.ws.launcher_profile_name.items,
+            self.settings_panel.focused_field == .launcher_profile_name,
+            .{ .placeholder = "Display name" },
+        );
+        if (profile_name_focused) self.settings_panel.focused_field = .launcher_profile_name;
+        left_y += layout.input_height + layout.row_gap * 0.55;
+
+        self.drawLabel(left_rect.min[0] + pad, left_y, "Server URL", self.theme.colors.text_secondary);
+        left_y += layout.line_height + layout.row_gap * 0.25;
+        const url_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
+            self.settings_panel.server_url.items,
+            self.settings_panel.focused_field == .server_url,
+            .{ .placeholder = "ws://host:port" },
+        );
+        if (url_focused) self.settings_panel.focused_field = .server_url;
+        left_y += layout.input_height + layout.row_gap * 0.55;
+
+        self.drawLabel(left_rect.min[0] + pad, left_y, "Metadata", self.theme.colors.text_secondary);
+        left_y += layout.line_height + layout.row_gap * 0.25;
+        const metadata_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
+            self.ws.launcher_profile_metadata.items,
+            self.settings_panel.focused_field == .launcher_profile_metadata,
+            .{ .placeholder = "Optional notes" },
+        );
+        if (metadata_focused) self.settings_panel.focused_field = .launcher_profile_metadata;
+        left_y += layout.input_height + layout.row_gap * 0.55;
+
+        self.drawLabel(left_rect.min[0] + pad, left_y, "Role", self.theme.colors.text_secondary);
+        left_y += layout.line_height + layout.row_gap * 0.25;
+        const role_button_w = (profile_row_w - pad) * 0.5;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, role_button_w, layout.button_height),
+            "Admin",
+            .{ .variant = if (self.config.active_role == .admin) .primary else .secondary },
+        )) {
+            self.setActiveConnectRole(.admin) catch {};
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad + role_button_w + pad, left_y, role_button_w, layout.button_height),
+            "User",
+            .{ .variant = if (self.config.active_role == .user) .primary else .secondary },
+        )) {
+            self.setActiveConnectRole(.user) catch {};
+        }
+        left_y += layout.button_height + layout.row_gap * 0.8;
+
+        self.drawLabel(
+            left_rect.min[0] + pad,
+            left_y,
+            "Access Token",
+            self.theme.colors.text_secondary,
+        );
+        left_y += layout.line_height + layout.row_gap * 0.25;
+        const connect_token_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, profile_row_w, layout.input_height),
+            self.ws.launcher_connect_token.items,
+            self.settings_panel.focused_field == .launcher_connect_token,
+            .{
+                .placeholder = "Spiderweb access token",
+            },
+        );
+        if (connect_token_focused) self.settings_panel.focused_field = .launcher_connect_token;
+        left_y += layout.input_height + layout.row_gap * 0.55;
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, role_button_w, profile_row_h),
+            "New Profile",
+            .{ .variant = .secondary },
+        )) {
+            self.createConnectionProfileFromLauncher() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Profile create failed: {s}", .{@errorName(err)}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.setLauncherNotice(value);
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad + role_button_w + pad, left_y, role_button_w, profile_row_h),
+            "Save Profile",
+            .{ .variant = .secondary, .disabled = self.config.connection_profiles.len == 0 },
+        )) {
+            self.saveSelectedProfileFromLauncher() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Profile save failed: {s}", .{@errorName(err)}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.setLauncherNotice(value);
+            };
+        }
+        left_y += profile_row_h + layout.row_gap;
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad, left_y, role_button_w, profile_row_h),
+            if (self.connection_state == .connected) "Disconnect" else "Connect",
+            .{ .variant = .primary, .disabled = self.connection_state == .connecting },
+        )) {
+            if (self.connection_state == .connected) {
+                self.disconnect();
+                self.setConnectionState(.disconnected, "Disconnected");
+            } else {
+                self.persistLauncherConnectToken() catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Unable to persist token: {s}", .{@errorName(err)}) catch null;
+                    defer if (msg) |value| self.allocator.free(value);
+                    if (msg) |value| self.setLauncherNotice(value);
+                    return;
+                };
+                self.tryConnect(&self.manager) catch {};
+                if (self.connection_state == .connected) {
+                    self.refreshWorkspaceData() catch {};
+                }
+            }
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(left_rect.min[0] + pad + role_button_w + pad, left_y, role_button_w, profile_row_h),
+            "Refresh",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.refreshWorkspaceData() catch |err| {
+                const msg = std.fmt.allocPrint(self.allocator, "Refresh failed: {s}", .{@errorName(err)}) catch null;
+                defer if (msg) |value| self.allocator.free(value);
+                if (msg) |value| self.setLauncherNotice(value);
+            };
+        }
+
+        var right_y = right_rect.min[1] + pad;
+        self.drawLabel(right_rect.min[0] + pad, right_y, onboardingStageHeadline(self.ws.onboarding_stage), self.theme.colors.text_primary);
+        right_y += layout.line_height + layout.row_gap * 0.45;
+
+        const stage_detail = switch (self.ws.onboarding_stage) {
+            .connect => "Save a connection profile, add an access token, and connect to Spiderweb.",
+            .choose_workspace => "Choose the workspace you want to open first, or create a new one with strong defaults.",
+            .workspace_ready => "Open the workspace shell directly, or jump into Devices, Capabilities, Explore, or Settings.",
+        };
+        self.drawTextTrimmed(
+            right_rect.min[0] + pad,
+            right_y,
+            right_rect.width() - pad * 2.0,
+            stage_detail,
+            self.theme.colors.text_secondary,
+        );
+        right_y += layout.line_height + layout.row_gap * 0.7;
+        if (self.ws.launcher_notice) |notice| {
+            self.drawTextTrimmed(
+                right_rect.min[0] + pad,
+                right_y,
+                right_rect.width() - pad * 2.0,
+                notice,
+                self.theme.colors.text_secondary,
+            );
+            right_y += layout.line_height + layout.row_gap * 0.7;
+        }
+
+        const route_gap = @max(6.0 * self.ui_scale, layout.row_gap * 0.4);
+        const route_rect_w = (right_rect.width() - pad * 2.0 - route_gap * 4.0) / 5.0;
+        var route_x = right_rect.min[0] + pad;
+        for ([_]HomeRoute{ .workspace, .devices, .capabilities, .explore, .settings }) |route| {
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(route_x, right_y, route_rect_w, layout.button_height),
+                homeRouteLabel(route),
+                .{ .variant = if (self.ws.home_route == route) .primary else .secondary },
+            )) {
+                self.ws.home_route = route;
+            }
+            route_x += route_rect_w + route_gap;
+        }
+        right_y += layout.button_height + layout.row_gap * 0.8;
+
+        const home_content_rect = Rect.fromXYWH(
+            right_rect.min[0] + pad,
+            right_y,
+            right_rect.width() - pad * 2.0,
+            @max(1.0, right_rect.max[1] - right_y - pad),
+        );
+        switch (self.ws.home_route) {
+            .workspace => self.drawLauncherWorkspaceRoute(home_content_rect),
+            .devices => self.drawLauncherDevicesRoute(home_content_rect),
+            .capabilities => self.drawLauncherCapabilitiesRoute(home_content_rect),
+            .explore => self.drawLauncherExploreRoute(home_content_rect),
+            .settings => self.drawLauncherSettingsRoute(home_content_rect),
+        }
+
+        _ = self.drawWindowMenuBar(ui_window, fb_width);
+        self.drawStatusOverlay(fb_width, fb_height);
+        if (launcher_modal_open or about_modal_open or recipe_modal_open) {
+            self.mouse_down = saved_mouse_down;
+            self.mouse_clicked = saved_mouse_clicked;
+            self.mouse_released = saved_mouse_released;
+            self.mouse_right_clicked = saved_mouse_right_clicked;
+            if (launcher_modal_open) self.drawLauncherCreateWorkspaceModal(fb_width, fb_height);
+            if (about_modal_open) self.drawAboutModal(fb_width, fb_height);
+            if (recipe_modal_open) self.drawLauncherRecipeModal(fb_width, fb_height);
+        }
+        if (self.ws.workspace_wizard_open) {
+            self.mouse_down = saved_mouse_down;
+            self.mouse_clicked = saved_mouse_clicked;
+            self.mouse_released = saved_mouse_released;
+            self.mouse_right_clicked = saved_mouse_right_clicked;
+            self.drawWorkspaceWizardModal(fb_width, fb_height);
+        }
     }
 
     pub fn drawLauncherCreateWorkspaceModal(self: *App, fb_width: u32, fb_height: u32) void {
-        workspace_host_mod.drawLauncherCreateWorkspaceModal(self, fb_width, fb_height);
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inset, 12.0 * self.ui_scale);
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+
+        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
+
+        const modal_w = std.math.clamp(
+            screen_rect.width() * 0.62,
+            420.0 * self.ui_scale,
+            760.0 * self.ui_scale,
+        );
+        const modal_h = std.math.clamp(
+            screen_rect.height() * 0.72,
+            360.0 * self.ui_scale,
+            640.0 * self.ui_scale,
+        );
+        const modal_rect = Rect.fromXYWH(
+            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
+            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
+            modal_w,
+            modal_h,
+        );
+
+        self.drawSurfacePanel(modal_rect);
+        self.drawRect(modal_rect, self.theme.colors.border);
+
+        var y = modal_rect.min[1] + pad;
+        const field_w = modal_rect.width() - pad * 2.0;
+
+        self.drawLabel(modal_rect.min[0] + pad, y, "Create Workspace", self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.35;
+        self.drawTextTrimmed(
+            modal_rect.min[0] + pad,
+            y,
+            field_w,
+            "Pick a Spiderweb template and create a new workspace.",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.8;
+
+        if (self.ws.launcher_create_modal_error) |message| {
+            self.drawTextTrimmed(
+                modal_rect.min[0] + pad,
+                y,
+                field_w,
+                message,
+                zcolors.rgba(220, 80, 80, 255),
+            );
+            y += layout.line_height + layout.row_gap * 0.65;
+        }
+
+        self.drawLabel(modal_rect.min[0] + pad, y, "Workspace Name", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.25;
+        const name_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, y, field_w, layout.input_height),
+            self.settings_panel.project_create_name.items,
+            self.settings_panel.focused_field == .project_create_name,
+            .{ .placeholder = "Example: Distributed Workspace" },
+        );
+        if (name_focused) self.settings_panel.focused_field = .project_create_name;
+        y += layout.input_height + layout.row_gap * 0.6;
+
+        self.drawLabel(modal_rect.min[0] + pad, y, "Vision (Optional)", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.25;
+        const vision_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, y, field_w, layout.input_height),
+            self.settings_panel.project_create_vision.items,
+            self.settings_panel.focused_field == .project_create_vision,
+            .{ .placeholder = "Short goal or context" },
+        );
+        if (vision_focused) self.settings_panel.focused_field = .project_create_vision;
+        y += layout.input_height + layout.row_gap * 0.8;
+
+        const action_y = modal_rect.max[1] - pad - row_h;
+        const detail_h = layout.line_height * 2.2;
+        const detail_y = action_y - layout.row_gap - detail_h;
+
+        const template_header_y = y;
+        self.drawLabel(modal_rect.min[0] + pad, template_header_y, "Template", self.theme.colors.text_secondary);
+
+        const refresh_w = @max(160.0 * self.ui_scale, self.measureText("Refresh Templates") + pad * 1.4);
+        const refresh_rect = Rect.fromXYWH(
+            modal_rect.max[0] - pad - refresh_w,
+            template_header_y - @max(0.0, (row_h - layout.line_height) * 0.3),
+            refresh_w,
+            row_h,
+        );
+        if (self.drawButtonWidget(
+            refresh_rect,
+            "Refresh Templates",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.clearLauncherCreateWorkspaceModalError();
+            self.refreshLauncherCreateWorkspaceTemplates() catch |err| {
+                const msg = self.formatControlOpError("Workspace template list failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherCreateWorkspaceModalError(text);
+                } else {
+                    self.setLauncherCreateWorkspaceModalError("Workspace template list failed.");
+                }
+            };
+        }
+        y += row_h + layout.row_gap * 0.4;
+
+        const list_bottom = detail_y - layout.row_gap * 0.5;
+        const list_h = @max(88.0 * self.ui_scale, list_bottom - y);
+        const list_rect = Rect.fromXYWH(modal_rect.min[0] + pad, y, field_w, list_h);
+        self.drawSurfacePanel(list_rect);
+        self.drawRect(list_rect, self.theme.colors.border);
+
+        const template_count = self.ws.launcher_create_templates.items.len;
+        const template_row_h = @max(layout.button_height, 30.0 * self.ui_scale);
+        const template_row_gap = layout.row_gap * 0.45;
+        const template_row_step = template_row_h + template_row_gap;
+        const list_inner_h = @max(0.0, list_rect.height() - layout.inner_inset * 2.0);
+        const rows_per_page = blk: {
+            if (template_row_step <= 0.0 or list_inner_h <= 0.0) break :blk @as(usize, 1);
+            const rows_fit = @floor((list_inner_h + template_row_gap) / template_row_step);
+            break :blk @max(@as(usize, 1), @as(usize, @intFromFloat(rows_fit)));
+        };
+        const total_pages = if (template_count == 0)
+            @as(usize, 1)
+        else
+            (template_count / rows_per_page) + @as(usize, @intFromBool((template_count % rows_per_page) != 0));
+        if (self.ws.launcher_create_template_page >= total_pages) {
+            self.ws.launcher_create_template_page = total_pages - 1;
+        }
+
+        const pager_button_w = @max(62.0 * self.ui_scale, self.measureText("Next") + pad * 1.05);
+        const pager_gap = @max(6.0 * self.ui_scale, layout.row_gap * 0.4);
+        const next_rect = Rect.fromXYWH(
+            refresh_rect.min[0] - pager_gap - pager_button_w,
+            refresh_rect.min[1],
+            pager_button_w,
+            row_h,
+        );
+        const prev_rect = Rect.fromXYWH(
+            next_rect.min[0] - pager_gap - pager_button_w,
+            refresh_rect.min[1],
+            pager_button_w,
+            row_h,
+        );
+        if (self.drawButtonWidget(
+            prev_rect,
+            "Prev",
+            .{ .variant = .secondary, .disabled = template_count == 0 or self.ws.launcher_create_template_page == 0 },
+        )) {
+            self.ws.launcher_create_template_page -= 1;
+        }
+        if (self.drawButtonWidget(
+            next_rect,
+            "Next",
+            .{
+                .variant = .secondary,
+                .disabled = template_count == 0 or (self.ws.launcher_create_template_page + 1) >= total_pages,
+            },
+        )) {
+            self.ws.launcher_create_template_page += 1;
+        }
+
+        const page_line = std.fmt.allocPrint(
+            self.allocator,
+            "Page {d}/{d}",
+            .{ self.ws.launcher_create_template_page + 1, total_pages },
+        ) catch null;
+        defer if (page_line) |value| self.allocator.free(value);
+        if (page_line) |value| {
+            const label_x = modal_rect.min[0] + pad + self.measureText("Template") + pad * 0.45;
+            const label_w = @max(0.0, prev_rect.min[0] - pager_gap - label_x);
+            self.drawTextTrimmed(
+                label_x,
+                template_header_y,
+                label_w,
+                value,
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        if (template_count == 0) {
+            self.drawTextTrimmed(
+                list_rect.min[0] + layout.inner_inset,
+                list_rect.min[1] + layout.inner_inset,
+                list_rect.width() - layout.inner_inset * 2.0,
+                "No templates returned by Spiderweb. Use Refresh Templates.",
+                self.theme.colors.text_secondary,
+            );
+        } else {
+            const page_start = self.ws.launcher_create_template_page * rows_per_page;
+            const page_end = @min(page_start + rows_per_page, template_count);
+            var row_y = list_rect.min[1] + layout.inner_inset;
+            const row_max_y = list_rect.max[1] - layout.inner_inset;
+            for (self.ws.launcher_create_templates.items[page_start..page_end], page_start..) |template, idx| {
+                if (row_y + template_row_h > row_max_y) break;
+                if (self.drawButtonWidget(
+                    Rect.fromXYWH(
+                        list_rect.min[0] + layout.inner_inset,
+                        row_y,
+                        list_rect.width() - layout.inner_inset * 2.0,
+                        template_row_h,
+                    ),
+                    template.id,
+                    .{ .variant = if (idx == self.ws.launcher_create_selected_template_index) .primary else .secondary },
+                )) {
+                    self.ws.launcher_create_selected_template_index = idx;
+                    self.syncLauncherCreateSelectedTemplateToSettings() catch {};
+                    self.clearLauncherCreateWorkspaceModalError();
+                }
+                row_y += template_row_step;
+            }
+        }
+
+        const detail_rect = Rect.fromXYWH(modal_rect.min[0] + pad, detail_y, field_w, detail_h);
+        self.drawSurfacePanel(detail_rect);
+        self.drawRect(detail_rect, self.theme.colors.border);
+        if (self.selectedLauncherCreateWorkspaceTemplate()) |template| {
+            const desc = if (template.description.len > 0) template.description else "(no description)";
+        const binds_line = std.fmt.allocPrint(
+            self.allocator,
+            "Selected: {s} | packages: {d}",
+            .{ template.id, template.binds.items.len },
+        ) catch null;
+            defer if (binds_line) |value| self.allocator.free(value);
+            if (binds_line) |value| {
+                self.drawTextTrimmed(
+                    detail_rect.min[0] + layout.inner_inset,
+                    detail_rect.min[1] + layout.inner_inset * 0.7,
+                    detail_rect.width() - layout.inner_inset * 2.0,
+                    value,
+                    self.theme.colors.text_primary,
+                );
+            }
+            self.drawTextTrimmed(
+                detail_rect.min[0] + layout.inner_inset,
+                detail_rect.min[1] + layout.inner_inset * 0.7 + layout.line_height,
+                detail_rect.width() - layout.inner_inset * 2.0,
+                desc,
+                self.theme.colors.text_secondary,
+            );
+        } else {
+            self.drawTextTrimmed(
+                detail_rect.min[0] + layout.inner_inset,
+                detail_rect.min[1] + layout.inner_inset * 0.7,
+                detail_rect.width() - layout.inner_inset * 2.0,
+                "Select a template to continue.",
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        const button_w = (field_w - pad) * 0.5;
+        const cancel_rect = Rect.fromXYWH(modal_rect.min[0] + pad, action_y, button_w, row_h);
+        if (self.drawButtonWidget(cancel_rect, "Cancel", .{ .variant = .secondary })) {
+            self.closeLauncherCreateWorkspaceModal();
+            return;
+        }
+
+        const trimmed_name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
+        const create_disabled = self.connection_state != .connected or
+            trimmed_name.len == 0 or
+            self.ws.launcher_create_templates.items.len == 0;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(cancel_rect.max[0] + pad, action_y, button_w, row_h),
+            "Create Workspace",
+            .{ .variant = .primary, .disabled = create_disabled },
+        )) {
+            self.createWorkspaceFromLauncherModal() catch |err| {
+                const msg = self.formatControlOpError("Workspace create failed", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherCreateWorkspaceModalError(text);
+                } else {
+                    self.setLauncherCreateWorkspaceModalError("Workspace create failed.");
+                }
+            };
+        }
+
+        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.closeLauncherCreateWorkspaceModal();
+        }
+    }
+
+    fn launcherLocalDeviceSummary(self: *App) []const u8 {
+        if (self.connection_state != .connected) return "Connect to check this Mac";
+
+        const local_node = self.config.appLocalNode(self.config.selectedProfileId()) orelse return "Not prepared yet";
+        const now_ms = std.time.milliTimestamp();
+        for (self.ws.nodes.items) |node| {
+            if (!std.mem.eql(u8, node.node_id, local_node.node_id)) continue;
+            return if (node.lease_expires_at_ms > now_ms) "Online" else "Needs attention";
+        }
+        return "Waiting to connect";
+    }
+
+    fn launcherDriveLabel(self: *App) []const u8 {
+        if (self.ws.workspace_state) |*status| {
+            if (status.workspace_root) |root| {
+                const trimmed = std.mem.trim(u8, root, " \t\r\n");
+                if (trimmed.len > 0) return root;
+            }
+            if (status.mounts.items.len > 0) return status.mounts.items[0].mount_path;
+        }
+        if (self.ws.selected_workspace_detail) |*detail| {
+            if (detail.mounts.items.len > 0) return detail.mounts.items[0].mount_path;
+        }
+        return "Mount a drive to begin";
+    }
+
+    fn drawLauncherActionCard(
+        self: *App,
+        rect: Rect,
+        title: []const u8,
+        body: []const u8,
+        button_label: []const u8,
+        enabled: bool,
+    ) bool {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const button_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        self.drawSurfacePanel(rect);
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            rect.min[1] + pad,
+            rect.width() - pad * 2.0,
+            title,
+            self.theme.colors.text_primary,
+        );
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            rect.min[1] + pad + layout.line_height + layout.row_gap * 0.3,
+            rect.width() - pad * 2.0,
+            body,
+            self.theme.colors.text_secondary,
+        );
+        return self.drawButtonWidget(
+            Rect.fromXYWH(
+                rect.min[0] + pad,
+                rect.max[1] - pad - button_h,
+                rect.width() - pad * 2.0,
+                button_h,
+            ),
+            button_label,
+            .{ .variant = .secondary, .disabled = !enabled },
+        );
+    }
+
+    fn drawLauncherRecipeCard(
+        self: *App,
+        rect: Rect,
+        eyebrow: []const u8,
+        title: []const u8,
+        body: []const u8,
+        progress: LauncherRecipeProgress,
+        button_label: []const u8,
+        enabled: bool,
+    ) bool {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const button_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        self.drawSurfacePanel(rect);
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            rect.min[1] + pad,
+            rect.width() - pad * 2.0 - 88.0 * self.ui_scale,
+            eyebrow,
+            self.theme.colors.text_secondary,
+        );
+        const progress_label = launcherRecipeProgressLabel(progress);
+        const progress_color = self.launcherRecipeProgressColor(progress);
+        const badge_w = @max(64.0 * self.ui_scale, self.measureText(progress_label) + pad * 1.2);
+        const badge_rect = Rect.fromXYWH(
+            rect.max[0] - pad - badge_w,
+            rect.min[1] + pad - 2.0 * self.ui_scale,
+            badge_w,
+            layout.button_height * 0.82,
+        );
+        self.drawFilledRect(badge_rect, zcolors.withAlpha(progress_color, 28));
+        self.drawRect(badge_rect, progress_color);
+        self.drawTextTrimmed(
+            badge_rect.min[0] + pad * 0.4,
+            badge_rect.min[1] + @max(0.0, (badge_rect.height() - layout.line_height) * 0.5),
+            badge_rect.width() - pad * 0.8,
+            progress_label,
+            progress_color,
+        );
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            rect.min[1] + pad + layout.line_height,
+            rect.width() - pad * 2.0,
+            title,
+            self.theme.colors.text_primary,
+        );
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            rect.min[1] + pad + layout.line_height * 2.0 + layout.row_gap * 0.25,
+            rect.width() - pad * 2.0,
+            body,
+            self.theme.colors.text_secondary,
+        );
+        return self.drawButtonWidget(
+            Rect.fromXYWH(
+                rect.min[0] + pad,
+                rect.max[1] - pad - button_h,
+                rect.width() - pad * 2.0,
+                button_h,
+            ),
+            button_label,
+            .{ .variant = .secondary, .disabled = !enabled },
+        );
+    }
+
+    fn launcherRecipeSpec(recipe: LauncherRecipe) LauncherRecipeSpec {
+        return switch (recipe) {
+            .create_workspace => .{
+                .eyebrow = "RECIPE",
+                .title = "Create a useful workspace",
+                .summary = "Start with one workspace that has a clear job. Keep the scope obvious, then enter the workspace shell before expanding into more devices or packages.",
+                .steps = .{
+                    "Pick a clear workspace name and short goal.",
+                    "Choose the smallest template that matches the job.",
+                    "Open the workspace shell, then add devices or packages only when needed.",
+                },
+                .primary_label = "Create Workspace",
+                .secondary_label = "Open Workspace",
+            },
+            .add_second_device => .{
+                .eyebrow = "RECIPE",
+                .title = "Add a second device",
+                .summary = "Once the first workspace is healthy, bring in another machine so the workspace can span more than one device and you can see distributed behavior directly.",
+                .steps = .{
+                    "Use Spiderweb on the host Mac to copy a network URL and access token.",
+                    "Connect from the second machine with that URL and token.",
+                    "Return to Devices and confirm the machine appears online in the workspace.",
+                },
+                .primary_label = "Open Devices",
+                .secondary_label = "Open Settings",
+            },
+            .install_package => .{
+                .eyebrow = "RECIPE",
+                .title = "Install a package",
+                .summary = "Add the next useful capability after first success. Start with tools or services you will actually use, not every package at once.",
+                .steps = .{
+                    "Open Capabilities for the selected workspace.",
+                    "Refresh packages and inspect what is already installed.",
+                    "Enable the next useful package, then return to the workspace to use it.",
+                },
+                .primary_label = "Open Capabilities",
+                .secondary_label = "Refresh Packages",
+            },
+            .run_remote_service => .{
+                .eyebrow = "RECIPE",
+                .title = "Run a remote service",
+                .summary = "After the workspace and devices are stable, use packages and topology together to expose one remote service you actually need.",
+                .steps = .{
+                    "Confirm the device that should host the service is online.",
+                    "Enable or install the package that provides the service.",
+                    "Open the workspace and topology views to confirm where it is running and how it is attached.",
+                },
+                .primary_label = "Open Workspace",
+                .secondary_label = "Open Capabilities",
+            },
+            .connect_to_spiderweb => .{
+                .eyebrow = "REMOTE CONNECTION",
+                .title = "Connect SpiderApp to another Spiderweb",
+                .summary = "Save a profile, paste the server URL and access token, connect, then choose the workspace you want to open first.",
+                .steps = .{
+                    "Create or select a connection profile on the left.",
+                    "Paste the Spiderweb server URL and access token.",
+                    "Connect, refresh, then choose the workspace you want to open.",
+                },
+                .primary_label = "Connect",
+                .secondary_label = "Refresh",
+            },
+            .workspace_tokens => .{
+                .eyebrow = "WORKSPACE TOKENS",
+                .title = "Share workspace-scoped access carefully",
+                .summary = "Use workspace tokens when a tool or user should access one workspace without holding the broader connection token.",
+                .steps = .{
+                    "Connect to Spiderweb and select the right workspace first.",
+                    "Open Settings to manage the workspace-scoped token surfaces.",
+                    "Share the narrowest token that matches the task instead of the broader connection token.",
+                },
+                .primary_label = "Open Settings",
+                .secondary_label = null,
+            },
+            .connect_another_machine => .{
+                .eyebrow = "RECIPE",
+                .title = "Connect another machine",
+                .summary = "Use Spiderweb on the host Mac to copy a network URL and access token, then connect from the second machine and confirm it joins the workspace.",
+                .steps = .{
+                    "On the host Mac, reveal a network URL and access token.",
+                    "Use those details on the second machine to connect back to Spiderweb.",
+                    "Return here and confirm the new device shows up online.",
+                },
+                .primary_label = "Open Settings",
+                .secondary_label = "Open Devices",
+            },
+            .contribute_this_mac => .{
+                .eyebrow = "RECIPE",
+                .title = "Contribute this Mac remotely",
+                .summary = "Use Spiderweb.app on this Mac to pair it with an invite token when another Spiderweb should see this machine as a device.",
+                .steps = .{
+                    "Open the host-side setup and switch to the pairing flow.",
+                    "Paste the remote control URL and invite token.",
+                    "Pair this Mac, then verify it appears in the remote workspace topology.",
+                },
+                .primary_label = "Advanced Setup",
+                .secondary_label = "Open Settings",
+            },
+        };
+    }
+
+    fn openLauncherRecipeModal(self: *App, recipe: LauncherRecipe) void {
+        self.ws.launcher_recipe_modal = recipe;
+    }
+
+    fn closeLauncherRecipeModal(self: *App) void {
+        self.ws.launcher_recipe_modal = null;
+    }
+
+    fn runLauncherRecipePrimaryAction(self: *App, recipe: LauncherRecipe) void {
+        self.closeLauncherRecipeModal();
+        switch (recipe) {
+            .create_workspace => self.openLauncherCreateWorkspaceModal(),
+            .add_second_device => {
+                self.ws.home_route = .devices;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .install_package => {
+                self.ws.home_route = .capabilities;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .run_remote_service => {
+                self.ws.home_route = .workspace;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .connect_to_spiderweb => {
+                if (self.connection_state == .connected) {
+                    self.refreshWorkspaceData() catch {};
+                } else {
+                    self.persistLauncherConnectToken() catch {};
+                    self.tryConnect(&self.manager) catch {};
+                }
+            },
+            .workspace_tokens => {
+                self.ws.home_route = .settings;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .connect_another_machine => {
+                self.ws.home_route = .settings;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .contribute_this_mac => self.openWorkspaceWizard(),
+        }
+    }
+
+    fn runLauncherRecipeSecondaryAction(self: *App, recipe: LauncherRecipe) void {
+        self.closeLauncherRecipeModal();
+        switch (recipe) {
+            .create_workspace => {
+                self.ws.home_route = .workspace;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .run_remote_service => {
+                self.ws.home_route = .capabilities;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .add_second_device, .contribute_this_mac, .workspace_tokens => {
+                self.ws.home_route = .settings;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .connect_another_machine => {
+                self.ws.home_route = .devices;
+                self.openSelectedHomeRoute() catch {};
+            },
+            .install_package => {
+                self.requestPackageManagerRefresh(true);
+                self.requestVenomRefresh(true);
+            },
+            .connect_to_spiderweb => {
+                if (self.connection_state == .connected) self.refreshWorkspaceData() catch {};
+            },
+        }
+    }
+
+    fn launcherRecipePrimaryEnabled(self: *const App, recipe: LauncherRecipe) bool {
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        return switch (recipe) {
+            .create_workspace => self.connection_state == .connected,
+            .add_second_device => can_open,
+            .install_package => can_open,
+            .run_remote_service => can_open,
+            .connect_to_spiderweb => self.connection_state != .connecting,
+            .workspace_tokens => can_open,
+            .connect_another_machine => can_open,
+            .contribute_this_mac => self.connection_state == .connected,
+        };
+    }
+
+    fn launcherRecipeSecondaryEnabled(self: *const App, recipe: LauncherRecipe) bool {
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        return switch (recipe) {
+            .create_workspace => can_open,
+            .add_second_device => self.connection_state == .connected,
+            .install_package => self.connection_state == .connected,
+            .run_remote_service => can_open,
+            .connect_to_spiderweb => self.connection_state == .connected,
+            .workspace_tokens => can_open,
+            .connect_another_machine => can_open,
+            .contribute_this_mac => can_open,
+        };
+    }
+
+    fn launcherRecipeProgress(self: *App, recipe: LauncherRecipe) LauncherRecipeProgress {
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const package_count = @max(self.package_manager_packages.items.len, self.ws.venom_entries.items.len);
+        const selected_workspace_done = self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1;
+        return switch (recipe) {
+            .create_workspace => if (self.ws.projects.items.len > 0) .done else if (self.connection_state == .connected) .ready else .guide,
+            .add_second_device => if (self.ws.nodes.items.len > 1) .done else if (can_open) .ready else .guide,
+            .install_package => if (package_count > 0) .done else if (can_open) .ready else .guide,
+            .run_remote_service => if (self.ws.nodes.items.len > 1 and package_count > 0) .done else if (can_open and package_count > 0) .ready else .guide,
+            .connect_to_spiderweb => if (self.connection_state == .connected) .done else if (self.settings_panel.server_url.items.len > 0 and self.ws.launcher_connect_token.items.len > 0) .ready else .guide,
+            .workspace_tokens => blk: {
+                const workspace_id = self.selectedWorkspaceId() orelse if (self.ws.projects.items.len == 1) self.ws.projects.items[0].id else null;
+                if (workspace_id) |id| {
+                    if (self.selectedWorkspaceToken(id)) |token| {
+                        if (token.len > 0) break :blk .done;
+                    }
+                    if (can_open) break :blk .ready;
+                }
+                break :blk .guide;
+            },
+            .connect_another_machine => if (self.ws.nodes.items.len > 1) .done else if (self.connection_state == .connected) .ready else .guide,
+            .contribute_this_mac => if (selected_workspace_done and self.ws.nodes.items.len > 1) .done else if (self.connection_state == .connected) .ready else .guide,
+        };
+    }
+
+    fn launcherRecipeProgressLabel(progress: LauncherRecipeProgress) []const u8 {
+        return switch (progress) {
+            .guide => "Guide",
+            .ready => "Ready",
+            .done => "Done",
+        };
+    }
+
+    fn launcherRecipeProgressColor(self: *App, progress: LauncherRecipeProgress) zcolors.Color {
+        return switch (progress) {
+            .guide => self.theme.colors.text_secondary,
+            .ready => zcolors.rgba(224, 145, 36, 255),
+            .done => zcolors.rgba(36, 174, 100, 255),
+        };
+    }
+
+    fn drawLauncherWorkspaceRoute(self: *App, rect: Rect) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const gap = @max(layout.row_gap, 8.0 * self.ui_scale);
+        const card_h = @max(84.0 * self.ui_scale, layout.button_height * 2.4);
+        const card_w = (rect.width() - gap * 3.0) / 4.0;
+        const selected_workspace = self.selectedWorkspaceSummary();
+        const workspace_name = if (selected_workspace) |selected_ws| selected_ws.name else "Choose a workspace";
+        const workspace_status = if (selected_workspace) |selected_ws| selected_ws.status else "Pick or create your first workspace";
+        const drive_label = self.launcherDriveLabel();
+        const local_device_summary = self.launcherLocalDeviceSummary();
+        var device_count_buf: [32]u8 = undefined;
+        var package_count_buf: [32]u8 = undefined;
+        const package_count = @max(self.package_manager_packages.items.len, self.ws.venom_entries.items.len);
+        const device_count = std.fmt.bufPrint(&device_count_buf, "{d}", .{self.ws.nodes.items.len}) catch "0";
+        const package_count_text = std.fmt.bufPrint(&package_count_buf, "{d}", .{package_count}) catch "0";
+
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0], rect.min[1], card_w, card_h),
+            zcolors.rgba(64, 166, 255, 255),
+            "Workspace",
+            workspace_name,
+            workspace_status,
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + card_w + gap, rect.min[1], card_w, card_h),
+            zcolors.rgba(48, 189, 134, 255),
+            "Drive",
+            drive_label,
+            "The mounted path SpiderApp will work from",
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + (card_w + gap) * 2.0, rect.min[1], card_w, card_h),
+            zcolors.rgba(255, 166, 61, 255),
+            "Devices",
+            device_count,
+            local_device_summary,
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + (card_w + gap) * 3.0, rect.min[1], card_w, card_h),
+            zcolors.rgba(196, 111, 255, 255),
+            "Packages",
+            package_count_text,
+            "Installed capabilities ready for this workspace",
+        );
+
+        const body_y = rect.min[1] + card_h + gap;
+        const left_w = @max(260.0 * self.ui_scale, rect.width() * 0.45);
+        const right_w = @max(240.0 * self.ui_scale, rect.width() - left_w - gap);
+        const left_rect = Rect.fromXYWH(rect.min[0], body_y, left_w, @max(1.0, rect.max[1] - body_y));
+        const right_rect = Rect.fromXYWH(left_rect.max[0] + gap, body_y, right_w, @max(1.0, rect.max[1] - body_y));
+
+        self.drawSurfacePanel(left_rect);
+        self.drawTextTrimmed(
+            left_rect.min[0] + pad,
+            left_rect.min[1] + pad,
+            left_rect.width() - pad * 2.0,
+            "Workspace list",
+            self.theme.colors.text_primary,
+        );
+        const filter_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(
+                left_rect.min[0] + pad,
+                left_rect.min[1] + pad + layout.line_height + layout.row_gap * 0.35,
+                left_rect.width() - pad * 2.0,
+                layout.input_height,
+            ),
+            self.ws.launcher_project_filter.items,
+            self.settings_panel.focused_field == .launcher_project_filter,
+            .{ .placeholder = "Filter by name or id" },
+        );
+        if (filter_focused) self.settings_panel.focused_field = .launcher_project_filter;
+
+        const list_top = left_rect.min[1] + pad + layout.line_height + layout.row_gap * 0.35 + layout.input_height + layout.row_gap * 0.5;
+        const list_rect = Rect.fromXYWH(
+            left_rect.min[0] + pad,
+            list_top,
+            left_rect.width() - pad * 2.0,
+            @max(80.0 * self.ui_scale, left_rect.max[1] - list_top - pad),
+        );
+        self.drawSurfacePanel(list_rect);
+        var row_y = list_rect.min[1] + layout.inner_inset;
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const selected_workspace_id = self.selectedWorkspaceId();
+        const filter = std.mem.trim(u8, self.ws.launcher_project_filter.items, " \t\r\n");
+        var visible_count: usize = 0;
+        for (self.ws.projects.items) |project_summary| {
+            if (filter.len > 0 and
+                std.ascii.indexOfIgnoreCase(project_summary.name, filter) == null and
+                std.ascii.indexOfIgnoreCase(project_summary.id, filter) == null)
+            {
+                continue;
+            }
+            visible_count += 1;
+            if (row_y + row_h > list_rect.max[1] - layout.inner_inset) break;
+            var row_buf: [256]u8 = undefined;
+            const row_label = std.fmt.bufPrint(
+                &row_buf,
+                "{s}  [{s}]",
+                .{ project_summary.name, project_summary.status },
+            ) catch project_summary.name;
+            const is_selected = if (selected_workspace_id) |workspace_id|
+                std.mem.eql(u8, project_summary.id, workspace_id)
+            else
+                false;
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(
+                    list_rect.min[0] + layout.inner_inset,
+                    row_y,
+                    list_rect.width() - layout.inner_inset * 2.0,
+                    row_h,
+                ),
+                row_label,
+                .{ .variant = if (is_selected) .primary else .secondary },
+            )) {
+                self.selectWorkspaceInSettings(project_summary.id) catch {};
+                self.refreshWorkspaceData() catch {};
+            }
+            row_y += row_h + layout.row_gap * 0.35;
+        }
+        if (visible_count == 0) {
+            self.drawTextTrimmed(
+                list_rect.min[0] + layout.inner_inset,
+                list_rect.min[1] + layout.inner_inset,
+                list_rect.width() - layout.inner_inset * 2.0,
+                if (self.ws.projects.items.len == 0) "No workspaces yet. Create one to get started." else "No workspaces match the current filter.",
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        self.drawSurfacePanel(right_rect);
+        var detail_y = right_rect.min[1] + pad;
+        self.drawTextTrimmed(
+            right_rect.min[0] + pad,
+            detail_y,
+            right_rect.width() - pad * 2.0,
+            if (selected_workspace) |selected_ws| selected_ws.name else "Workspace details",
+            self.theme.colors.text_primary,
+        );
+        detail_y += layout.line_height + layout.row_gap * 0.35;
+        self.drawTextTrimmed(
+            right_rect.min[0] + pad,
+            detail_y,
+            right_rect.width() - pad * 2.0,
+            if (selected_workspace) |selected_ws| selected_ws.vision else "Select a workspace to see its drive, status, and next steps.",
+            self.theme.colors.text_secondary,
+        );
+        detail_y += layout.line_height * 2.0 + layout.row_gap * 0.25;
+
+        if (self.ws.selected_workspace_detail) |*detail| {
+            var summary_buf: [256]u8 = undefined;
+            const summary_text = std.fmt.bufPrint(
+                &summary_buf,
+                "Status: {s}  |  Drives: {d}  |  Packages: {d}",
+                .{ detail.status, detail.mounts.items.len, package_count },
+            ) catch detail.status;
+            self.drawTextTrimmed(
+                right_rect.min[0] + pad,
+                detail_y,
+                right_rect.width() - pad * 2.0,
+                summary_text,
+                self.theme.colors.text_secondary,
+            );
+            detail_y += layout.line_height + layout.row_gap * 0.35;
+        }
+
+        self.drawTextTrimmed(
+            right_rect.min[0] + pad,
+            detail_y,
+            right_rect.width() - pad * 2.0,
+            drive_label,
+            self.theme.colors.text_primary,
+        );
+        detail_y += layout.line_height + layout.row_gap * 0.35;
+        self.drawTextTrimmed(
+            right_rect.min[0] + pad,
+            detail_y,
+            right_rect.width() - pad * 2.0,
+            "SpiderApp will open into the workspace shell and keep Devices, Capabilities, Explore, and Settings close by after this first step.",
+            self.theme.colors.text_secondary,
+        );
+
+        const can_enter_workspace = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const button_y = right_rect.max[1] - pad - row_h;
+        const button_gap = @max(layout.row_gap * 0.5, 8.0 * self.ui_scale);
+        const button_w = (right_rect.width() - pad * 2.0 - button_gap * 2.0) / 3.0;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0] + pad, button_y, button_w, row_h),
+            "Enter Workspace",
+            .{ .variant = .primary, .disabled = !can_enter_workspace },
+        )) {
+            self.ws.home_route = .workspace;
+            self.openSelectedHomeRoute() catch |err| {
+                const msg = self.formatControlOpError("Open workspace", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to open the workspace.");
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0] + pad + button_w + button_gap, button_y, button_w, row_h),
+            "Create Workspace",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.openLauncherCreateWorkspaceModal();
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0] + pad + (button_w + button_gap) * 2.0, button_y, button_w, row_h),
+            "Advanced",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.openWorkspaceWizard();
+        }
+    }
+
+    fn drawLauncherDevicesRoute(self: *App, rect: Rect) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const gap = @max(layout.row_gap, 8.0 * self.ui_scale);
+        const card_h = @max(84.0 * self.ui_scale, layout.button_height * 2.4);
+        const card_w = (rect.width() - gap * 2.0) / 3.0;
+        var node_count_buf: [32]u8 = undefined;
+        var drive_count_buf: [32]u8 = undefined;
+        const drive_count = if (self.ws.selected_workspace_detail) |*detail| detail.mounts.items.len else 0;
+        const node_count_text = std.fmt.bufPrint(&node_count_buf, "{d}", .{self.ws.nodes.items.len}) catch "0";
+        const drive_count_text = std.fmt.bufPrint(&drive_count_buf, "{d}", .{drive_count}) catch "0";
+
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0], rect.min[1], card_w, card_h),
+            zcolors.rgba(255, 166, 61, 255),
+            "Local Device",
+            self.launcherLocalDeviceSummary(),
+            "This Mac powers the first workspace experience",
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + card_w + gap, rect.min[1], card_w, card_h),
+            zcolors.rgba(64, 166, 255, 255),
+            "Connected Devices",
+            node_count_text,
+            "Every device contributing to the current workspace",
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + (card_w + gap) * 2.0, rect.min[1], card_w, card_h),
+            zcolors.rgba(48, 189, 134, 255),
+            "Drives",
+            drive_count_text,
+            "Mounted workspace drives available right now",
+        );
+
+        const list_y = rect.min[1] + card_h + gap;
+        const list_rect = Rect.fromXYWH(rect.min[0], list_y, rect.width(), @max(1.0, rect.max[1] - list_y));
+        self.drawSurfacePanel(list_rect);
+        self.drawTextTrimmed(
+            list_rect.min[0] + pad,
+            list_rect.min[1] + pad,
+            list_rect.width() - pad * 2.0,
+            "Devices",
+            self.theme.colors.text_primary,
+        );
+        self.drawTextTrimmed(
+            list_rect.min[0] + pad,
+            list_rect.min[1] + pad + layout.line_height + layout.row_gap * 0.2,
+            list_rect.width() - pad * 2.0,
+            "Start with this Mac, then add another machine when you want the workspace to span devices.",
+            self.theme.colors.text_secondary,
+        );
+
+        var row_y = list_rect.min[1] + pad + layout.line_height * 2.0 + layout.row_gap * 0.55;
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const now_ms = std.time.milliTimestamp();
+        if (self.ws.nodes.items.len == 0) {
+            self.drawTextTrimmed(
+                list_rect.min[0] + pad,
+                row_y,
+                list_rect.width() - pad * 2.0,
+                "No devices are connected yet. Use the follow-on flow to connect another machine or contribute this Mac to another Spiderweb.",
+                self.theme.colors.text_secondary,
+            );
+        } else {
+            for (self.ws.nodes.items, 0..) |node, idx| {
+                if (row_y + row_h > list_rect.max[1] - pad - row_h - layout.row_gap) break;
+                const row_rect = Rect.fromXYWH(list_rect.min[0] + pad, row_y, list_rect.width() - pad * 2.0, row_h);
+                if (idx % 2 == 1) {
+                    self.drawFilledRect(row_rect, zcolors.withAlpha(self.theme.colors.border, 20));
+                }
+                const status_color = if (node.lease_expires_at_ms > now_ms)
+                    zcolors.rgba(36, 174, 100, 255)
+                else
+                    zcolors.rgba(220, 80, 60, 255);
+                self.drawFilledRect(
+                    Rect.fromXYWH(
+                        row_rect.min[0] + 8.0 * self.ui_scale,
+                        row_rect.min[1] + (row_h - 10.0 * self.ui_scale) * 0.5,
+                        10.0 * self.ui_scale,
+                        10.0 * self.ui_scale,
+                    ),
+                    status_color,
+                );
+                var row_buf: [256]u8 = undefined;
+                const label = std.fmt.bufPrint(
+                    &row_buf,
+                    "{s}  ({s})",
+                    .{ node.node_name, if (node.lease_expires_at_ms > now_ms) "online" else "degraded" },
+                ) catch node.node_name;
+                self.drawTextTrimmed(
+                    row_rect.min[0] + 26.0 * self.ui_scale,
+                    row_rect.min[1] + (row_h - layout.line_height) * 0.5,
+                    row_rect.width() - 34.0 * self.ui_scale,
+                    label,
+                    self.theme.colors.text_primary,
+                );
+                row_y += row_h + layout.row_gap * 0.35;
+            }
+        }
+
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const button_y = list_rect.max[1] - pad - row_h;
+        const button_gap = @max(layout.row_gap * 0.5, 8.0 * self.ui_scale);
+        const button_w = (list_rect.width() - pad * 2.0 - button_gap * 2.0) / 3.0;
+        const recipe_y = button_y - gap - card_h;
+        if (recipe_y > row_y + gap) {
+            const recipe_w = (list_rect.width() - pad * 2.0 - gap) * 0.5;
+            if (self.drawLauncherRecipeCard(
+                Rect.fromXYWH(list_rect.min[0] + pad, recipe_y, recipe_w, card_h),
+                "RECIPE",
+                "Connect another machine",
+                "Use Spiderweb on the host Mac to copy a network URL and access token, then connect from the second machine and return here to confirm it joined the workspace.",
+                self.launcherRecipeProgress(.connect_another_machine),
+                "Open Settings",
+                self.connection_state == .connected,
+            )) {
+                self.openLauncherRecipeModal(.connect_another_machine);
+            }
+            if (self.drawLauncherRecipeCard(
+                Rect.fromXYWH(list_rect.min[0] + pad + recipe_w + gap, recipe_y, recipe_w, card_h),
+                "RECIPE",
+                "Contribute this Mac remotely",
+                "Use Spiderweb.app on this Mac to pair it with an invite token when another Spiderweb should see this machine as a device.",
+                self.launcherRecipeProgress(.contribute_this_mac),
+                "Advanced Setup",
+                self.connection_state == .connected,
+            )) {
+                self.openLauncherRecipeModal(.contribute_this_mac);
+            }
+        }
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(list_rect.min[0] + pad, button_y, button_w, row_h),
+            "Open Devices",
+            .{ .variant = .primary, .disabled = !can_open },
+        )) {
+            self.ws.home_route = .devices;
+            self.openSelectedHomeRoute() catch |err| {
+                const msg = self.formatControlOpError("Open devices", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to open Devices.");
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(list_rect.min[0] + pad + button_w + button_gap, button_y, button_w, row_h),
+            "Refresh Devices",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.refreshWorkspaceData() catch |err| {
+                const msg = self.formatControlOpError("Refresh devices", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to refresh devices.");
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(list_rect.min[0] + pad + (button_w + button_gap) * 2.0, button_y, button_w, row_h),
+            "Advanced Setup",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.openWorkspaceWizard();
+        }
+    }
+
+    fn drawLauncherCapabilitiesRoute(self: *App, rect: Rect) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const gap = @max(layout.row_gap, 8.0 * self.ui_scale);
+        const card_h = @max(84.0 * self.ui_scale, layout.button_height * 2.4);
+        const card_w = (rect.width() - gap * 2.0) / 3.0;
+        const package_count = @max(self.package_manager_packages.items.len, self.ws.venom_entries.items.len);
+        var package_count_buf: [32]u8 = undefined;
+        var device_count_buf: [32]u8 = undefined;
+        const package_count_text = std.fmt.bufPrint(&package_count_buf, "{d}", .{package_count}) catch "0";
+        const device_count_text = std.fmt.bufPrint(&device_count_buf, "{d}", .{self.ws.nodes.items.len}) catch "0";
+
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0], rect.min[1], card_w, card_h),
+            zcolors.rgba(196, 111, 255, 255),
+            "Packages",
+            package_count_text,
+            "Install capabilities only after the workspace is ready",
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + card_w + gap, rect.min[1], card_w, card_h),
+            zcolors.rgba(64, 166, 255, 255),
+            "Workspace",
+            if (self.selectedWorkspaceSummary()) |selected_ws| selected_ws.name else "No workspace selected",
+            "Capabilities follow the selected workspace",
+        );
+        self.drawMissionSummaryCard(
+            Rect.fromXYWH(rect.min[0] + (card_w + gap) * 2.0, rect.min[1], card_w, card_h),
+            zcolors.rgba(255, 166, 61, 255),
+            "Devices",
+            device_count_text,
+            "Devices expose packages and services into the workspace",
+        );
+
+        const body_y = rect.min[1] + card_h + gap;
+        const body_rect = Rect.fromXYWH(rect.min[0], body_y, rect.width(), @max(1.0, rect.max[1] - body_y));
+        self.drawSurfacePanel(body_rect);
+        self.drawTextTrimmed(
+            body_rect.min[0] + pad,
+            body_rect.min[1] + pad,
+            body_rect.width() - pad * 2.0,
+            "Capabilities",
+            self.theme.colors.text_primary,
+        );
+        self.drawTextTrimmed(
+            body_rect.min[0] + pad,
+            body_rect.min[1] + pad + layout.line_height + layout.row_gap * 0.35,
+            body_rect.width() - pad * 2.0,
+            "Packages turn the workspace into something useful: coding tools, agents, local services, and other workspace behaviors. Older internal docs may still call them venoms, but the onboarding flow stays package-first.",
+            self.theme.colors.text_secondary,
+        );
+
+        var row_y = body_rect.min[1] + pad + layout.line_height * 3.0;
+        if (self.package_manager_packages.items.len == 0 and self.ws.venom_entries.items.len == 0) {
+            self.drawTextTrimmed(
+                body_rect.min[0] + pad,
+                row_y,
+                body_rect.width() - pad * 2.0,
+                "No packages loaded yet. Open Capabilities after the workspace is running to inspect what is installed or add more.",
+                self.theme.colors.text_secondary,
+            );
+        } else {
+            self.drawTextTrimmed(
+                body_rect.min[0] + pad,
+                row_y,
+                body_rect.width() - pad * 2.0,
+                "Recently seen packages",
+                self.theme.colors.text_primary,
+            );
+            row_y += layout.line_height + layout.row_gap * 0.35;
+            var shown: usize = 0;
+            for (self.package_manager_packages.items) |entry| {
+                if (shown >= 5) break;
+                var line_buf: [256]u8 = undefined;
+                const line = std.fmt.bufPrint(
+                    &line_buf,
+                    "{s}  [{s}]",
+                    .{ entry.package_id, if (entry.enabled) "enabled" else "disabled" },
+                ) catch entry.package_id;
+                self.drawTextTrimmed(
+                    body_rect.min[0] + pad,
+                    row_y,
+                    body_rect.width() - pad * 2.0,
+                    line,
+                    self.theme.colors.text_secondary,
+                );
+                row_y += layout.line_height + layout.row_gap * 0.25;
+                shown += 1;
+            }
+            if (shown == 0) {
+                for (self.ws.venom_entries.items) |entry| {
+                    if (shown >= 5) break;
+                    self.drawTextTrimmed(
+                        body_rect.min[0] + pad,
+                        row_y,
+                        body_rect.width() - pad * 2.0,
+                        entry.venom_id,
+                        self.theme.colors.text_secondary,
+                    );
+                    row_y += layout.line_height + layout.row_gap * 0.25;
+                    shown += 1;
+                }
+            }
+        }
+
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const button_y = body_rect.max[1] - pad - row_h;
+        const button_gap = @max(layout.row_gap * 0.5, 8.0 * self.ui_scale);
+        const button_w = (body_rect.width() - pad * 2.0 - button_gap * 2.0) / 3.0;
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const recipe_h = @max(96.0 * self.ui_scale, layout.button_height * 2.8);
+        const recipe_gap = @max(layout.row_gap * 0.5, 8.0 * self.ui_scale);
+        const recipe_y = button_y - recipe_gap - recipe_h;
+        if (recipe_y > row_y + recipe_gap) {
+            const recipe_w = (body_rect.width() - pad * 2.0 - recipe_gap) * 0.5;
+            if (self.drawLauncherRecipeCard(
+                Rect.fromXYWH(body_rect.min[0] + pad, recipe_y, recipe_w, recipe_h),
+                "PACKAGE RECIPE",
+                "Make the workspace useful",
+                "Start with a small set of packages that match the job: coding tools, agents, or one service you actually need. Avoid turning everything on at once.",
+                self.launcherRecipeProgress(.install_package),
+                "Open Capabilities",
+                can_open,
+            )) {
+                self.openLauncherRecipeModal(.install_package);
+            }
+            if (self.drawLauncherRecipeCard(
+                Rect.fromXYWH(body_rect.min[0] + pad + recipe_w + recipe_gap, recipe_y, recipe_w, recipe_h),
+                "SERVICE RECIPE",
+                "Run a remote service",
+                "Packages can expose services into the workspace after the drive and devices are stable. Open Capabilities, refresh packages, then enable the specific service you need.",
+                self.launcherRecipeProgress(.run_remote_service),
+                "Refresh Packages",
+                self.connection_state == .connected,
+            )) {
+                self.openLauncherRecipeModal(.run_remote_service);
+            }
+        }
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(body_rect.min[0] + pad, button_y, button_w, row_h),
+            "Open Capabilities",
+            .{ .variant = .primary, .disabled = !can_open },
+        )) {
+            self.ws.home_route = .capabilities;
+            self.openSelectedHomeRoute() catch |err| {
+                const msg = self.formatControlOpError("Open capabilities", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to open Capabilities.");
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(body_rect.min[0] + pad + button_w + button_gap, button_y, button_w, row_h),
+            "Refresh Packages",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.requestPackageManagerRefresh(true);
+            self.requestVenomRefresh(true);
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(body_rect.min[0] + pad + (button_w + button_gap) * 2.0, button_y, button_w, row_h),
+            "Advanced Setup",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.openWorkspaceWizard();
+        }
+    }
+
+    fn drawLauncherExploreRoute(self: *App, rect: Rect) void {
+        const layout = self.panelLayoutMetrics();
+        const gap = @max(layout.row_gap, 8.0 * self.ui_scale);
+        const card_h = (rect.height() - gap) * 0.5;
+        const card_w = (rect.width() - gap) * 0.5;
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0], rect.min[1], card_w, card_h),
+            "RECIPE",
+            "Create a useful workspace",
+            "Create or pick one workspace with a clear purpose first. Keep the name obvious, keep the scope small, then enter the workspace shell before expanding further.",
+            self.launcherRecipeProgress(.create_workspace),
+            "Create Workspace",
+            self.connection_state == .connected,
+        )) {
+            self.openLauncherRecipeModal(.create_workspace);
+        }
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0] + card_w + gap, rect.min[1], card_w, card_h),
+            "RECIPE",
+            "Add a second device",
+            "Once the first workspace is healthy, bring in another machine so the workspace can span more than one device and you can see distributed behavior directly.",
+            self.launcherRecipeProgress(.add_second_device),
+            "Open Devices",
+            can_open,
+        )) {
+            self.openLauncherRecipeModal(.add_second_device);
+        }
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0], rect.min[1] + card_h + gap, card_w, card_h),
+            "RECIPE",
+            "Install a package",
+            "Add the next useful capability after first success. Start with tools or services you will actually use, not every package at once.",
+            self.launcherRecipeProgress(.install_package),
+            "Open Capabilities",
+            can_open,
+        )) {
+            self.openLauncherRecipeModal(.install_package);
+        }
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0] + card_w + gap, rect.min[1] + card_h + gap, card_w, card_h),
+            "RECIPE",
+            "Run a remote service",
+            "After the workspace and devices are stable, use Capabilities and Workspace together: enable the package, confirm the device is online, then inspect the workspace and topology.",
+            self.launcherRecipeProgress(.run_remote_service),
+            "Open Workspace",
+            can_open,
+        )) {
+            self.openLauncherRecipeModal(.run_remote_service);
+        }
+    }
+
+    fn drawLauncherSettingsRoute(self: *App, rect: Rect) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inner_inset, 10.0 * self.ui_scale);
+        const gap = @max(layout.row_gap, 8.0 * self.ui_scale);
+        const selected_profile = self.config.selectedProfile();
+        const selected_workspace = self.selectedWorkspaceSummary();
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        self.drawSurfacePanel(rect);
+
+        var y = rect.min[1] + pad;
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            rect.width() - pad * 2.0,
+            "Settings",
+            self.theme.colors.text_primary,
+        );
+        y += layout.line_height + layout.row_gap * 0.35;
+
+        var profile_buf: [512]u8 = undefined;
+        const profile_line = std.fmt.bufPrint(
+            &profile_buf,
+            "Profile: {s}  |  Server: {s}",
+            .{ selected_profile.name, selected_profile.server_url },
+        ) catch selected_profile.name;
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            rect.width() - pad * 2.0,
+            profile_line,
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.25;
+
+        const role_label = if (self.config.active_role == .admin) "Admin" else "User";
+        var workspace_buf: [512]u8 = undefined;
+        const workspace_line = std.fmt.bufPrint(
+            &workspace_buf,
+            "Role: {s}  |  Workspace: {s}",
+            .{ role_label, if (selected_workspace) |selected_ws| selected_ws.name else "Not selected" },
+        ) catch role_label;
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            rect.width() - pad * 2.0,
+            workspace_line,
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.35;
+
+        self.drawTextTrimmed(
+            rect.min[0] + pad,
+            y,
+            rect.width() - pad * 2.0,
+            "Manual controls still live here: connection profile management, role changes, workspace tokens, and advanced setup tools.",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height * 2.0 + layout.row_gap * 0.45;
+
+        const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const recipe_h = @max(96.0 * self.ui_scale, row_h * 2.8);
+        const recipe_w = (rect.width() - pad * 2.0 - gap) * 0.5;
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0] + pad, y, recipe_w, recipe_h),
+            "REMOTE CONNECTION",
+            "Connect SpiderApp to another Spiderweb",
+            "Save a profile, paste the server URL and access token, connect, then pick the workspace you want to open first.",
+            self.launcherRecipeProgress(.connect_to_spiderweb),
+            if (self.connection_state == .connected) "Refresh" else "Connect",
+            self.connection_state != .connecting,
+        )) {
+            self.openLauncherRecipeModal(.connect_to_spiderweb);
+        }
+        if (self.drawLauncherRecipeCard(
+            Rect.fromXYWH(rect.min[0] + pad + recipe_w + gap, y, recipe_w, recipe_h),
+            "WORKSPACE TOKENS",
+            "Share workspace-scoped access carefully",
+            "Use workspace tokens when a tool or user should access one workspace without holding the broader connection token. Settings is where those manual controls stay.",
+            self.launcherRecipeProgress(.workspace_tokens),
+            "Open Settings",
+            can_open,
+        )) {
+            self.openLauncherRecipeModal(.workspace_tokens);
+        }
+
+        const button_y = rect.max[1] - pad - row_h;
+        const button_w = (rect.width() - pad * 2.0 - gap * 2.0) / 3.0;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(rect.min[0] + pad, button_y, button_w, row_h),
+            "Open Settings",
+            .{ .variant = .primary, .disabled = !can_open },
+        )) {
+            self.ws.home_route = .settings;
+            self.openSelectedHomeRoute() catch |err| {
+                const msg = self.formatControlOpError("Open settings", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to open Settings.");
+                }
+            };
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(rect.min[0] + pad + button_w + gap, button_y, button_w, row_h),
+            "Advanced Setup",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.openWorkspaceWizard();
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(rect.min[0] + pad + (button_w + gap) * 2.0, button_y, button_w, row_h),
+            if (self.connection_state == .connected) "Refresh" else "Connect",
+            .{ .variant = .secondary, .disabled = self.connection_state == .connecting },
+        )) {
+            if (self.connection_state == .connected) {
+                self.refreshWorkspaceData() catch |err| {
+                    const msg = self.formatControlOpError("Refresh settings", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setLauncherNotice(text);
+                    } else {
+                        self.setLauncherNotice("Unable to refresh settings.");
+                    }
+                };
+            } else {
+                self.persistLauncherConnectToken() catch |err| {
+                    const msg = std.fmt.allocPrint(self.allocator, "Unable to persist token: {s}", .{@errorName(err)}) catch null;
+                    defer if (msg) |value| self.allocator.free(value);
+                    if (msg) |value| self.setLauncherNotice(value);
+                    return;
+                };
+                self.tryConnect(&self.manager) catch |err| {
+                    const msg = self.formatControlOpError("Connect", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setLauncherNotice(text);
+                    }
+                };
+            }
+        }
+    }
+
+    fn openSelectedHomeRoute(self: *App) !void {
+        if (self.selectedWorkspaceId() == null and self.ws.projects.items.len == 1) {
+            try self.selectWorkspaceInSettings(self.ws.projects.items[0].id);
+        }
+
+        try self.openSelectedWorkspaceFromLauncher();
+
+        switch (self.ws.home_route) {
+            .workspace => {
+                _ = self.ensureWorkspacePanel(&self.manager) catch {};
+                _ = self.ensureDashboardPanel(&self.manager) catch {};
+                _ = self.ensureFilesystemPanel(&self.manager) catch {};
+            },
+            .devices => {
+                _ = self.ensureWorkspacePanel(&self.manager) catch {};
+                _ = self.ensureNodeTopologyPanel(&self.manager) catch {};
+            },
+            .capabilities => {
+                _ = self.ensureWorkspacePanel(&self.manager) catch {};
+                self.requestVenomRefresh(true);
+                self.requestPackageManagerRefresh(true);
+                _ = self.ensureVenomManagerPanel(&self.manager) catch {};
+            },
+            .explore => {
+                _ = self.ensureWorkspacePanel(&self.manager) catch {};
+                _ = self.ensureDashboardPanel(&self.manager) catch {};
+                _ = self.ensureFilesystemPanel(&self.manager) catch {};
+            },
+            .settings => {
+                _ = self.ensureWorkspacePanel(&self.manager) catch {};
+                self.ensureSettingsPanel(&self.manager);
+            },
+        }
     }
 
     fn drawPackageManagerModal(self: *App, fb_width: u32, fb_height: u32) void {
-        workspace_host_mod.drawPackageManagerModal(self, fb_width, fb_height);
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inset, 12.0 * self.ui_scale);
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+
+        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
+
+        const modal_w = std.math.clamp(
+            screen_rect.width() * 0.72,
+            560.0 * self.ui_scale,
+            980.0 * self.ui_scale,
+        );
+        const modal_h = std.math.clamp(
+            screen_rect.height() * 0.78,
+            420.0 * self.ui_scale,
+            760.0 * self.ui_scale,
+        );
+        const modal_rect = Rect.fromXYWH(
+            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
+            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
+            modal_w,
+            modal_h,
+        );
+
+        self.drawSurfacePanel(modal_rect);
+        self.drawRect(modal_rect, self.theme.colors.border);
+
+        const left_w = @max(220.0 * self.ui_scale, modal_rect.width() * 0.38);
+        const right_w = modal_rect.width() - left_w - pad * 3.0;
+        const left_rect = Rect.fromXYWH(modal_rect.min[0] + pad, modal_rect.min[1] + pad, left_w, modal_rect.height() - pad * 2.0);
+        const right_rect = Rect.fromXYWH(left_rect.max[0] + pad, modal_rect.min[1] + pad, right_w, modal_rect.height() - pad * 2.0);
+
+        self.drawLabel(left_rect.min[0], left_rect.min[1], "Packages", self.theme.colors.text_primary);
+        self.drawLabel(right_rect.min[0], right_rect.min[1], "Package Manager", self.theme.colors.text_primary);
+
+        const left_y = left_rect.min[1] + layout.line_height + layout.row_gap * 0.6;
+        const list_h = @max(120.0 * self.ui_scale, left_rect.height() - row_h - layout.row_gap - (left_y - left_rect.min[1]));
+        const list_rect = Rect.fromXYWH(left_rect.min[0], left_y, left_rect.width(), list_h);
+        self.drawSurfacePanel(list_rect);
+        self.drawRect(list_rect, self.theme.colors.border);
+
+        var row_y = list_rect.min[1] + layout.inner_inset;
+        const row_w = list_rect.width() - layout.inner_inset * 2.0;
+        for (self.package_manager_packages.items, 0..) |entry, idx| {
+            if (row_y + row_h > list_rect.max[1] - layout.inner_inset) break;
+            const label = std.fmt.allocPrint(
+                self.allocator,
+                "{s} [{s}]",
+                .{ entry.package_id, if (entry.enabled) "enabled" else "disabled" },
+            ) catch null;
+            defer if (label) |value| self.allocator.free(value);
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(list_rect.min[0] + layout.inner_inset, row_y, row_w, row_h),
+                label orelse entry.package_id,
+                .{ .variant = if (idx == self.package_manager_selected_index) .primary else .secondary },
+            )) {
+                self.package_manager_selected_index = idx;
+                self.clearPackageManagerModalNotice();
+                self.clearPackageManagerModalError();
+            }
+            row_y += row_h + layout.row_gap * 0.35;
+        }
+
+        const refresh_rect = Rect.fromXYWH(
+            left_rect.min[0],
+            left_rect.max[1] - row_h,
+            left_rect.width(),
+            row_h,
+        );
+        if (self.drawButtonWidget(
+            refresh_rect,
+            "Refresh Packages",
+            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+        )) {
+            self.clearPackageManagerModalNotice();
+            self.requestPackageManagerRefresh(true);
+        }
+
+        var right_y = right_rect.min[1] + layout.line_height + layout.row_gap * 0.6;
+        if (self.package_manager_modal_notice) |message| {
+            self.drawTextTrimmed(right_rect.min[0], right_y, right_rect.width(), message, self.theme.colors.text_secondary);
+            right_y += layout.line_height + layout.row_gap * 0.45;
+        }
+        if (self.package_manager_modal_error) |message| {
+            self.drawTextTrimmed(right_rect.min[0], right_y, right_rect.width(), message, zcolors.rgba(220, 80, 80, 255));
+            right_y += layout.line_height + layout.row_gap * 0.45;
+        }
+
+        const selected_entry = self.selectedPackageManagerEntry();
+        const detail_rect = Rect.fromXYWH(
+            right_rect.min[0],
+            right_y,
+            right_rect.width(),
+            @max(150.0 * self.ui_scale, right_rect.height() * 0.36),
+        );
+        self.drawSurfacePanel(detail_rect);
+        self.drawRect(detail_rect, self.theme.colors.border);
+
+        if (selected_entry) |entry| {
+            const header = std.fmt.allocPrint(
+                self.allocator,
+                "{s} ({s}) v{s}",
+                .{ entry.package_id, entry.kind, entry.version },
+            ) catch null;
+            const runtime_line = std.fmt.allocPrint(
+                self.allocator,
+                "Runtime: {s} | Enabled: {s}",
+                .{ entry.runtime_kind, if (entry.enabled) "true" else "false" },
+            ) catch null;
+            defer if (header) |value| self.allocator.free(value);
+            defer if (runtime_line) |value| self.allocator.free(value);
+            self.drawTextTrimmed(
+                detail_rect.min[0] + layout.inner_inset,
+                detail_rect.min[1] + layout.inner_inset * 0.7,
+                detail_rect.width() - layout.inner_inset * 2.0,
+                header orelse entry.package_id,
+                self.theme.colors.text_primary,
+            );
+            self.drawTextTrimmed(
+                detail_rect.min[0] + layout.inner_inset,
+                detail_rect.min[1] + layout.inner_inset * 0.7 + layout.line_height,
+                detail_rect.width() - layout.inner_inset * 2.0,
+                runtime_line orelse "",
+                self.theme.colors.text_secondary,
+            );
+            if (entry.help_md) |help_md| {
+                self.drawTextTrimmed(
+                    detail_rect.min[0] + layout.inner_inset,
+                    detail_rect.min[1] + layout.inner_inset * 0.7 + layout.line_height * 2.0,
+                    detail_rect.width() - layout.inner_inset * 2.0,
+                    help_md,
+                    self.theme.colors.text_secondary,
+                );
+            }
+        } else {
+            self.drawTextTrimmed(
+                detail_rect.min[0] + layout.inner_inset,
+                detail_rect.min[1] + layout.inner_inset * 0.7,
+                detail_rect.width() - layout.inner_inset * 2.0,
+                "No packages loaded yet. Refresh the list to inspect package lifecycle state.",
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        right_y = detail_rect.max[1] + layout.row_gap * 0.7;
+        const action_w = (right_rect.width() - pad * 2.0) / 3.0;
+        const selected_disabled = selected_entry == null or self.connection_state != .connected;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0], right_y, action_w, row_h),
+            if (selected_entry != null and !selected_entry.?.enabled) "Enable" else "Disable",
+            .{ .variant = .secondary, .disabled = selected_disabled },
+        )) {
+            if (selected_entry) |entry| {
+                const payload = self.buildPackageManagerIdPayload(entry.package_id) catch null;
+                defer if (payload) |value| self.allocator.free(value);
+                if (payload) |value| {
+                    const control_name = if (entry.enabled) "disable.json" else "enable.json";
+                    const notice = if (entry.enabled) "Package disabled." else "Package enabled.";
+                    self.runPackageManagerOperation(control_name, value, notice) catch |err| {
+                        if (err != error.RemoteError) {
+                            const msg = self.formatControlOpError("Package update failed", err);
+                            if (msg) |text| {
+                                defer self.allocator.free(text);
+                                self.setPackageManagerModalError(text);
+                            }
+                        }
+                    };
+                }
+            }
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0] + action_w + pad, right_y, action_w, row_h),
+            "Remove",
+            .{ .variant = .secondary, .disabled = selected_disabled },
+        )) {
+            if (selected_entry) |entry| {
+                const payload = self.buildPackageManagerIdPayload(entry.package_id) catch null;
+                defer if (payload) |value| self.allocator.free(value);
+                if (payload) |value| {
+                    self.runPackageManagerOperation("remove.json", value, "Package removed.") catch |err| {
+                        if (err != error.RemoteError) {
+                            const msg = self.formatControlOpError("Package remove failed", err);
+                            if (msg) |text| {
+                                defer self.allocator.free(text);
+                                self.setPackageManagerModalError(text);
+                            }
+                        }
+                    };
+                }
+            }
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0] + (action_w + pad) * 2.0, right_y, action_w, row_h),
+            "Close",
+            .{ .variant = .primary },
+        )) {
+            self.closePackageManagerModal();
+            return;
+        }
+
+        right_y += row_h + layout.row_gap * 0.75;
+        self.drawLabel(right_rect.min[0], right_y, "Install Package JSON", self.theme.colors.text_secondary);
+        right_y += layout.line_height + layout.row_gap * 0.25;
+        const payload_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(right_rect.min[0], right_y, right_rect.width(), layout.input_height),
+            self.package_manager_install_payload.items,
+            self.settings_panel.focused_field == .package_manager_install_payload,
+            .{ .placeholder = "{\"package\":{...}}" },
+        );
+        if (payload_focused) self.settings_panel.focused_field = .package_manager_install_payload;
+        right_y += layout.input_height + layout.row_gap * 0.55;
+
+        const install_payload = std.mem.trim(u8, self.package_manager_install_payload.items, " \t\r\n");
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(right_rect.min[0], right_y, right_rect.width(), row_h),
+            "Install From JSON",
+            .{ .variant = .primary, .disabled = self.connection_state != .connected or install_payload.len == 0 },
+        )) {
+            self.runPackageManagerOperation("install.json", install_payload, "Package installed.") catch |err| {
+                if (err != error.RemoteError) {
+                    const msg = self.formatControlOpError("Package install failed", err);
+                    if (msg) |text| {
+                        defer self.allocator.free(text);
+                        self.setPackageManagerModalError(text);
+                    }
+                }
+            };
+        }
+
+        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.closePackageManagerModal();
+        }
     }
 
-    pub fn drawAboutModal(self: *App, fb_width: u32, fb_height: u32) void {
-        workspace_host_mod.drawAboutModal(self, fb_width, fb_height);
+    fn drawLauncherRecipeModal(self: *App, fb_width: u32, fb_height: u32) void {
+        const recipe = self.ws.launcher_recipe_modal orelse return;
+        const spec = launcherRecipeSpec(recipe);
+        const progress = self.launcherRecipeProgress(recipe);
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inset, 12.0 * self.ui_scale);
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+
+        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
+
+        const modal_w = std.math.clamp(
+            screen_rect.width() * 0.46,
+            440.0 * self.ui_scale,
+            760.0 * self.ui_scale,
+        );
+        const modal_h = std.math.clamp(
+            screen_rect.height() * 0.52,
+            320.0 * self.ui_scale,
+            520.0 * self.ui_scale,
+        );
+        const modal_rect = Rect.fromXYWH(
+            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
+            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
+            modal_w,
+            modal_h,
+        );
+
+        self.drawSurfacePanel(modal_rect);
+        self.drawRect(modal_rect, self.theme.colors.border);
+
+        var y = modal_rect.min[1] + pad;
+        const content_w = modal_rect.width() - pad * 2.0;
+        self.drawTextTrimmed(modal_rect.min[0] + pad, y, content_w - 88.0 * self.ui_scale, spec.eyebrow, self.theme.colors.text_secondary);
+        const progress_label = launcherRecipeProgressLabel(progress);
+        const progress_color = self.launcherRecipeProgressColor(progress);
+        const badge_w = @max(64.0 * self.ui_scale, self.measureText(progress_label) + pad * 1.2);
+        const badge_rect = Rect.fromXYWH(
+            modal_rect.max[0] - pad - badge_w,
+            y - 2.0 * self.ui_scale,
+            badge_w,
+            layout.button_height * 0.82,
+        );
+        self.drawFilledRect(badge_rect, zcolors.withAlpha(progress_color, 28));
+        self.drawRect(badge_rect, progress_color);
+        self.drawTextTrimmed(
+            badge_rect.min[0] + pad * 0.4,
+            badge_rect.min[1] + @max(0.0, (badge_rect.height() - layout.line_height) * 0.5),
+            badge_rect.width() - pad * 0.8,
+            progress_label,
+            progress_color,
+        );
+        y += layout.line_height + layout.row_gap * 0.25;
+        self.drawTextTrimmed(modal_rect.min[0] + pad, y, content_w, spec.title, self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.45;
+        self.drawTextTrimmed(modal_rect.min[0] + pad, y, content_w, spec.summary, self.theme.colors.text_secondary);
+        y += layout.line_height * 3.0 + layout.row_gap * 0.35;
+
+        self.drawLabel(modal_rect.min[0] + pad, y, "What to do", self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.35;
+        for (spec.steps, 0..) |step, idx| {
+            const line = std.fmt.allocPrint(self.allocator, "{d}. {s}", .{ idx + 1, step }) catch null;
+            defer if (line) |value| self.allocator.free(value);
+            self.drawTextTrimmed(
+                modal_rect.min[0] + pad,
+                y,
+                content_w,
+                line orelse step,
+                self.theme.colors.text_secondary,
+            );
+            y += layout.line_height * 1.4 + layout.row_gap * 0.1;
+        }
+
+        const button_y = modal_rect.max[1] - pad - row_h;
+        const close_w = @max(90.0 * self.ui_scale, self.measureText("Close") + pad * 1.2);
+        const secondary_w = if (spec.secondary_label != null)
+            @max(150.0 * self.ui_scale, self.measureText(spec.secondary_label.?) + pad * 1.4)
+        else
+            0.0;
+        const secondary_gap = if (spec.secondary_label != null) pad * 0.5 else 0.0;
+        const primary_w = modal_rect.width() - pad * 2.0 - close_w - secondary_w - secondary_gap;
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, button_y, primary_w, row_h),
+            spec.primary_label,
+            .{ .variant = .primary, .disabled = !self.launcherRecipePrimaryEnabled(recipe) },
+        )) {
+            self.runLauncherRecipePrimaryAction(recipe);
+            return;
+        }
+
+        var trailing_x = modal_rect.max[0] - pad - close_w;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(trailing_x, button_y, close_w, row_h),
+            "Close",
+            .{ .variant = .secondary },
+        )) {
+            self.closeLauncherRecipeModal();
+            return;
+        }
+
+        if (spec.secondary_label) |secondary_label| {
+            trailing_x -= pad * 0.5 + secondary_w;
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(trailing_x, button_y, secondary_w, row_h),
+                secondary_label,
+                .{ .variant = .secondary, .disabled = !self.launcherRecipeSecondaryEnabled(recipe) },
+            )) {
+                self.runLauncherRecipeSecondaryAction(recipe);
+                return;
+            }
+        }
+
+        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.closeLauncherRecipeModal();
+        }
+    }
+
+    fn drawAboutModal(self: *App, fb_width: u32, fb_height: u32) void {
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inset, 12.0 * self.ui_scale);
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+        const screen_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+
+        self.drawFilledRect(screen_rect, zcolors.withAlpha(self.theme.colors.background, 0.68));
+
+        const modal_w = std.math.clamp(
+            screen_rect.width() * 0.42,
+            420.0 * self.ui_scale,
+            720.0 * self.ui_scale,
+        );
+        const modal_h = std.math.clamp(
+            screen_rect.height() * 0.34,
+            220.0 * self.ui_scale,
+            360.0 * self.ui_scale,
+        );
+        const modal_rect = Rect.fromXYWH(
+            screen_rect.min[0] + (screen_rect.width() - modal_w) * 0.5,
+            screen_rect.min[1] + (screen_rect.height() - modal_h) * 0.5,
+            modal_w,
+            modal_h,
+        );
+
+        self.drawSurfacePanel(modal_rect);
+        self.drawRect(modal_rect, self.theme.colors.border);
+
+        var y = modal_rect.min[1] + pad;
+        const content_w = modal_rect.width() - pad * 2.0;
+        self.drawLabel(modal_rect.min[0] + pad, y, "About SpiderApp", self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.4;
+        self.drawTextTrimmed(
+            modal_rect.min[0] + pad,
+            y,
+            content_w,
+            "Build identity for diagnostics and demo verification.",
+            self.theme.colors.text_secondary,
+        );
+        y += layout.line_height + layout.row_gap * 0.7;
+        self.drawLabel(modal_rect.min[0] + pad, y, "Version", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.25;
+        const focused = self.drawTextInputWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, y, content_w, layout.input_height),
+            self.about_modal_build_label.items,
+            self.settings_panel.focused_field == .about_modal_build_label,
+            .{ .read_only = true },
+        );
+        if (focused) self.settings_panel.focused_field = .about_modal_build_label;
+        y += layout.input_height + layout.row_gap * 0.55;
+
+        if (self.about_modal_notice) |notice| {
+            self.drawTextTrimmed(
+                modal_rect.min[0] + pad,
+                y,
+                content_w,
+                notice,
+                self.theme.colors.text_secondary,
+            );
+        }
+
+        const button_w = (content_w - pad) * 0.5;
+        const button_y = modal_rect.max[1] - pad - row_h;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, button_y, button_w, row_h),
+            "Copy Version",
+            .{ .variant = .secondary },
+        )) {
+            self.copyTextToClipboard(self.about_modal_build_label.items) catch {};
+            self.setAboutModalNotice("Copied build string to clipboard.");
+        }
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad + button_w + pad, button_y, button_w, row_h),
+            "Close",
+            .{ .variant = .primary },
+        )) {
+            self.closeAboutModal();
+            return;
+        }
+
+        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.closeAboutModal();
+        }
     }
 
     fn drawWorkspaceUi(self: *App, ui_window: *UiWindow, fb_width: u32, fb_height: u32) void {
-        workspace_host_mod.drawWorkspaceUi(self, ui_window, fb_width, fb_height);
+        self.ui_commands.clear();
+        ui_draw_context.setGlobalCommandList(&self.ui_commands);
+        defer ui_draw_context.clearGlobalCommandList();
+
+        const package_modal_open = self.package_manager_modal_open;
+        const about_modal_open = self.about_modal_open;
+        const saved_mouse_down = self.mouse_down;
+        const saved_mouse_clicked = self.mouse_clicked;
+        const saved_mouse_released = self.mouse_released;
+        const saved_mouse_right_clicked = self.mouse_right_clicked;
+        if (package_modal_open or about_modal_open) {
+            self.mouse_down = false;
+            self.mouse_clicked = false;
+            self.mouse_released = false;
+            self.mouse_right_clicked = false;
+        }
+
+        const status_height: f32 = 24.0 * self.ui_scale;
+        const menu_height = self.windowMenuBarHeight();
+        const dock_height = @max(1.0, @as(f32, @floatFromInt(fb_height)) - status_height - menu_height);
+        const viewport = UiRect.fromMinSize(
+            .{ 0, menu_height },
+            .{ @floatFromInt(fb_width), dock_height },
+        );
+
+        const shell = self.sharedStyleSheet().shell;
+        const surfaces = self.sharedStyleSheet().surfaces;
+        const full_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height));
+        const viewport_rect = Rect{ .min = viewport.min, .max = viewport.max };
+        self.drawPaintRect(
+            full_rect,
+            surfaces.background orelse Paint{ .solid = self.theme.colors.background },
+        );
+        self.drawPaintRect(
+            viewport_rect,
+            shell.dock_fill orelse surfaces.surface orelse Paint{ .solid = self.theme.colors.surface },
+        );
+        if (shell.dock_border) |dock_border| self.drawRect(viewport_rect, dock_border);
+
+        ui_window.ui_state.last_dock_content_rect = viewport;
+
+        const mouse_in_viewport = self.mouse_x >= viewport.min[0] and
+            self.mouse_x <= viewport.max[0] and
+            self.mouse_y >= viewport.min[1] and
+            self.mouse_y <= viewport.max[1];
+        if (!mouse_in_viewport) {
+            self.mouse_clicked = false;
+            self.mouse_released = false;
+            self.mouse_down = false;
+        }
+
+        self.ui_commands.pushClip(.{ .min = viewport.min, .max = viewport.max });
+
+        var layout: dock_graph.LayoutResult = .{};
+        if (!self.collectDockLayoutSafe(ui_window.manager, viewport, &layout)) {
+            if (self.shouldLogDebug(120) or self.shouldLogStartup()) {
+                std.log.warn("drawDockUi: unable to recover dock layout; no panels available", .{});
+            }
+            self.drawText(
+                viewport.min[0] + 12.0,
+                viewport.min[1] + 12.0,
+                "Unable to recover dock layout; no panels available.",
+                self.theme.colors.text_secondary,
+            );
+            self.ui_commands.popClip();
+            self.mouse_clicked = saved_mouse_clicked;
+            self.mouse_released = saved_mouse_released;
+            self.mouse_down = saved_mouse_down;
+            _ = self.drawWindowMenuBar(ui_window, fb_width);
+            self.drawStatusOverlay(fb_width, fb_height);
+            if (self.ws.workspace_wizard_open) {
+                self.mouse_down = saved_mouse_down;
+                self.mouse_clicked = saved_mouse_clicked;
+                self.mouse_released = saved_mouse_released;
+                self.drawWorkspaceWizardModal(fb_width, fb_height);
+            }
+            return;
+        }
+        // Draw each dock group
+        for (layout.slice()) |group| {
+            if (!self.isLayoutGroupUsable(ui_window.manager, group.node_id)) continue;
+            self.drawDockGroup(ui_window.manager, group.node_id, group.rect);
+        }
+
+        const splitters = ui_window.manager.workspace.dock_layout.computeSplitters(viewport);
+        self.drawDockSplitters(&ui_window.queue, ui_window, &splitters);
+
+        var drag_tab_hits = DockTabHitList{};
+        var drag_drop_targets = DockDropTargetList{};
+        self.collectDockInteractionGeometry(ui_window.manager, viewport, &drag_tab_hits, &drag_drop_targets);
+        self.drawDockDragOverlay(&ui_window.queue, ui_window.manager, ui_window, &drag_drop_targets, viewport);
+        self.ui_commands.popClip();
+        self.mouse_clicked = saved_mouse_clicked;
+        self.mouse_released = saved_mouse_released;
+        self.mouse_down = saved_mouse_down;
+        self.mouse_right_clicked = saved_mouse_right_clicked;
+
+        if (package_modal_open or about_modal_open) {
+            self.mouse_down = false;
+            self.mouse_clicked = false;
+            self.mouse_released = false;
+            self.mouse_right_clicked = false;
+        }
+        _ = self.drawWindowMenuBar(ui_window, fb_width);
+        self.drawStatusOverlay(fb_width, fb_height);
+        if (self.ws.workspace_wizard_open) {
+            self.mouse_down = saved_mouse_down;
+            self.mouse_clicked = saved_mouse_clicked;
+            self.mouse_released = saved_mouse_released;
+            self.drawWorkspaceWizardModal(fb_width, fb_height);
+        }
     }
 
     pub fn windowMenuBarHeight(self: *App) f32 {
@@ -7469,7 +9813,7 @@ pub const App = struct {
         return @max(layout.button_height + layout.inner_inset * 1.2, 30.0 * self.ui_scale);
     }
 
-    pub fn ideMenuDomainLabel(domain: IdeMenuDomain) []const u8 {
+    fn ideMenuDomainLabel(domain: IdeMenuDomain) []const u8 {
         return switch (domain) {
             .file => "File",
             .edit => "Edit",
@@ -7481,7 +9825,25 @@ pub const App = struct {
         };
     }
 
-    pub fn ideMenuRowCount(domain: IdeMenuDomain, stage: UiStage) usize {
+    fn homeRouteLabel(route: HomeRoute) []const u8 {
+        return switch (route) {
+            .workspace => "Workspace",
+            .devices => "Devices",
+            .capabilities => "Capabilities",
+            .explore => "Explore",
+            .settings => "Settings",
+        };
+    }
+
+    fn onboardingStageHeadline(stage: OnboardingStage) []const u8 {
+        return switch (stage) {
+            .connect => "Connect to Spiderweb",
+            .choose_workspace => "Choose a workspace",
+            .workspace_ready => "Workspace ready",
+        };
+    }
+
+    fn ideMenuRowCount(domain: IdeMenuDomain, stage: UiStage) usize {
         return switch (domain) {
             .file => if (stage == .launcher) 1 else 2,
             .edit => 2,
@@ -7494,7 +9856,261 @@ pub const App = struct {
     }
 
     pub fn drawWindowMenuBar(self: *App, ui_window: *UiWindow, fb_width: u32) f32 {
-        return workspace_host_mod.drawWindowMenuBar(self, ui_window, fb_width);
+        if (storage.isAndroid()) {
+            return 0.0;
+        }
+        const layout = self.panelLayoutMetrics();
+        const bar_h = self.windowMenuBarHeight();
+        const bar_rect = Rect.fromXYWH(0, 0, @floatFromInt(fb_width), bar_h);
+        const shell = self.sharedStyleSheet().shell;
+        const surfaces = self.sharedStyleSheet().surfaces;
+        self.drawPaintRect(
+            bar_rect,
+            shell.menu_bar_fill orelse surfaces.menu_bar orelse Paint{ .solid = self.theme.colors.background },
+        );
+        self.drawRect(bar_rect, self.theme.colors.border);
+
+        const domains: []const IdeMenuDomain = if (self.ui_stage == .launcher)
+            &[_]IdeMenuDomain{ .file, .help }
+        else
+            &[_]IdeMenuDomain{ .file, .edit, .view, .project, .tools, .window, .help };
+
+        const button_y = bar_rect.min[1] + @max(0.0, (bar_h - layout.button_height) * 0.5);
+        var x = layout.inset;
+        var selected_button_rect: ?Rect = null;
+        var dropdown_rect: ?Rect = null;
+
+        for (domains) |domain| {
+            const label = ideMenuDomainLabel(domain);
+            const button_w = @max(86.0 * self.ui_scale, self.measureText(label) + layout.inner_inset * 2.0);
+            const button_rect = Rect.fromXYWH(x, button_y, button_w, layout.button_height);
+            const is_open = self.ide_menu_open != null and self.ide_menu_open.? == domain;
+            if (self.drawButtonWidget(
+                button_rect,
+                label,
+                .{ .variant = if (is_open) .primary else .secondary },
+            )) {
+                self.ide_menu_open = if (is_open) null else domain;
+            }
+            if (is_open) selected_button_rect = button_rect;
+            x += button_w + layout.row_gap * 0.4;
+        }
+
+        if (self.ide_menu_open) |open_domain| {
+            const menu_w = @max(228.0 * self.ui_scale, 200.0 * self.ui_scale);
+            const row_h = layout.button_height;
+            const row_gap = @max(1.0, layout.inner_inset * 0.2);
+            const row_count: usize = ideMenuRowCount(open_domain, self.ui_stage);
+            const menu_h = layout.inner_inset * 2.0 +
+                @as(f32, @floatFromInt(row_count)) * row_h +
+                @as(f32, @floatFromInt(@max(@as(usize, 1), row_count) - 1)) * row_gap;
+            const menu_x = if (selected_button_rect) |rect| rect.min[0] else layout.inset;
+            const menu_y = bar_rect.max[1] + @max(1.0, layout.inner_inset * 0.2);
+            const menu_rect = Rect.fromXYWH(menu_x, menu_y, menu_w, menu_h);
+            dropdown_rect = menu_rect;
+
+            self.drawSurfacePanel(menu_rect);
+            self.drawRect(menu_rect, self.theme.colors.border);
+
+            var row_y = menu_rect.min[1] + layout.inner_inset;
+            const row_x = menu_rect.min[0] + layout.inner_inset;
+            const row_w = menu_rect.width() - layout.inner_inset * 2.0;
+
+            switch (open_domain) {
+                .file => {
+                    if (self.ui_stage == .launcher) {
+                        if (self.drawButtonWidget(
+                            Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                            if (self.connection_state == .connected) "Disconnect" else "Connect",
+                            .{ .variant = .secondary },
+                        )) {
+                            if (self.connection_state == .connected) {
+                                self.disconnect();
+                                self.setConnectionState(.disconnected, "Disconnected");
+                            } else {
+                                self.tryConnect(&self.manager) catch {};
+                            }
+                            self.ide_menu_open = null;
+                        }
+                        row_y += row_h + row_gap;
+                    } else {
+                        if (self.drawButtonWidget(
+                            Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                            "Switch Workspace",
+                            .{ .variant = .secondary },
+                        )) {
+                            self.returnToLauncher(.switched_workspace);
+                            self.ide_menu_open = null;
+                        }
+                        row_y += row_h + row_gap;
+                        if (self.drawButtonWidget(
+                            Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                            "Disconnect",
+                            .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+                        )) {
+                            self.disconnect();
+                            self.setConnectionState(.disconnected, "Disconnected");
+                            self.returnToLauncher(.disconnected);
+                            self.ide_menu_open = null;
+                        }
+                    }
+                },
+                .edit => {
+                    _ = self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Undo (coming soon)",
+                        .{ .variant = .secondary, .disabled = true },
+                    );
+                    row_y += row_h + row_gap;
+                    _ = self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Redo (coming soon)",
+                        .{ .variant = .secondary, .disabled = true },
+                    );
+                },
+                .view => {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.ws.dashboard_panel_id != null) "Dashboard (Focus)" else "Dashboard (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureDashboardPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.manager.hasPanel(.Chat)) "Chat (Focus)" else "Chat (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        self.manager.ensurePanel(.Chat);
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.fs.filesystem_panel_id != null) "Explorer (Focus)" else "Explorer (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureFilesystemPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.ws.node_topology_panel_id != null) "Devices (Focus)" else "Devices (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureNodeTopologyPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                },
+                .project => {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Advanced Workspace Setup...",
+                        .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+                    )) {
+                        self.openWorkspaceWizard();
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Refresh Workspace",
+                        .{ .variant = .secondary, .disabled = self.connection_state != .connected },
+                    )) {
+                        self.refreshWorkspaceData() catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Activate Selected",
+                        .{ .variant = .secondary, .disabled = self.connection_state != .connected or self.selectedWorkspaceId() == null },
+                    )) {
+                        self.activateSelectedWorkspace() catch {};
+                        self.ide_menu_open = null;
+                    }
+                },
+                .tools => {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Settings",
+                        .{ .variant = .secondary },
+                    )) {
+                        self.ensureSettingsPanel(&self.manager);
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.fs.filesystem_tools_panel_id != null) "Explorer Tools (Focus)" else "Explorer Tools (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureFilesystemToolsPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "Terminal",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureTerminalPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.ws.venom_manager_panel_id != null) "Packages (Focus)" else "Packages (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureVenomManagerPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                    row_y += row_h + row_gap;
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        if (self.ws.mcp_config_panel_id != null) "MCP Servers (Focus)" else "MCP Servers (Open)",
+                        .{ .variant = .secondary },
+                    )) {
+                        _ = self.ensureMcpConfigPanel(&self.manager) catch {};
+                        self.ide_menu_open = null;
+                    }
+                },
+                .window => {
+                    if (platformSupportsMultiWindow() and self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "New Window",
+                        .{ .variant = .secondary },
+                    )) {
+                        self.spawnUiWindow() catch {};
+                        self.ide_menu_open = null;
+                    }
+                },
+                .help => {
+                    if (self.drawButtonWidget(
+                        Rect.fromXYWH(row_x, row_y, row_w, row_h),
+                        "About SpiderApp",
+                        .{ .variant = .secondary },
+                    )) {
+                        self.openAboutModal();
+                        self.ide_menu_open = null;
+                    }
+                },
+            }
+        }
+
+        if (self.mouse_clicked and self.ide_menu_open != null) {
+            const in_button = if (selected_button_rect) |rect| rect.contains(.{ self.mouse_x, self.mouse_y }) else false;
+            const in_dropdown = if (dropdown_rect) |rect| rect.contains(.{ self.mouse_x, self.mouse_y }) else false;
+            if (!in_button and !in_dropdown) self.ide_menu_open = null;
+        }
+
+        _ = ui_window;
+
+        return bar_h;
     }
 
     fn drawUnavailableWorkspaceFrame(self: *App, ui_window: *UiWindow, message: []const u8) void {
@@ -7816,11 +10432,106 @@ pub const App = struct {
         }
     }
 
-    pub fn drawTabsPanel(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode, rect: UiRect) void {
-        workspace_host_mod.drawTabsPanel(self, manager, tabs, rect);
+    fn drawTabsPanel(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode, rect: UiRect) void {
+        if (!self.isTabsNodeUsable(manager, tabs)) return;
+        const line_height = self.textLineHeight();
+        const tab_metrics = self.dockTabMetrics();
+        const tab_height = tab_metrics.height;
+
+        // Draw panel background
+        self.ui_commands.pushRect(
+            .{ .min = rect.min, .max = rect.max },
+            .{ .fill = self.theme.colors.surface },
+        );
+
+        // Draw tab bar
+        const tab_bar_rect = UiRect.fromMinSize(
+            rect.min,
+            .{ rect.max[0] - rect.min[0], tab_height },
+        );
+        self.ui_commands.pushRect(
+            .{ .min = tab_bar_rect.min, .max = tab_bar_rect.max },
+            .{ .fill = self.theme.colors.background },
+        );
+
+        var tab_x = rect.min[0] + tab_metrics.pad;
+        const rect_w = rect.max[0] - rect.min[0];
+        var active_tab_id = if (tabs.active < tabs.tabs.items.len)
+            tabs.tabs.items[tabs.active]
+        else
+            null;
+        if (active_tab_id == null) {
+            for (tabs.tabs.items) |candidate_panel_id| {
+                if (self.findPanelById(manager, candidate_panel_id) != null) {
+                    active_tab_id = candidate_panel_id;
+                    break;
+                }
+            }
+        }
+
+        // Draw each tab
+        for (tabs.tabs.items) |panel_id| {
+            const panel = self.findPanelById(manager, panel_id) orelse continue;
+            const is_active = panel_id == active_tab_id;
+
+            const desired_tab_width = self.measureText(panel.title) + tab_metrics.pad * 2.0;
+            const tab_width = self.dockTabWidth(panel.title, rect_w, tab_metrics);
+            const tab_rect = UiRect.fromMinSize(
+                .{ tab_x, rect.min[1] },
+                .{ tab_width, tab_height },
+            );
+
+            // Tab background
+            const tab_color = if (is_active)
+                self.theme.colors.surface
+            else
+                self.theme.colors.background;
+            self.ui_commands.pushRect(
+                .{ .min = tab_rect.min, .max = tab_rect.max },
+                .{ .fill = tab_color },
+            );
+
+            // Tab border
+            self.ui_commands.pushRect(
+                .{ .min = tab_rect.min, .max = tab_rect.max },
+                .{ .stroke = self.theme.colors.border },
+            );
+
+            // Tab text
+            if (desired_tab_width > tab_width) {
+                self.drawTextTrimmed(
+                    tab_x + tab_metrics.pad,
+                    rect.min[1] + @max(0.0, (tab_height - line_height) * 0.5),
+                    tab_width - tab_metrics.pad * 2.0,
+                    panel.title,
+                    self.theme.colors.text_primary,
+                );
+            } else {
+                self.drawText(
+                    tab_x + tab_metrics.pad,
+                    rect.min[1] + @max(0.0, (tab_height - line_height) * 0.5),
+                    panel.title,
+                    self.theme.colors.text_primary,
+                );
+            }
+
+            tab_x += tab_width + tab_metrics.pad;
+        }
+
+        // Draw content area for active tab
+        const content_rect = UiRect.fromMinSize(
+            .{ rect.min[0], rect.min[1] + tab_height },
+            .{ rect.max[0] - rect.min[0], rect.max[1] - rect.min[1] - tab_height },
+        );
+
+        if (active_tab_id) |panel_id| {
+            self.ui_commands.pushClip(.{ .min = content_rect.min, .max = content_rect.max });
+            defer self.ui_commands.popClip();
+            self.drawPanelContent(manager, panel_id, content_rect);
+        }
     }
 
-    pub fn isTabsNodeUsable(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode) bool {
+    fn isTabsNodeUsable(self: *App, manager: *panel_manager.PanelManager, tabs: *const dock_graph.TabsNode) bool {
         if (tabs.tabs.items.len == 0) return false;
         if (tabs.tabs.items.len > MAX_REASONABLE_PANEL_COUNT) return false;
         if (tabs.active >= tabs.tabs.items.len) {
@@ -7844,14 +10555,14 @@ pub const App = struct {
         return true;
     }
 
-    pub fn findPanelById(_: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId) ?*workspace.Panel {
+    fn findPanelById(_: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId) ?*workspace.Panel {
         for (manager.workspace.panels.items) |*panel| {
             if (panel.id == panel_id) return panel;
         }
         return null;
     }
 
-    pub fn drawPanelContent(self: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId, rect: UiRect) void {
+    fn drawPanelContent(self: *App, manager: *panel_manager.PanelManager, panel_id: workspace.PanelId, rect: UiRect) void {
         const panel = self.findPanelById(manager, panel_id) orelse return;
         self.promoteLegacyHostPanel(manager, panel);
         const inset = self.panelLayoutMetrics().inset;
@@ -7926,6 +10637,21 @@ pub const App = struct {
                     const started_ns = std.time.nanoTimestamp();
                     self.drawTerminalPanel(manager, rect);
                     self.perf_frame_panel_ns.terminal += std.time.nanoTimestamp() - started_ns;
+                } else if (std.mem.eql(u8, panel.title, "Devices")) {
+                    const started_ns = std.time.nanoTimestamp();
+                    self.ws.node_topology_panel_id = panel.id;
+                    self.drawNodeTopologyPanel(&self.manager, rect);
+                    self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+                } else if (std.mem.eql(u8, panel.title, "Packages")) {
+                    const started_ns = std.time.nanoTimestamp();
+                    self.ws.venom_manager_panel_id = panel.id;
+                    self.drawVenomManagerPanel(&self.manager, rect);
+                    self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
+                } else if (std.mem.eql(u8, panel.title, "MCP Servers")) {
+                    const started_ns = std.time.nanoTimestamp();
+                    self.ws.mcp_config_panel_id = panel.id;
+                    self.drawMcpConfigPanel(&self.manager, rect);
+                    self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
                 } else {
                     const started_ns = std.time.nanoTimestamp();
                     self.drawText(
@@ -7936,30 +10662,6 @@ pub const App = struct {
                     );
                     self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
                 }
-            },
-            .Dashboard => {
-                const started_ns = std.time.nanoTimestamp();
-                self.ws.dashboard_panel_id = panel.id;
-                self.drawDashboardPanel(&self.manager, rect);
-                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
-            },
-            .VenomManager => {
-                const started_ns = std.time.nanoTimestamp();
-                self.ws.venom_manager_panel_id = panel.id;
-                self.drawVenomManagerPanel(&self.manager, rect);
-                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
-            },
-            .NodeTopology => {
-                const started_ns = std.time.nanoTimestamp();
-                self.ws.node_topology_panel_id = panel.id;
-                self.drawNodeTopologyPanel(&self.manager, rect);
-                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
-            },
-            .McpConfig => {
-                const started_ns = std.time.nanoTimestamp();
-                self.ws.mcp_config_panel_id = panel.id;
-                self.drawMcpConfigPanel(&self.manager, rect);
-                self.perf_frame_panel_ns.other += std.time.nanoTimestamp() - started_ns;
             },
             else => {
                 // Draw placeholder for other panel types
@@ -7979,7 +10681,7 @@ pub const App = struct {
         app: *App,
     };
 
-    pub fn drawHostPanelWithRuntime(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) bool {
+    fn drawHostPanelWithRuntime(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) bool {
         if (panel.kind != .WorkspaceOverview and panel.kind != .FilesystemBrowser and panel.kind != .FilesystemTools and panel.kind != .DebugStream) {
             return false;
         }
@@ -8076,7 +10778,7 @@ pub const App = struct {
         runtime_ctx.app.drawDebugPanel(manager, panel_rect orelse return);
     }
 
-    pub fn promoteLegacyHostPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel) void {
+    fn promoteLegacyHostPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel) void {
         if (panel.kind != .ToolOutput) return;
 
         const target_kind: ?workspace.PanelKind = blk: {
@@ -8404,13 +11106,13 @@ pub const App = struct {
             else
                 @as(usize, @intFromFloat(((output_rect.max[1] - body_top_y) / line_height) + 1.0));
 
-            var visible_idx = debug_host_mod.findFirstVisiblePayloadLine(entry, min_row);
+            var visible_idx = findFirstVisiblePayloadLine(entry, min_row);
             while (visible_idx < entry.payload_visible_line_indices.items.len) : (visible_idx += 1) {
                 const payload_line_idx = @as(usize, @intCast(entry.payload_visible_line_indices.items[visible_idx]));
                 const row_start = @as(usize, @intCast(entry.payload_visible_line_row_starts.items[visible_idx]));
                 if (row_start >= max_row_exclusive) break;
 
-                _ = debug_host_mod.payloadLineRowsFromCache(entry, payload_line_idx);
+                _ = payloadLineRowsFromCache(entry, payload_line_idx);
                 const line_y = body_top_y + @as(f32, @floatFromInt(row_start)) * line_height;
                 if (line_y > output_rect.max[1]) break;
 
@@ -8480,7 +11182,7 @@ pub const App = struct {
         return 0;
     }
 
-    pub fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawSettingsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         settings_host_mod.drawSettingsPanel(self, manager, rect);
     }
 
@@ -8488,11 +11190,11 @@ pub const App = struct {
         settings_host_mod.drawWorkspaceSettingsPanel(self, rect);
     }
 
-    pub fn drawApprovalsInboxPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
+    fn drawApprovalsInboxPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
         mission_host_mod.drawApprovalsInboxPanel(self, manager, panel, rect);
     }
 
-    pub fn drawMissionWorkboardPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
+    fn drawMissionWorkboardPanel(self: *App, manager: *panel_manager.PanelManager, panel: *workspace.Panel, rect: UiRect) void {
         mission_workboard_host.draw(self, manager, panel, rect);
     }
 
@@ -8509,7 +11211,7 @@ pub const App = struct {
         self.refreshWorkspaceData() catch {};
     }
 
-    pub fn drawDashboardPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawDashboardPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         dashboard_host.draw(self, manager, rect);
     }
 
@@ -8630,13 +11332,13 @@ pub const App = struct {
         self.refreshVenomManager();
     }
 
-    pub fn drawVenomManagerPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawVenomManagerPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         venom_manager_host.draw(self, manager, rect);
     }
 
 
 
-    pub fn drawNodeTopologyPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawNodeTopologyPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         node_topology_host.draw(self, manager, rect);
     }
 
@@ -8720,7 +11422,7 @@ pub const App = struct {
         self.ws.mcp_selected_runtime = text;
     }
 
-    pub fn drawMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         mcp_config_host.draw(self, manager, rect);
     }
 
@@ -8728,7 +11430,7 @@ pub const App = struct {
 
     // ── Workspace Setup Wizard ────────────────────────────────────────────────
 
-    pub fn openWorkspaceWizard(self: *App) void {
+    fn openWorkspaceWizard(self: *App) void {
         self.ws.workspace_wizard_open = true;
         self.ws.workspace_wizard_step = 0;
         self.ws.workspace_wizard_selected_node_index = null;
@@ -8757,7 +11459,7 @@ pub const App = struct {
         };
     }
 
-    pub fn closeWorkspaceWizard(self: *App) void {
+    fn closeWorkspaceWizard(self: *App) void {
         self.ws.workspace_wizard_open = false;
         for (self.ws.workspace_wizard_mounts.items) |*m| m.deinit(self.allocator);
         self.ws.workspace_wizard_mounts.clearAndFree(self.allocator);
@@ -8769,7 +11471,7 @@ pub const App = struct {
         self.ws.workspace_wizard_selected_node_index = null;
     }
 
-    pub fn wizardAddCurrentMount(self: *App) void {
+    fn wizardAddCurrentMount(self: *App) void {
         const path = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t\r\n");
         const node_id = std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t\r\n");
         if (path.len == 0 or node_id.len == 0) return;
@@ -8787,7 +11489,7 @@ pub const App = struct {
         self.settings_panel.project_mount_node_id.clearRetainingCapacity();
     }
 
-    pub fn wizardAddCurrentBind(self: *App) void {
+    fn wizardAddCurrentBind(self: *App) void {
         const bind_path = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t\r\n");
         const target_path = std.mem.trim(u8, self.settings_panel.workspace_bind_target_path.items, " \t\r\n");
         if (bind_path.len == 0 or target_path.len == 0) return;
@@ -8805,7 +11507,7 @@ pub const App = struct {
         self.settings_panel.workspace_bind_target_path.clearRetainingCapacity();
     }
 
-    pub fn wizardExecuteCreate(self: *App) void {
+    fn wizardExecuteCreate(self: *App) void {
         // Delegate to existing createWorkspaceFromPanel which reads settings_panel fields.
         // Mounts and binds are handled separately after creation via the workspace panel.
         self.createWorkspaceFromPanel() catch |err| {
@@ -8824,30 +11526,376 @@ pub const App = struct {
     }
 
     pub fn drawWorkspaceWizardModal(self: *App, fb_width: u32, fb_height: u32) void {
-        workspace_host_mod.drawWorkspaceWizardModal(self, fb_width, fb_height);
+        const layout = self.panelLayoutMetrics();
+        const pad = @max(layout.inset, 12.0 * self.ui_scale);
+        const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
+
+        const modal_w = @min(740.0 * self.ui_scale, @as(f32, @floatFromInt(fb_width)) - pad * 4.0);
+        const modal_h = @min(520.0 * self.ui_scale, @as(f32, @floatFromInt(fb_height)) - pad * 4.0);
+        const modal_x = (@as(f32, @floatFromInt(fb_width)) - modal_w) * 0.5;
+        const modal_y = (@as(f32, @floatFromInt(fb_height)) - modal_h) * 0.5;
+        const modal_rect = Rect.fromXYWH(modal_x, modal_y, modal_w, modal_h);
+
+        // Dim backdrop
+        self.drawFilledRect(
+            Rect.fromXYWH(0, 0, @floatFromInt(fb_width), @floatFromInt(fb_height)),
+            zcolors.withAlpha(self.theme.colors.background, 0.72),
+        );
+        self.drawSurfacePanel(modal_rect);
+        self.drawRect(modal_rect, self.theme.colors.border);
+
+        // Title bar
+        const step_names = [_][]const u8{ "Template", "Name & Vision", "Mounts", "Binds", "Review" };
+        const current_step_name = if (self.ws.workspace_wizard_step < step_names.len) step_names[self.ws.workspace_wizard_step] else "?";
+        const title_str = std.fmt.allocPrint(
+            self.allocator,
+            "Advanced Workspace Setup — Step {d}/5: {s}",
+            .{ self.ws.workspace_wizard_step + 1, current_step_name },
+        ) catch null;
+        defer if (title_str) |v| self.allocator.free(v);
+        var y = modal_rect.min[1] + pad;
+        self.drawText(
+            modal_rect.min[0] + pad,
+            y,
+            title_str orelse "Advanced Workspace Setup",
+            self.theme.colors.text_primary,
+        );
+        y += layout.line_height + layout.row_gap * 0.5;
+
+        // Step indicator dots
+        const dot_r = 5.0 * self.ui_scale;
+        const dot_spacing = 18.0 * self.ui_scale;
+        var dot_x = modal_rect.min[0] + pad;
+        for (0..5) |i| {
+            const dot_rect = Rect.fromXYWH(dot_x, y, dot_r * 2.0, dot_r * 2.0);
+            const dot_color = if (i == self.ws.workspace_wizard_step)
+                self.theme.colors.primary
+            else if (i < self.ws.workspace_wizard_step)
+                zcolors.blend(self.theme.colors.primary, self.theme.colors.background, 0.5)
+            else
+                self.theme.colors.border;
+            self.drawFilledRect(dot_rect, dot_color);
+            dot_x += dot_r * 2.0 + dot_spacing;
+        }
+        y += dot_r * 2.0 + layout.row_gap * 0.8;
+
+        // Divider
+        self.drawFilledRect(
+            Rect.fromXYWH(modal_rect.min[0] + pad, y, modal_w - pad * 2.0, 1.0),
+            self.theme.colors.border,
+        );
+        y += 1.0 + layout.row_gap * 0.5;
+
+        // Error message
+        if (self.ws.workspace_wizard_error) |msg| {
+            self.drawTextTrimmed(
+                modal_rect.min[0] + pad,
+                y,
+                modal_w - pad * 2.0,
+                msg,
+                zcolors.rgba(220, 80, 80, 255),
+            );
+            y += layout.line_height + layout.row_gap * 0.5;
+        }
+
+        // Content area (above action buttons)
+        const action_h = row_h + pad * 2.0;
+        const content_rect = Rect.fromXYWH(
+            modal_rect.min[0] + pad,
+            y,
+            modal_w - pad * 2.0,
+            modal_rect.max[1] - y - action_h,
+        );
+
+        switch (self.ws.workspace_wizard_step) {
+            0 => self.drawWizardStepTemplate(content_rect, layout, pad),
+            1 => self.drawWizardStepNameVision(content_rect, layout, pad),
+            2 => self.drawWizardStepMounts(content_rect, layout, pad),
+            3 => self.drawWizardStepBinds(content_rect, layout, pad),
+            4 => self.drawWizardStepReview(content_rect, layout, pad),
+            else => {},
+        }
+
+        // Action buttons
+        const btn_area_y = modal_rect.max[1] - pad - row_h;
+        const btn_w = (modal_w - pad * 3.0) * 0.5;
+
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad, btn_area_y, btn_w, row_h),
+            if (self.ws.workspace_wizard_step == 0) "Cancel" else "Back",
+            .{ .variant = .secondary },
+        )) {
+            if (self.ws.workspace_wizard_step == 0) {
+                self.closeWorkspaceWizard();
+            } else {
+                self.ws.workspace_wizard_step -= 1;
+                if (self.ws.workspace_wizard_error) |v| self.allocator.free(v);
+                self.ws.workspace_wizard_error = null;
+            }
+            return;
+        }
+
+        const is_last_step = self.ws.workspace_wizard_step == 4;
+        const next_label: []const u8 = if (is_last_step) "Create Workspace" else "Next";
+        const next_disabled = switch (self.ws.workspace_wizard_step) {
+            0 => self.ws.launcher_create_templates.items.len == 0,
+            1 => std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n").len == 0,
+            else => false,
+        };
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(modal_rect.min[0] + pad * 2.0 + btn_w, btn_area_y, btn_w, row_h),
+            next_label,
+            .{ .variant = .primary, .disabled = next_disabled or self.connection_state != .connected },
+        )) {
+            if (is_last_step) {
+                self.wizardExecuteCreate();
+            } else {
+                self.ws.workspace_wizard_step += 1;
+                if (self.ws.workspace_wizard_error) |v| self.allocator.free(v);
+                self.ws.workspace_wizard_error = null;
+                // Focus appropriate field when entering step
+                self.settings_panel.focused_field = switch (self.ws.workspace_wizard_step) {
+                    1 => .project_create_name,
+                    2 => .project_mount_path,
+                    3 => .workspace_bind_path,
+                    else => .none,
+                };
+            }
+        }
+
+        // Close on outside click
+        if (self.mouse_released and !modal_rect.contains(.{ self.mouse_x, self.mouse_y })) {
+            self.closeWorkspaceWizard();
+        }
     }
 
     fn drawWizardStepTemplate(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
-        workspace_host_mod.drawWizardStepTemplate(self, rect, layout, pad);
+        const template_count = self.ws.launcher_create_templates.items.len;
+        if (template_count == 0) {
+            self.drawTextTrimmed(
+                rect.min[0], rect.min[1], rect.width(),
+                "No templates available. Ensure you are connected.",
+                self.theme.colors.text_secondary,
+            );
+            return;
+        }
+        const row_h = @max(layout.button_height, 30.0 * self.ui_scale);
+        const row_gap = layout.row_gap * 0.45;
+        var row_y = rect.min[1];
+        self.drawText(rect.min[0], row_y, "Select a workspace template:", self.theme.colors.text_secondary);
+        row_y += layout.line_height + layout.row_gap * 0.4;
+        for (self.ws.launcher_create_templates.items, 0..) |template, idx| {
+            if (row_y + row_h > rect.max[1]) break;
+            const is_selected = idx == self.ws.launcher_create_selected_template_index;
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(rect.min[0], row_y, rect.width(), row_h),
+                template.id,
+                .{ .variant = if (is_selected) .primary else .secondary },
+            )) {
+                self.ws.launcher_create_selected_template_index = idx;
+                self.syncLauncherCreateSelectedTemplateToSettings() catch {};
+            }
+            row_y += row_h + row_gap;
+        }
+        // Show description of selected template
+        if (self.selectedLauncherCreateWorkspaceTemplate()) |tmpl| {
+            if (tmpl.description.len > 0) {
+                const desc_y = @min(row_y + layout.row_gap, rect.max[1] - layout.line_height * 2.0);
+                self.drawTextTrimmed(rect.min[0], desc_y, rect.width(), tmpl.description, self.theme.colors.text_secondary);
+            }
+        }
+        _ = pad;
     }
 
     fn drawWizardStepNameVision(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
-        workspace_host_mod.drawWizardStepNameVision(self, rect, layout, pad);
+        var y = rect.min[1];
+        self.drawLabel(rect.min[0], y, "Workspace Name", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.25;
+        const name_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.project_create_name.items,
+            self.settings_panel.focused_field == .project_create_name,
+            .{ .placeholder = "my-workspace" },
+        );
+        if (name_focused) self.settings_panel.focused_field = .project_create_name;
+        y += layout.input_height + layout.row_gap * 0.8;
+
+        self.drawLabel(rect.min[0], y, "Vision (optional)", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.25;
+        const vision_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.project_create_vision.items,
+            self.settings_panel.focused_field == .project_create_vision,
+            .{ .placeholder = "Describe the workspace goal..." },
+        );
+        if (vision_focused) self.settings_panel.focused_field = .project_create_vision;
+        _ = pad;
     }
 
     fn drawWizardStepMounts(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
-        workspace_host_mod.drawWizardStepMounts(self, rect, layout, pad);
+        var y = rect.min[1];
+        // Existing mounts
+        self.drawText(rect.min[0], y, "Mounts (optional — press Add to add each)", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.4;
+        const row_h = @max(layout.button_height, 26.0 * self.ui_scale);
+        for (self.ws.workspace_wizard_mounts.items, 0..) |m, idx| {
+            if (y + row_h > rect.max[1] - layout.input_height * 3.0 - row_h * 1.5) break;
+            const line = std.fmt.allocPrint(self.allocator, "{s}  →  {s}", .{ m.path, m.node_id }) catch null;
+            defer if (line) |v| self.allocator.free(v);
+            self.drawText(rect.min[0] + pad * 0.5, y + (row_h - layout.line_height) * 0.5, line orelse m.path, self.theme.colors.text_primary);
+            // Remove button
+            const rm_w = @max(60.0 * self.ui_scale, self.measureText("Remove") + pad);
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(rect.max[0] - rm_w, y, rm_w, row_h),
+                "Remove",
+                .{ .variant = .secondary },
+            )) {
+                var entry = self.ws.workspace_wizard_mounts.orderedRemove(idx);
+                entry.deinit(self.allocator);
+                return;
+            }
+            y += row_h + layout.row_gap * 0.3;
+        }
+        // Add form
+        const form_top = rect.max[1] - layout.input_height * 2.0 - layout.row_gap * 1.0 - row_h;
+        y = @max(y, form_top);
+        self.drawLabel(rect.min[0], y, "Mount Path", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        const mp_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.project_mount_path.items,
+            self.settings_panel.focused_field == .project_mount_path,
+            .{ .placeholder = "/workspace/path" },
+        );
+        if (mp_focused) self.settings_panel.focused_field = .project_mount_path;
+        y += layout.input_height + layout.row_gap * 0.4;
+        self.drawLabel(rect.min[0], y, "Node ID", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        const ni_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.project_mount_node_id.items,
+            self.settings_panel.focused_field == .project_mount_node_id,
+            .{ .placeholder = "node-id" },
+        );
+        if (ni_focused) self.settings_panel.focused_field = .project_mount_node_id;
+        y += layout.input_height + layout.row_gap * 0.4;
+        const add_w = @max(80.0 * self.ui_scale, self.measureText("Add Mount") + pad);
+        const can_add = std.mem.trim(u8, self.settings_panel.project_mount_path.items, " \t\r\n").len > 0 and
+            std.mem.trim(u8, self.settings_panel.project_mount_node_id.items, " \t\r\n").len > 0;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(rect.min[0], y, add_w, row_h),
+            "Add Mount",
+            .{ .variant = .secondary, .disabled = !can_add },
+        )) {
+            self.wizardAddCurrentMount();
+        }
     }
 
     fn drawWizardStepBinds(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
-        workspace_host_mod.drawWizardStepBinds(self, rect, layout, pad);
+        var y = rect.min[1];
+        self.drawText(rect.min[0], y, "Binds (optional — press Add to add each)", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.4;
+        const row_h = @max(layout.button_height, 26.0 * self.ui_scale);
+        for (self.ws.workspace_wizard_binds.items, 0..) |b, idx| {
+            if (y + row_h > rect.max[1] - layout.input_height * 3.0 - row_h * 1.5) break;
+            const line = std.fmt.allocPrint(self.allocator, "{s}  →  {s}", .{ b.bind_path, b.target_path }) catch null;
+            defer if (line) |v| self.allocator.free(v);
+            self.drawText(rect.min[0] + pad * 0.5, y + (row_h - layout.line_height) * 0.5, line orelse b.bind_path, self.theme.colors.text_primary);
+            const rm_w = @max(60.0 * self.ui_scale, self.measureText("Remove") + pad);
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(rect.max[0] - rm_w, y, rm_w, row_h),
+                "Remove",
+                .{ .variant = .secondary },
+            )) {
+                var entry = self.ws.workspace_wizard_binds.orderedRemove(idx);
+                entry.deinit(self.allocator);
+                return;
+            }
+            y += row_h + layout.row_gap * 0.3;
+        }
+        const form_top = rect.max[1] - layout.input_height * 2.0 - layout.row_gap * 1.0 - row_h;
+        y = @max(y, form_top);
+        self.drawLabel(rect.min[0], y, "Bind Path", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        const bp_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.workspace_bind_path.items,
+            self.settings_panel.focused_field == .workspace_bind_path,
+            .{ .placeholder = "/bind/path" },
+        );
+        if (bp_focused) self.settings_panel.focused_field = .workspace_bind_path;
+        y += layout.input_height + layout.row_gap * 0.4;
+        self.drawLabel(rect.min[0], y, "Target Path", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        const tp_focused = self.drawTextInputWidget(
+            Rect.fromXYWH(rect.min[0], y, rect.width(), layout.input_height),
+            self.settings_panel.workspace_bind_target_path.items,
+            self.settings_panel.focused_field == .workspace_bind_target_path,
+            .{ .placeholder = "/target/path" },
+        );
+        if (tp_focused) self.settings_panel.focused_field = .workspace_bind_target_path;
+        y += layout.input_height + layout.row_gap * 0.4;
+        const add_w = @max(80.0 * self.ui_scale, self.measureText("Add Bind") + pad);
+        const can_add = std.mem.trim(u8, self.settings_panel.workspace_bind_path.items, " \t\r\n").len > 0 and
+            std.mem.trim(u8, self.settings_panel.workspace_bind_target_path.items, " \t\r\n").len > 0;
+        if (self.drawButtonWidget(
+            Rect.fromXYWH(rect.min[0], y, add_w, row_h),
+            "Add Bind",
+            .{ .variant = .secondary, .disabled = !can_add },
+        )) {
+            self.wizardAddCurrentBind();
+        }
     }
 
     fn drawWizardStepReview(self: *App, rect: Rect, layout: PanelLayoutMetrics, pad: f32) void {
-        workspace_host_mod.drawWizardStepReview(self, rect, layout, pad);
+        var y = rect.min[1];
+        self.drawText(rect.min[0], y, "Review your workspace configuration:", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.6;
+
+        const label_w = 120.0 * self.ui_scale;
+        // Template
+        const tmpl_id = if (self.selectedLauncherCreateWorkspaceTemplate()) |t| t.id else "(none)";
+        self.drawTextTrimmed(rect.min[0], y, label_w, "Template:", self.theme.colors.text_secondary);
+        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, tmpl_id, self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.35;
+        // Name
+        const name = std.mem.trim(u8, self.settings_panel.project_create_name.items, " \t\r\n");
+        self.drawTextTrimmed(rect.min[0], y, label_w, "Name:", self.theme.colors.text_secondary);
+        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, if (name.len > 0) name else "(none)", self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.35;
+        // Vision
+        const vision = std.mem.trim(u8, self.settings_panel.project_create_vision.items, " \t\r\n");
+        self.drawTextTrimmed(rect.min[0], y, label_w, "Vision:", self.theme.colors.text_secondary);
+        self.drawTextTrimmed(rect.min[0] + label_w, y, rect.width() - label_w, if (vision.len > 0) vision else "(none)", self.theme.colors.text_primary);
+        y += layout.line_height + layout.row_gap * 0.6;
+        // Mounts
+        const mount_count_str = std.fmt.allocPrint(self.allocator, "Mounts ({d}):", .{self.ws.workspace_wizard_mounts.items.len}) catch null;
+        defer if (mount_count_str) |v| self.allocator.free(v);
+        self.drawTextTrimmed(rect.min[0], y, label_w, mount_count_str orelse "Mounts:", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        for (self.ws.workspace_wizard_mounts.items) |m| {
+            if (y + layout.line_height > rect.max[1] - layout.line_height * 3.0) break;
+            const line = std.fmt.allocPrint(self.allocator, "  {s}  →  {s}", .{ m.path, m.node_id }) catch null;
+            defer if (line) |v| self.allocator.free(v);
+            self.drawTextTrimmed(rect.min[0] + pad * 0.5, y, rect.width() - pad * 0.5, line orelse m.path, self.theme.colors.text_primary);
+            y += layout.line_height + layout.row_gap * 0.2;
+        }
+        y += layout.row_gap * 0.4;
+        // Binds
+        const bind_count_str = std.fmt.allocPrint(self.allocator, "Binds ({d}):", .{self.ws.workspace_wizard_binds.items.len}) catch null;
+        defer if (bind_count_str) |v| self.allocator.free(v);
+        self.drawTextTrimmed(rect.min[0], y, label_w, bind_count_str orelse "Binds:", self.theme.colors.text_secondary);
+        y += layout.line_height + layout.row_gap * 0.2;
+        for (self.ws.workspace_wizard_binds.items) |b| {
+            if (y + layout.line_height > rect.max[1]) break;
+            const line = std.fmt.allocPrint(self.allocator, "  {s}  →  {s}", .{ b.bind_path, b.target_path }) catch null;
+            defer if (line) |v| self.allocator.free(v);
+            self.drawTextTrimmed(rect.min[0] + pad * 0.5, y, rect.width() - pad * 0.5, line orelse b.bind_path, self.theme.colors.text_primary);
+            y += layout.line_height + layout.row_gap * 0.2;
+        }
     }
 
-    pub fn ensureMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    fn ensureMcpConfigPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.ws.mcp_config_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -8856,14 +11904,13 @@ pub const App = struct {
             self.ws.mcp_config_panel_id = null;
         }
         for (manager.workspace.panels.items) |*panel| {
-            if (panel.kind == .McpConfig) {
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "MCP Servers")) {
                 self.ws.mcp_config_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
         }
-        const panel_data = workspace.PanelData{ .McpConfig = {} };
-        const panel_id = try manager.openPanel(.McpConfig, "MCP Servers", panel_data);
+        const panel_id = try self.openHostToolOutputPanel(manager, "MCP Servers", "Spiderweb MCP Servers");
         self.ws.mcp_config_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
@@ -8872,7 +11919,7 @@ pub const App = struct {
         return panel_id;
     }
 
-    pub fn ensureNodeTopologyPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    fn ensureNodeTopologyPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.ws.node_topology_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -8881,14 +11928,13 @@ pub const App = struct {
             self.ws.node_topology_panel_id = null;
         }
         for (manager.workspace.panels.items) |*panel| {
-            if (panel.kind == .NodeTopology) {
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Devices")) {
                 self.ws.node_topology_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
         }
-        const panel_data = workspace.PanelData{ .NodeTopology = {} };
-        const panel_id = try manager.openPanel(.NodeTopology, "Node Topology", panel_data);
+        const panel_id = try self.openHostToolOutputPanel(manager, "Devices", "Spiderweb Devices");
         self.ws.node_topology_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
@@ -8897,7 +11943,7 @@ pub const App = struct {
         return panel_id;
     }
 
-    pub fn ensureVenomManagerPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    fn ensureVenomManagerPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.ws.venom_manager_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -8906,14 +11952,13 @@ pub const App = struct {
             self.ws.venom_manager_panel_id = null;
         }
         for (manager.workspace.panels.items) |*panel| {
-            if (panel.kind == .VenomManager) {
+            if (panel.kind == .ToolOutput and std.mem.eql(u8, panel.title, "Packages")) {
                 self.ws.venom_manager_panel_id = panel.id;
                 manager.focusPanel(panel.id);
                 return panel.id;
             }
         }
-        const panel_data = workspace.PanelData{ .VenomManager = {} };
-        const panel_id = try manager.openPanel(.VenomManager, "Packages", panel_data);
+        const panel_id = try self.openHostToolOutputPanel(manager, "Packages", "Spiderweb Packages");
         self.ws.venom_manager_panel_id = panel_id;
         if (manager.workspace.syncDockLayout() catch false) {
             manager.workspace.markDirty();
@@ -8922,28 +11967,9 @@ pub const App = struct {
         return panel_id;
     }
 
-    pub fn ensureDashboardPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
-        if (self.ws.dashboard_panel_id) |panel_id| {
-            if (self.findPanelById(manager, panel_id) != null) {
-                manager.focusPanel(panel_id);
-                return panel_id;
-            }
-            self.ws.dashboard_panel_id = null;
-        }
-        for (manager.workspace.panels.items) |*panel| {
-            if (panel.kind == .Dashboard) {
-                self.ws.dashboard_panel_id = panel.id;
-                manager.focusPanel(panel.id);
-                return panel.id;
-            }
-        }
-        const panel_data = workspace.PanelData{ .Dashboard = {} };
-        const panel_id = try manager.openPanel(.Dashboard, "Dashboard", panel_data);
+    fn ensureDashboardPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+        const panel_id = try self.ensureWorkspacePanel(manager);
         self.ws.dashboard_panel_id = panel_id;
-        if (manager.workspace.syncDockLayout() catch false) {
-            manager.workspace.markDirty();
-        }
-        manager.focusPanel(panel_id);
         return panel_id;
     }
 
@@ -9002,7 +12028,7 @@ pub const App = struct {
         return std.fmt.bufPrint(buf, "Live mission data refreshed {s}", .{relative}) catch "Live mission data";
     }
 
-    pub fn drawWorkspacePanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawWorkspacePanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         workspace_host_mod.drawWorkspacePanel(self, manager, rect);
     }
 
@@ -9646,7 +12672,7 @@ pub const App = struct {
         };
     }
 
-    pub fn drawTerminalPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawTerminalPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         terminal_host_mod.drawTerminalPanel(self, manager, rect);
     }
 
@@ -9786,72 +12812,6 @@ pub const App = struct {
             .copy_auth_user => {
                 self.copyAuthTokenFromPanel("user") catch |err| {
                     self.handleWorkspacePanelError("Copy user token failed", err);
-                };
-            },
-            .select_mount_index => |idx| {
-                self.ws.workspace_selected_mount_index = idx;
-                if (self.ws.selected_workspace_detail) |*detail| {
-                    if (idx < detail.mounts.items.len) {
-                        const mount = detail.mounts.items[idx];
-                        self.settings_panel.project_mount_path.clearRetainingCapacity();
-                        self.settings_panel.project_mount_path.appendSlice(self.allocator, mount.mount_path) catch {};
-                        self.settings_panel.project_mount_node_id.clearRetainingCapacity();
-                        self.settings_panel.project_mount_node_id.appendSlice(self.allocator, mount.node_id) catch {};
-                        self.settings_panel.project_mount_export_name.clearRetainingCapacity();
-                        self.settings_panel.project_mount_export_name.appendSlice(self.allocator, mount.export_name) catch {};
-                    }
-                }
-            },
-            .remove_selected_mount => {
-                if (self.ws.workspace_selected_mount_index) |idx| {
-                    self.removeWorkspaceMountByView(idx) catch |err| {
-                        self.handleWorkspacePanelError("Mount remove failed", err);
-                    };
-                }
-            },
-            .select_bind_index => |idx| {
-                self.ws.workspace_selected_bind_index = idx;
-                if (self.ws.selected_workspace_detail) |*detail| {
-                    if (idx < detail.binds.items.len) {
-                        const bind = detail.binds.items[idx];
-                        self.settings_panel.workspace_bind_path.clearRetainingCapacity();
-                        self.settings_panel.workspace_bind_path.appendSlice(self.allocator, bind.bind_path) catch {};
-                        self.settings_panel.workspace_bind_target_path.clearRetainingCapacity();
-                        self.settings_panel.workspace_bind_target_path.appendSlice(self.allocator, bind.target_path) catch {};
-                    }
-                }
-            },
-            .remove_selected_bind => {
-                if (self.ws.workspace_selected_bind_index) |idx| {
-                    self.removeWorkspaceBindByView(idx) catch |err| {
-                        self.handleWorkspacePanelError("Bind remove failed", err);
-                    };
-                }
-            },
-            .select_node_for_mount => |idx| {
-                if (idx < self.ws.nodes.items.len) {
-                    const node = self.ws.nodes.items[idx];
-                    self.settings_panel.project_mount_node_id.clearRetainingCapacity();
-                    self.settings_panel.project_mount_node_id.appendSlice(self.allocator, node.node_id) catch {};
-                    self.ws.node_browser_selected_index = idx;
-                    self.ws.node_browser_open = false;
-                }
-            },
-            .rotate_workspace_token => {
-                self.rotateWorkspaceTokenFromPanel() catch |err| {
-                    self.handleWorkspacePanelError("Workspace token rotate failed", err);
-                };
-            },
-            .open_node_browser => {
-                self.ws.node_browser_open = !self.ws.node_browser_open;
-            },
-            .rebootstrap_local_node => {
-                const client = if (self.ws_client) |*value| value else {
-                    self.setWorkspaceError("Not connected");
-                    return;
-                };
-                self.ensureAppLocalNodeBootstrap(client) catch |err| {
-                    self.handleWorkspacePanelError("Local node bootstrap failed", err);
                 };
             },
         }
@@ -11080,79 +14040,320 @@ pub const App = struct {
         }
     }
 
-    pub fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawFilesystemPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         filesystem_host_mod.drawFilesystemPanel(self, manager, rect);
     }
 
-    pub fn drawFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         filesystem_host_mod.drawFilesystemToolsPanel(self, manager, rect);
     }
 
-    pub fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
+    fn drawDebugPanel(self: *App, manager: *panel_manager.PanelManager, rect: UiRect) void {
         debug_host_mod.drawDebugPanel(self, manager, rect);
     }
 
     fn makeDebugFoldKey(event_id: u64, line_index: usize) DebugFoldKey {
-        return debug_host_mod.makeDebugFoldKey(event_id, line_index);
+        return .{
+            .event_id = event_id,
+            .line_index = @intCast(line_index),
+        };
     }
 
-    pub fn isDebugBlockCollapsed(self: *App, event_id: u64, line_index: usize) bool {
-        return debug_host_mod.isDebugBlockCollapsed(self, event_id, line_index);
+    fn isDebugBlockCollapsed(self: *App, event_id: u64, line_index: usize) bool {
+        return self.debug.debug_folded_blocks.contains(makeDebugFoldKey(event_id, line_index));
     }
 
     fn toggleDebugBlockCollapsed(self: *App, event_id: u64, line_index: usize) void {
-        debug_host_mod.toggleDebugBlockCollapsed(self, event_id, line_index);
-    }
-    fn pruneDebugFoldStateForEvent(self: *App, event_id: u64) void {
-        debug_host_mod.pruneDebugFoldStateForEvent(self, event_id);
-    }
-    fn ensureDebugPayloadLines(self: *App, entry: *DebugEventEntry) void {
-        debug_host_mod.ensureDebugPayloadLines(self, entry);
-    }
-    pub fn ensureDebugPayloadWrapRows(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) void {
-        debug_host_mod.ensureDebugPayloadWrapRows(self, output_min_x, content_max_x, entry);
-    }
-    fn payloadLineRowsFromCache(entry: *const DebugEventEntry, line_index: usize) usize {
-        return debug_host_mod.payloadLineRowsFromCache(entry, line_index);
+        const key = makeDebugFoldKey(event_id, line_index);
+        if (self.debug.debug_folded_blocks.contains(key)) {
+            _ = self.debug.debug_folded_blocks.remove(key);
+            self.debug.debug_fold_revision +%= 1;
+            if (self.debug.debug_fold_revision == 0) self.debug.debug_fold_revision = 1;
+            return;
+        }
+        self.debug.debug_folded_blocks.put(key, {}) catch {};
+        self.debug.debug_fold_revision +%= 1;
+        if (self.debug.debug_fold_revision == 0) self.debug.debug_fold_revision = 1;
     }
 
-    pub fn ensureDebugVisiblePayloadLines(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) void {
-        debug_host_mod.ensureDebugVisiblePayloadLines(self, output_min_x, content_max_x, entry);
+    fn pruneDebugFoldStateForEvent(self: *App, event_id: u64) void {
+        var to_remove: std.ArrayList(DebugFoldKey) = .empty;
+        defer to_remove.deinit(self.allocator);
+
+        var it = self.debug.debug_folded_blocks.keyIterator();
+        while (it.next()) |key_ptr| {
+            if (key_ptr.*.event_id == event_id) {
+                to_remove.append(self.allocator, key_ptr.*) catch return;
+            }
+        }
+        for (to_remove.items) |key| {
+            _ = self.debug.debug_folded_blocks.remove(key);
+        }
+        if (to_remove.items.len > 0) {
+            self.debug.debug_fold_revision +%= 1;
+            if (self.debug.debug_fold_revision == 0) self.debug.debug_fold_revision = 1;
+        }
     }
+
+    fn ensureDebugPayloadLines(self: *App, entry: *DebugEventEntry) void {
+        if (entry.payload_lines.items.len > 0) return;
+        if (entry.payload_json.len == 0) return;
+        entry.payload_lines = self.buildDebugPayloadLines(entry.payload_json) catch .empty;
+        entry.payload_wrap_rows.clearRetainingCapacity();
+        entry.payload_visible_line_indices.clearRetainingCapacity();
+        entry.payload_visible_line_row_starts.clearRetainingCapacity();
+        entry.payload_visible_lines_valid = false;
+        entry.payload_wrap_rows_valid = false;
+        entry.cached_visible_rows_valid = false;
+    }
+
+    fn ensureDebugPayloadWrapRows(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) void {
+        if (entry.payload_lines.items.len == 0) return;
+        const wrap_width = @max(1.0, content_max_x - output_min_x);
+        if (entry.payload_wrap_rows_valid and
+            @abs(entry.payload_wrap_rows_wrap_width - wrap_width) < 0.5 and
+            entry.payload_wrap_rows.items.len == entry.payload_lines.items.len)
+        {
+            return;
+        }
+
+        entry.payload_wrap_rows.clearRetainingCapacity();
+        entry.payload_wrap_rows_valid = false;
+        entry.payload_wrap_rows.ensureTotalCapacity(self.allocator, entry.payload_lines.items.len) catch return;
+
+        const space_w = self.measureText(" ");
+        const fold_marker_w = self.measureText("[-]") + space_w;
+        for (entry.payload_lines.items, 0..) |meta, line_index| {
+            const line = entry.payload_json[meta.start..meta.end];
+            const indent_width = @as(f32, @floatFromInt(meta.indent_spaces)) * space_w;
+            const line_x_base = output_min_x + indent_width;
+            const content_start = @min(meta.indent_spaces, line.len);
+            const content = line[content_start..];
+            const can_fold = meta.opens_block and meta.matching_close_index != null and
+                @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1;
+            const text_x = if (can_fold) line_x_base + fold_marker_w else line_x_base;
+            const rows = self.measureJsonLineWrapRows(text_x, content_max_x, content);
+            const clamped_rows: u32 = if (rows > std.math.maxInt(u32))
+                std.math.maxInt(u32)
+            else
+                @intCast(rows);
+            entry.payload_wrap_rows.appendAssumeCapacity(clamped_rows);
+        }
+
+        entry.payload_wrap_rows_wrap_width = wrap_width;
+        entry.payload_wrap_rows_valid = true;
+        entry.payload_visible_lines_valid = false;
+        entry.cached_visible_rows_valid = false;
+    }
+
+    fn payloadLineRowsFromCache(entry: *const DebugEventEntry, line_index: usize) usize {
+        if (line_index >= entry.payload_wrap_rows.items.len) return 1;
+        const rows = @as(usize, @intCast(entry.payload_wrap_rows.items[line_index]));
+        return if (rows == 0) 1 else rows;
+    }
+
+    fn ensureDebugVisiblePayloadLines(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) void {
+        if (entry.payload_lines.items.len == 0) {
+            entry.payload_visible_line_indices.clearRetainingCapacity();
+            entry.payload_visible_line_row_starts.clearRetainingCapacity();
+            entry.cached_visible_rows = 0;
+            entry.cached_visible_rows_valid = true;
+            entry.payload_visible_lines_valid = true;
+            return;
+        }
+
+        self.ensureDebugPayloadWrapRows(output_min_x, content_max_x, entry);
+        const wrap_width = @max(1.0, content_max_x - output_min_x);
+        if (entry.payload_visible_lines_valid and
+            @abs(entry.cached_visible_rows_wrap_width - wrap_width) < 0.5 and
+            entry.cached_visible_rows_fold_revision == self.debug.debug_fold_revision)
+        {
+            return;
+        }
+
+        entry.payload_visible_line_indices.clearRetainingCapacity();
+        entry.payload_visible_line_row_starts.clearRetainingCapacity();
+        entry.payload_visible_line_indices.ensureTotalCapacity(self.allocator, entry.payload_lines.items.len) catch return;
+        entry.payload_visible_line_row_starts.ensureTotalCapacity(self.allocator, entry.payload_lines.items.len) catch return;
+
+        var rows_u64: u64 = 0;
+        var line_index: usize = 0;
+        while (line_index < entry.payload_lines.items.len) {
+            const meta = entry.payload_lines.items[line_index];
+            const start_clamped: u32 = if (rows_u64 > std.math.maxInt(u32))
+                std.math.maxInt(u32)
+            else
+                @intCast(rows_u64);
+            entry.payload_visible_line_indices.appendAssumeCapacity(@intCast(line_index));
+            entry.payload_visible_line_row_starts.appendAssumeCapacity(start_clamped);
+
+            const rows_used = payloadLineRowsFromCache(entry, line_index);
+            rows_u64 += rows_used;
+
+            if (meta.opens_block and meta.matching_close_index != null and
+                @as(usize, @intCast(meta.matching_close_index.?)) > line_index + 1 and
+                self.isDebugBlockCollapsed(entry.id, line_index))
+            {
+                line_index = @as(usize, @intCast(meta.matching_close_index.?)) + 1;
+            } else {
+                line_index += 1;
+            }
+        }
+
+        entry.cached_visible_rows = if (rows_u64 > std.math.maxInt(usize))
+            std.math.maxInt(usize)
+        else
+            @intCast(rows_u64);
+        entry.cached_visible_rows_wrap_width = wrap_width;
+        entry.cached_visible_rows_fold_revision = self.debug.debug_fold_revision;
+        entry.cached_visible_rows_valid = true;
+        entry.payload_visible_lines_valid = true;
+    }
+
     fn countVisibleDebugPayloadRows(self: *App, output_min_x: f32, content_max_x: f32, entry: *DebugEventEntry) usize {
-        return debug_host_mod.countVisibleDebugPayloadRows(self, output_min_x, content_max_x, entry);
+        if (entry.payload_lines.items.len == 0) return 0;
+        self.ensureDebugVisiblePayloadLines(output_min_x, content_max_x, entry);
+        return entry.cached_visible_rows;
     }
 
     fn findFirstVisiblePayloadLine(
         entry: *const DebugEventEntry,
         min_row: usize,
     ) usize {
-        return debug_host_mod.findFirstVisiblePayloadLine(entry, min_row);
+        var lo: usize = 0;
+        var hi: usize = entry.payload_visible_line_indices.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            const line_index = @as(usize, @intCast(entry.payload_visible_line_indices.items[mid]));
+            const start_row = @as(usize, @intCast(entry.payload_visible_line_row_starts.items[mid]));
+            const rows_used = payloadLineRowsFromCache(entry, line_index);
+            const end_row = start_row + rows_used;
+            if (end_row <= min_row) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
     }
-    pub fn measureJsonLineWrapRows(self: *App, line_x: f32, max_x: f32, line: []const u8) usize {
-        return debug_host_mod.measureJsonLineWrapRows(self, line_x, max_x, line);
+
+    fn measureJsonLineWrapRows(self: *App, line_x: f32, max_x: f32, line: []const u8) usize {
+        const line_height = self.textLineHeight();
+        const available_w = @max(1.0, max_x - line_x);
+        const h = self.measureTextWrappedHeight(available_w, line);
+
+        var rows: usize = 1;
+        var remaining = h - line_height;
+        while (remaining > line_height * 0.05) : (rows += 1) {
+            remaining -= line_height;
+        }
+        return rows;
     }
-    pub fn debugCategoryColor(self: *App, category: []const u8) [4]f32 {
-        return debug_host_mod.debugCategoryColor(self, category);
+
+    fn debugCategoryColor(self: *App, category: []const u8) [4]f32 {
+        if (std.mem.indexOf(u8, category, "error") != null) {
+            return zcolors.rgba(196, 74, 74, 255);
+        }
+        if (std.mem.startsWith(u8, category, "control.")) {
+            return zcolors.blend(self.theme.colors.primary, self.theme.colors.text_primary, 0.32);
+        }
+        if (std.mem.startsWith(u8, category, "session.")) {
+            return zcolors.rgba(64, 134, 196, 255);
+        }
+        return self.theme.colors.text_primary;
     }
+
     fn drawDebugEventHeaderLine(self: *App, x: f32, y: f32, max_x: f32, entry: DebugEventEntry) void {
-        debug_host_mod.drawDebugEventHeaderLine(self, x, y, max_x, entry);
-    }
-    pub fn jsonTokenColor(self: *App, kind: JsonTokenKind) [4]f32 {
-        return debug_host_mod.jsonTokenColor(self, kind);
+        var ts_buf: [64]u8 = undefined;
+        const ts = std.fmt.bufPrint(&ts_buf, "{d}", .{entry.timestamp_ms}) catch "0";
+        const line_height = self.textLineHeight();
+
+        // Use a fixed timestamp column so category text never overlaps when
+        // text measurement is slightly off relative to actual glyph widths.
+        const ts_col_w = 116.0 * self.ui_scale;
+        const ts_max_w = @max(0.0, @min(ts_col_w, max_x - x));
+        self.drawTextTrimmed(x, y, ts_max_w, ts, self.theme.colors.text_secondary);
+
+        const cursor_x = x + ts_col_w + 6.0 * self.ui_scale;
+        if (cursor_x >= max_x) return;
+
+        const category_max = @max(0.0, max_x - cursor_x);
+        var category_w = self.measureText(entry.category);
+        if (category_w > category_max) category_w = category_max;
+        self.drawTextTrimmed(cursor_x, y, category_max, entry.category, self.debugCategoryColor(entry.category));
+
+        if (entry.correlation_id) |value| {
+            var badge_buf: [160]u8 = undefined;
+            const text = std.fmt.bufPrint(&badge_buf, "CID:{s}", .{value}) catch "CID:(long)";
+            const badge_x = cursor_x + category_w + 8.0 * self.ui_scale;
+            const remaining = max_x - badge_x;
+            if (remaining > 40.0 * self.ui_scale) {
+                const badge_w = @min(remaining, self.measureText(text) + 10.0 * self.ui_scale);
+                const badge_h = line_height;
+                const badge_rect = Rect.fromXYWH(
+                    badge_x,
+                    y + 1.0 * self.ui_scale,
+                    badge_w,
+                    badge_h,
+                );
+                self.drawFilledRect(
+                    badge_rect,
+                    zcolors.withAlpha(self.theme.colors.primary, 0.22),
+                );
+                self.drawTextTrimmed(
+                    badge_rect.min[0] + 4.0 * self.ui_scale,
+                    y,
+                    badge_w - 6.0 * self.ui_scale,
+                    text,
+                    self.theme.colors.text_primary,
+                );
+            }
+        }
     }
 
-    pub fn wrappedLineBreak(self: *App, wrap_x: f32, cursor_x: *f32, cursor_y: *f32, rows: *usize) void {
-        debug_host_mod.wrappedLineBreak(self, wrap_x, cursor_x, cursor_y, rows);
+    fn jsonTokenColor(self: *App, kind: JsonTokenKind) [4]f32 {
+        return self.syntaxThemeColor(kind);
     }
 
-    pub fn measureGlyphWidth(self: *App, glyph: []const u8) f32 {
-        return debug_host_mod.measureGlyphWidth(self, glyph);
+    fn wrappedLineBreak(self: *App, wrap_x: f32, cursor_x: *f32, cursor_y: *f32, rows: *usize) void {
+        const line_height = self.textLineHeight();
+        cursor_x.* = wrap_x;
+        cursor_y.* += line_height;
+        rows.* += 1;
     }
-    pub fn maxFittingPrefix(self: *App, text: []const u8, max_w: f32) usize {
-        return debug_host_mod.maxFittingPrefix(self, text, max_w);
+
+    fn measureGlyphWidth(self: *App, glyph: []const u8) f32 {
+        if (glyph.len == 1) {
+            const idx = glyph[0];
+            if (idx < self.ascii_glyph_width_cache.len) {
+                const cached = self.ascii_glyph_width_cache[idx];
+                if (cached >= 0.0) return cached;
+                const measured = self.measureText(glyph);
+                self.ascii_glyph_width_cache[idx] = measured;
+                return measured;
+            }
+        }
+        return self.measureText(glyph);
     }
-    pub fn drawJsonTokenWrapped(
+
+    fn maxFittingPrefix(self: *App, text: []const u8, max_w: f32) usize {
+        if (text.len == 0 or max_w <= 0.0) return 0;
+        var width: f32 = 0.0;
+        var idx: usize = 0;
+        var best_end: usize = 0;
+        while (idx < text.len) {
+            const next = nextUtf8Boundary(text, idx);
+            if (next <= idx) break;
+            const glyph_w = self.measureGlyphWidth(text[idx..next]);
+            if (width + glyph_w > max_w) break;
+            width += glyph_w;
+            best_end = next;
+            idx = next;
+        }
+        return best_end;
+    }
+
+    fn drawJsonTokenWrapped(
         self: *App,
         wrap_x: f32,
         cursor_x: *f32,
@@ -11162,33 +14363,260 @@ pub const App = struct {
         color: [4]f32,
         rows: *usize,
     ) void {
-        debug_host_mod.drawJsonTokenWrapped(self, wrap_x, cursor_x, cursor_y, max_x, token, color, rows);
+        if (token.len == 0) return;
+
+        var start: usize = 0;
+        while (start < token.len) {
+            const remaining_w = max_x - cursor_x.*;
+            if (remaining_w <= 0.0) {
+                if (cursor_x.* > wrap_x) {
+                    self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
+                    continue;
+                }
+                const next = nextUtf8Boundary(token, start);
+                const single = token[start..next];
+                self.drawText(cursor_x.*, cursor_y.*, single, color);
+                cursor_x.* += self.measureText(single);
+                start = next;
+                continue;
+            }
+
+            const rest = token[start..];
+            const fit = self.maxFittingPrefix(rest, remaining_w);
+            if (fit == 0) {
+                if (cursor_x.* > wrap_x) {
+                    self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
+                    continue;
+                }
+                const next = nextUtf8Boundary(rest, 0);
+                const single = rest[0..next];
+                self.drawText(cursor_x.*, cursor_y.*, single, color);
+                cursor_x.* += self.measureText(single);
+                start += next;
+                continue;
+            }
+
+            const piece = rest[0..fit];
+            self.drawText(cursor_x.*, cursor_y.*, piece, color);
+            cursor_x.* += self.measureText(piece);
+            start += fit;
+
+            if (start < token.len) {
+                self.wrappedLineBreak(wrap_x, cursor_x, cursor_y, rows);
+            }
+        }
     }
+
     fn isJsonDelimiter(ch: u8) bool {
-        return debug_host_mod.isJsonDelimiter(ch);
+        return ch == ' ' or ch == '\t' or ch == ',' or ch == ':' or ch == ']' or ch == '}' or ch == '[' or ch == '{';
     }
+
     fn drawJsonLineColored(self: *App, x: f32, y: f32, max_x: f32, line: []const u8) usize {
-        return debug_host_mod.drawJsonLineColored(self, x, y, max_x, line);
+        var cursor_x = x;
+        var cursor_y = y;
+        var rows: usize = 1;
+        var i: usize = 0;
+        while (i < line.len) {
+            const ch = line[i];
+
+            if (ch == ' ' or ch == '\t') {
+                var j = i + 1;
+                while (j < line.len and (line[j] == ' ' or line[j] == '\t')) : (j += 1) {}
+                const ws_width = self.measureText(line[i..j]);
+                if (cursor_x + ws_width <= max_x) {
+                    cursor_x += ws_width;
+                } else if (cursor_x > x) {
+                    self.wrappedLineBreak(x, &cursor_x, &cursor_y, &rows);
+                }
+                i = j;
+                continue;
+            }
+
+            if (ch == '"') {
+                var j = i + 1;
+                var escaped = false;
+                while (j < line.len) : (j += 1) {
+                    const cur = line[j];
+                    if (escaped) {
+                        escaped = false;
+                        continue;
+                    }
+                    if (cur == '\\') {
+                        escaped = true;
+                        continue;
+                    }
+                    if (cur == '"') {
+                        j += 1;
+                        break;
+                    }
+                }
+                if (j > line.len) j = line.len;
+
+                var kind: JsonTokenKind = .string;
+                var k = j;
+                while (k < line.len and (line[k] == ' ' or line[k] == '\t')) : (k += 1) {}
+                if (k < line.len and line[k] == ':') {
+                    kind = .key;
+                }
+                self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..j], self.jsonTokenColor(kind), &rows);
+                i = j;
+                continue;
+            }
+
+            if (ch == '{' or ch == '}' or ch == '[' or ch == ']' or ch == ':' or ch == ',') {
+                self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i .. i + 1], self.jsonTokenColor(.punctuation), &rows);
+                i += 1;
+                continue;
+            }
+
+            if ((ch >= '0' and ch <= '9') or ch == '-') {
+                var j = i + 1;
+                while (j < line.len) : (j += 1) {
+                    const cur = line[j];
+                    if (!((cur >= '0' and cur <= '9') or cur == '.' or cur == 'e' or cur == 'E' or cur == '+' or cur == '-')) {
+                        break;
+                    }
+                }
+                self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..j], self.jsonTokenColor(.number), &rows);
+                i = j;
+                continue;
+            }
+
+            if (std.mem.startsWith(u8, line[i..], "true")) {
+                const end = i + 4;
+                if (end == line.len or isJsonDelimiter(line[end])) {
+                    self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..end], self.jsonTokenColor(.keyword), &rows);
+                    i = end;
+                    continue;
+                }
+            }
+            if (std.mem.startsWith(u8, line[i..], "false")) {
+                const end = i + 5;
+                if (end == line.len or isJsonDelimiter(line[end])) {
+                    self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..end], self.jsonTokenColor(.keyword), &rows);
+                    i = end;
+                    continue;
+                }
+            }
+            if (std.mem.startsWith(u8, line[i..], "null")) {
+                const end = i + 4;
+                if (end == line.len or isJsonDelimiter(line[end])) {
+                    self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..end], self.jsonTokenColor(.keyword), &rows);
+                    i = end;
+                    continue;
+                }
+            }
+
+            var j = i + 1;
+            while (j < line.len) : (j += 1) {
+                const cur = line[j];
+                if (cur == '"' or cur == ' ' or cur == '\t' or cur == '{' or cur == '}' or cur == '[' or cur == ']' or cur == ',' or cur == ':') {
+                    break;
+                }
+            }
+            self.drawJsonTokenWrapped(x, &cursor_x, &cursor_y, max_x, line[i..j], self.jsonTokenColor(.plain), &rows);
+            i = j;
+        }
+        return rows;
     }
-    pub fn clearSelectedNodeServiceEventCache(self: *App) void {
-        debug_host_mod.clearSelectedNodeServiceEventCache(self);
+
+    fn clearSelectedNodeServiceEventCache(self: *App) void {
+        if (self.debug.debug_selected_node_service_cache_node_id) |value| {
+            self.allocator.free(value);
+            self.debug.debug_selected_node_service_cache_node_id = null;
+        }
+        if (self.debug.debug_selected_node_service_cache_diagnostics) |value| {
+            self.allocator.free(value);
+            self.debug.debug_selected_node_service_cache_diagnostics = null;
+        }
+        self.debug.debug_selected_node_service_cache_index = null;
+        self.debug.debug_selected_node_service_cache_event_id = 0;
     }
+
     fn selectedNodeServiceEventInfo(self: *App) SelectedNodeServiceEventInfo {
-        return debug_host_mod.selectedNodeServiceEventInfo(self);
+        const selected_idx = self.debug.debug_selected_index orelse {
+            self.clearSelectedNodeServiceEventCache();
+            return .{};
+        };
+        if (selected_idx >= self.debug.debug_events.items.len) {
+            self.debug.debug_selected_index = null;
+            self.clearSelectedNodeServiceEventCache();
+            return .{};
+        }
+
+        const entry = self.debug.debug_events.items[selected_idx];
+        if (!std.mem.eql(u8, entry.category, "control.node_service_event")) {
+            self.clearSelectedNodeServiceEventCache();
+            return .{};
+        }
+
+        if (self.debug.debug_selected_node_service_cache_index == selected_idx and
+            self.debug.debug_selected_node_service_cache_event_id == entry.id)
+        {
+            return .{
+                .index = selected_idx,
+                .node_id = self.debug.debug_selected_node_service_cache_node_id,
+                .diagnostics = self.debug.debug_selected_node_service_cache_diagnostics,
+            };
+        }
+
+        self.clearSelectedNodeServiceEventCache();
+        self.debug.debug_selected_node_service_cache_index = selected_idx;
+        self.debug.debug_selected_node_service_cache_event_id = entry.id;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, entry.payload_json, .{}) catch null;
+        if (parsed) |*parsed_value| {
+            defer parsed_value.deinit();
+            if (parsed_value.value == .object) {
+                if (parsed_value.value.object.get("node_id")) |value| {
+                    if (value == .string and value.string.len > 0) {
+                        self.debug.debug_selected_node_service_cache_node_id = self.allocator.dupe(u8, value.string) catch null;
+                    }
+                }
+            }
+        }
+        self.debug.debug_selected_node_service_cache_diagnostics =
+            self.buildNodeServiceDeltaDiagnosticsTextFromJson(entry.payload_json) catch null;
+
+        return .{
+            .index = selected_idx,
+            .node_id = self.debug.debug_selected_node_service_cache_node_id,
+            .diagnostics = self.debug.debug_selected_node_service_cache_diagnostics,
+        };
     }
-    pub fn collectUniqueLinesOrdered(
+
+    fn collectUniqueLinesOrdered(
         self: *App,
         text: []const u8,
         out: *std.ArrayListUnmanaged([]u8),
     ) !void {
-        return debug_host_mod.collectUniqueLinesOrdered(self, text, out);
+        var iter = std.mem.splitScalar(u8, text, '\n');
+        while (iter.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, " \t\r");
+            if (line.len == 0) continue;
+            var exists = false;
+            for (out.items) |existing| {
+                if (std.mem.eql(u8, existing, line)) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (exists) continue;
+            try out.append(self.allocator, try self.allocator.dupe(u8, line));
+        }
     }
-    pub fn freeOwnedLines(self: *App, lines: *std.ArrayListUnmanaged([]u8)) void {
-        debug_host_mod.freeOwnedLines(self, lines);
+
+    fn freeOwnedLines(self: *App, lines: *std.ArrayListUnmanaged([]u8)) void {
+        for (lines.items) |line| self.allocator.free(line);
+        lines.deinit(self.allocator);
+        lines.* = .{};
     }
 
     fn lineListContains(lines: []const []const u8, candidate: []const u8) bool {
-        return debug_host_mod.lineListContains(lines, candidate);
+        for (lines) |line| {
+            if (std.mem.eql(u8, line, candidate)) return true;
+        }
+        return false;
     }
 
     fn buildNodeServiceEventDiffText(
@@ -11196,29 +14624,142 @@ pub const App = struct {
         base_idx: usize,
         compare_idx: usize,
     ) !?[]u8 {
-        return debug_host_mod.buildNodeServiceEventDiffText(self, base_idx, compare_idx);
+        if (base_idx >= self.debug.debug_events.items.len or compare_idx >= self.debug.debug_events.items.len) return null;
+        const base_entry = self.debug.debug_events.items[base_idx];
+        const compare_entry = self.debug.debug_events.items[compare_idx];
+        if (!std.mem.eql(u8, base_entry.category, "control.node_service_event")) return null;
+        if (!std.mem.eql(u8, compare_entry.category, "control.node_service_event")) return null;
+
+        const base_diag_opt = try self.buildNodeServiceDeltaDiagnosticsTextFromJson(base_entry.payload_json);
+        defer if (base_diag_opt) |value| self.allocator.free(value);
+        const compare_diag_opt = try self.buildNodeServiceDeltaDiagnosticsTextFromJson(compare_entry.payload_json);
+        defer if (compare_diag_opt) |value| self.allocator.free(value);
+        const base_diag = base_diag_opt orelse return null;
+        const compare_diag = compare_diag_opt orelse return null;
+
+        var base_lines: std.ArrayListUnmanaged([]u8) = .{};
+        defer self.freeOwnedLines(&base_lines);
+        var compare_lines: std.ArrayListUnmanaged([]u8) = .{};
+        defer self.freeOwnedLines(&compare_lines);
+        try self.collectUniqueLinesOrdered(base_diag, &base_lines);
+        try self.collectUniqueLinesOrdered(compare_diag, &compare_lines);
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        try out.writer(self.allocator).print(
+            "node_service_event_diff\nbase_event_id={d} base_timestamp_ms={d}\ncompare_event_id={d} compare_timestamp_ms={d}",
+            .{ base_entry.id, base_entry.timestamp_ms, compare_entry.id, compare_entry.timestamp_ms },
+        );
+        try out.appendSlice(self.allocator, "\n\n--- base_diagnostics ---\n");
+        try out.appendSlice(self.allocator, base_diag);
+        try out.appendSlice(self.allocator, "\n\n--- compare_diagnostics ---\n");
+        try out.appendSlice(self.allocator, compare_diag);
+
+        try out.appendSlice(self.allocator, "\n\n--- only_in_compare ---");
+        var compare_delta_count: usize = 0;
+        for (compare_lines.items) |line| {
+            if (lineListContains(base_lines.items, line)) continue;
+            compare_delta_count += 1;
+            try out.writer(self.allocator).print("\n+ {s}", .{line});
+        }
+        if (compare_delta_count == 0) try out.appendSlice(self.allocator, "\n(none)");
+
+        try out.appendSlice(self.allocator, "\n\n--- only_in_base ---");
+        var base_delta_count: usize = 0;
+        for (base_lines.items) |line| {
+            if (lineListContains(compare_lines.items, line)) continue;
+            base_delta_count += 1;
+            try out.writer(self.allocator).print("\n- {s}", .{line});
+        }
+        if (base_delta_count == 0) try out.appendSlice(self.allocator, "\n(none)");
+
+        try out.writer(self.allocator).print(
+            "\n\nsummary: compare_only={d} base_only={d}",
+            .{ compare_delta_count, base_delta_count },
+        );
+
+        return try out.toOwnedSlice(self.allocator);
     }
+
     fn exportNodeServiceDiffSnapshot(
         self: *App,
         diff_text: []const u8,
         base_event_id: u64,
         compare_event_id: u64,
     ) ![]u8 {
-        return debug_host_mod.exportNodeServiceDiffSnapshot(self, diff_text, base_event_id, compare_event_id);
+        const filename = try std.fmt.allocPrint(
+            self.allocator,
+            "node-service-diff-{d}-to-{d}-{d}.txt",
+            .{ base_event_id, compare_event_id, std.time.milliTimestamp() },
+        );
+        defer self.allocator.free(filename);
+
+        try std.fs.cwd().writeFile(.{
+            .sub_path = filename,
+            .data = diff_text,
+        });
+
+        const cwd = std.fs.cwd().realpathAlloc(self.allocator, ".") catch return self.allocator.dupe(u8, filename);
+        defer self.allocator.free(cwd);
+        return std.fmt.allocPrint(
+            self.allocator,
+            "{s}{s}{s}",
+            .{ cwd, std.fs.path.sep_str, filename },
+        );
     }
+
     fn hasPerfBenchmarkCapture(self: *const App) bool {
-        return debug_host_mod.hasPerfBenchmarkCapture(self);
+        if (self.perf_benchmark_active) return true;
+        return self.perf_benchmark_last_start_timestamp_ms > 0 and
+            self.perf_benchmark_last_end_timestamp_ms >= self.perf_benchmark_last_start_timestamp_ms;
     }
-    pub fn clearPerfBenchmarkCapture(self: *App) void {
-        debug_host_mod.clearPerfBenchmarkCapture(self);
+
+    fn clearPerfBenchmarkCapture(self: *App) void {
+        self.perf_benchmark_last_start_sample_index = null;
+        self.perf_benchmark_last_end_sample_index = 0;
+        self.perf_benchmark_last_start_timestamp_ms = 0;
+        self.perf_benchmark_last_end_timestamp_ms = 0;
+        if (self.perf_benchmark_last_label) |value| {
+            self.allocator.free(value);
+            self.perf_benchmark_last_label = null;
+        }
     }
+
     fn startPerfBenchmark(self: *App) !void {
-        return debug_host_mod.startPerfBenchmark(self);
+        if (self.perf_benchmark_active) return;
+        const now_ms = std.time.milliTimestamp();
+        const trimmed = std.mem.trim(u8, self.perf_benchmark_label_input.items, " \t\r\n");
+        const label = if (trimmed.len > 0)
+            try self.allocator.dupe(u8, trimmed)
+        else
+            try std.fmt.allocPrint(self.allocator, "bench-{d}", .{now_ms});
+
+        if (self.perf_benchmark_active_label) |value| self.allocator.free(value);
+        self.perf_benchmark_active_label = label;
+        self.perf_benchmark_active = true;
+        self.perf_benchmark_start_sample_index = self.perf_history.items.len;
+        self.perf_benchmark_start_timestamp_ms = now_ms;
     }
+
     fn stopPerfBenchmark(self: *App) !void {
-        return debug_host_mod.stopPerfBenchmark(self);
+        if (!self.perf_benchmark_active) return;
+        const now_ms = std.time.milliTimestamp();
+
+        self.clearPerfBenchmarkCapture();
+        self.perf_benchmark_last_start_sample_index = self.perf_benchmark_start_sample_index;
+        self.perf_benchmark_last_end_sample_index = self.perf_history.items.len;
+        self.perf_benchmark_last_start_timestamp_ms = self.perf_benchmark_start_timestamp_ms;
+        self.perf_benchmark_last_end_timestamp_ms = now_ms;
+        if (self.perf_benchmark_active_label) |value| {
+            self.perf_benchmark_last_label = value;
+            self.perf_benchmark_active_label = null;
+        }
+        self.perf_benchmark_active = false;
+        self.perf_benchmark_start_sample_index = 0;
+        self.perf_benchmark_start_timestamp_ms = 0;
     }
-    pub fn buildPerfReportTextForSlice(
+
+    fn buildPerfReportTextForSlice(
         self: *App,
         report_name: []const u8,
         label: ?[]const u8,
@@ -11226,24 +14767,275 @@ pub const App = struct {
         range_end_ms: ?i64,
         samples: []const PerfSample,
     ) ![]u8 {
-        return debug_host_mod.buildPerfReportTextForSlice(self, report_name, label, range_start_ms, range_end_ms, samples);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+
+        const latest = if (samples.len > 0)
+            samples[samples.len - 1]
+        else
+            PerfSample{
+                .timestamp_ms = std.time.milliTimestamp(),
+                .fps = self.perf_last_fps,
+                .frame_ms = self.perf_last_frame_ms,
+                .ws_poll_ms = self.perf_last_ws_ms,
+                .fs_poll_ms = self.perf_last_fs_ms,
+                .ws_wait_ms = self.perf_last_ws_wait_ms,
+                .fs_request_ms = self.perf_last_fs_request_ms,
+                .debug_ms = self.perf_last_debug_ms,
+                .terminal_ms = self.perf_last_terminal_ms,
+                .draw_ms = self.perf_last_draw_ms,
+                .panel_chat_ms = self.perf_last_panel_chat_ms,
+                .panel_settings_ms = self.perf_last_panel_settings_ms,
+                .panel_debug_ms = self.perf_last_panel_debug_ms,
+                .panel_projects_ms = self.perf_last_panel_projects_ms,
+                .panel_filesystem_ms = self.perf_last_panel_filesystem_ms,
+                .panel_terminal_ms = self.perf_last_panel_terminal_ms,
+                .panel_other_ms = self.perf_last_panel_other_ms,
+                .cmd_total_per_frame = self.perf_last_cmd_total_per_frame,
+                .cmd_text_per_frame = self.perf_last_cmd_text_per_frame,
+                .cmd_shape_per_frame = self.perf_last_cmd_shape_per_frame,
+                .cmd_line_per_frame = self.perf_last_cmd_line_per_frame,
+                .cmd_image_per_frame = self.perf_last_cmd_image_per_frame,
+                .cmd_clip_per_frame = self.perf_last_cmd_clip_per_frame,
+                .text_bytes_per_frame = self.perf_last_text_bytes_per_frame,
+                .text_command_share_pct = self.perf_last_text_command_share_pct,
+            };
+        const latest_other_ms = @max(
+            0.0,
+            latest.frame_ms - (latest.draw_ms + latest.ws_poll_ms + latest.fs_poll_ms + latest.debug_ms + latest.terminal_ms),
+        );
+
+        try out.writer(self.allocator).print(
+            "{s}\ncaptured_at_ms={d}\nsamples={d}\nlatest_fps={d:.2}\nlatest_frame_ms={d:.3}\nlatest_draw_ms={d:.3}\nlatest_other_ms={d:.3}\nlatest_ws_poll_ms={d:.3}\nlatest_fs_poll_ms={d:.3}\nlatest_ws_wait_ms={d:.3}\nlatest_fs_request_ms={d:.3}\nlatest_debug_ms={d:.3}\nlatest_terminal_ms={d:.3}\nlatest_panel_chat_ms={d:.3}\nlatest_panel_settings_ms={d:.3}\nlatest_panel_debug_ms={d:.3}\nlatest_panel_projects_ms={d:.3}\nlatest_panel_filesystem_ms={d:.3}\nlatest_panel_terminal_ms={d:.3}\nlatest_panel_other_ms={d:.3}\nlatest_cmd_total_per_frame={d:.3}\nlatest_cmd_text_per_frame={d:.3}\nlatest_cmd_shape_per_frame={d:.3}\nlatest_cmd_line_per_frame={d:.3}\nlatest_cmd_image_per_frame={d:.3}\nlatest_cmd_clip_per_frame={d:.3}\nlatest_text_bytes_per_frame={d:.3}\nlatest_text_command_share_pct={d:.3}\n",
+            .{
+                report_name,
+                std.time.milliTimestamp(),
+                samples.len,
+                latest.fps,
+                latest.frame_ms,
+                latest.draw_ms,
+                latest_other_ms,
+                latest.ws_poll_ms,
+                latest.fs_poll_ms,
+                latest.ws_wait_ms,
+                latest.fs_request_ms,
+                latest.debug_ms,
+                latest.terminal_ms,
+                latest.panel_chat_ms,
+                latest.panel_settings_ms,
+                latest.panel_debug_ms,
+                latest.panel_projects_ms,
+                latest.panel_filesystem_ms,
+                latest.panel_terminal_ms,
+                latest.panel_other_ms,
+                latest.cmd_total_per_frame,
+                latest.cmd_text_per_frame,
+                latest.cmd_shape_per_frame,
+                latest.cmd_line_per_frame,
+                latest.cmd_image_per_frame,
+                latest.cmd_clip_per_frame,
+                latest.text_bytes_per_frame,
+                latest.text_command_share_pct,
+            },
+        );
+        if (label) |value| {
+            try out.writer(self.allocator).print("benchmark_label={s}\n", .{value});
+        }
+        if (range_start_ms != null and range_end_ms != null) {
+            const start_ms = range_start_ms.?;
+            const end_ms = range_end_ms.?;
+            const duration_ms: i64 = @max(0, end_ms - start_ms);
+            try out.writer(self.allocator).print(
+                "range_start_ms={d}\nrange_end_ms={d}\nrange_duration_ms={d}\n",
+                .{ start_ms, end_ms, duration_ms },
+            );
+        }
+
+        try out.appendSlice(self.allocator, "\n# sample_table\ntimestamp_ms,fps,frame_ms,draw_ms,other_ms,ws_poll_ms,fs_poll_ms,ws_wait_ms,fs_request_ms,debug_ms,terminal_ms,panel_chat_ms,panel_settings_ms,panel_debug_ms,panel_projects_ms,panel_filesystem_ms,panel_terminal_ms,panel_other_ms,cmd_total_per_frame,cmd_text_per_frame,cmd_shape_per_frame,cmd_line_per_frame,cmd_image_per_frame,cmd_clip_per_frame,text_bytes_per_frame,text_command_share_pct\n");
+        for (samples) |sample| {
+            const other_ms = @max(
+                0.0,
+                sample.frame_ms - (sample.draw_ms + sample.ws_poll_ms + sample.fs_poll_ms + sample.debug_ms + sample.terminal_ms),
+            );
+            try out.writer(self.allocator).print(
+                "{d},{d:.3},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.4},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3}\n",
+                .{
+                    sample.timestamp_ms,
+                    sample.fps,
+                    sample.frame_ms,
+                    sample.draw_ms,
+                    other_ms,
+                    sample.ws_poll_ms,
+                    sample.fs_poll_ms,
+                    sample.ws_wait_ms,
+                    sample.fs_request_ms,
+                    sample.debug_ms,
+                    sample.terminal_ms,
+                    sample.panel_chat_ms,
+                    sample.panel_settings_ms,
+                    sample.panel_debug_ms,
+                    sample.panel_projects_ms,
+                    sample.panel_filesystem_ms,
+                    sample.panel_terminal_ms,
+                    sample.panel_other_ms,
+                    sample.cmd_total_per_frame,
+                    sample.cmd_text_per_frame,
+                    sample.cmd_shape_per_frame,
+                    sample.cmd_line_per_frame,
+                    sample.cmd_image_per_frame,
+                    sample.cmd_clip_per_frame,
+                    sample.text_bytes_per_frame,
+                    sample.text_command_share_pct,
+                },
+            );
+        }
+
+        return out.toOwnedSlice(self.allocator);
     }
+
     fn buildPerfReportText(self: *App) ![]u8 {
-        return debug_host_mod.buildPerfReportText(self);
+        return self.buildPerfReportTextForSlice(
+            "spider_gui_perf_report",
+            null,
+            null,
+            null,
+            self.perf_history.items,
+        );
     }
+
     fn buildBenchmarkPerfReportText(self: *App) !?[]u8 {
-        return debug_host_mod.buildBenchmarkPerfReportText(self);
+        var label: ?[]const u8 = null;
+        var start_ms: i64 = 0;
+        var end_ms: i64 = 0;
+        if (self.perf_benchmark_active) {
+            label = self.perf_benchmark_active_label;
+            start_ms = self.perf_benchmark_start_timestamp_ms;
+            end_ms = std.time.milliTimestamp();
+        } else if (self.perf_benchmark_last_start_timestamp_ms > 0 and
+            self.perf_benchmark_last_end_timestamp_ms >= self.perf_benchmark_last_start_timestamp_ms)
+        {
+            label = self.perf_benchmark_last_label;
+            start_ms = self.perf_benchmark_last_start_timestamp_ms;
+            end_ms = self.perf_benchmark_last_end_timestamp_ms;
+        } else {
+            return null;
+        }
+
+        var start_idx: usize = 0;
+        while (start_idx < self.perf_history.items.len and self.perf_history.items[start_idx].timestamp_ms < start_ms) : (start_idx += 1) {}
+        var end_idx: usize = start_idx;
+        while (end_idx < self.perf_history.items.len and self.perf_history.items[end_idx].timestamp_ms <= end_ms) : (end_idx += 1) {}
+
+        return @as(?[]u8, try self.buildPerfReportTextForSlice(
+            "spider_gui_perf_benchmark_report",
+            label,
+            start_ms,
+            end_ms,
+            self.perf_history.items[start_idx..end_idx],
+        ));
     }
+
     fn exportPerfReport(self: *App, report_text: []const u8) ![]u8 {
-        return debug_host_mod.exportPerfReport(self, report_text);
+        const filename = try std.fmt.allocPrint(
+            self.allocator,
+            "spider-gui-perf-{d}.txt",
+            .{std.time.milliTimestamp()},
+        );
+        defer self.allocator.free(filename);
+
+        try std.fs.cwd().writeFile(.{
+            .sub_path = filename,
+            .data = report_text,
+        });
+
+        const cwd = std.fs.cwd().realpathAlloc(self.allocator, ".") catch return self.allocator.dupe(u8, filename);
+        defer self.allocator.free(cwd);
+        return std.fmt.allocPrint(
+            self.allocator,
+            "{s}{s}{s}",
+            .{ cwd, std.fs.path.sep_str, filename },
+        );
     }
-    pub fn buildNodeServiceDeltaDiagnosticsTextFromJson(self: *App, payload_json: []const u8) !?[]u8 {
-        return debug_host_mod.buildNodeServiceDeltaDiagnosticsTextFromJson(self, payload_json);
+
+    fn buildNodeServiceDeltaDiagnosticsTextFromJson(self: *App, payload_json: []const u8) !?[]u8 {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, payload_json, .{});
+        defer parsed.deinit();
+        return self.buildNodeServiceDeltaDiagnosticsTextFromValue(parsed.value);
     }
-    pub fn buildNodeServiceDeltaDiagnosticsTextFromValue(self: *App, payload: std.json.Value) !?[]u8 {
-        return debug_host_mod.buildNodeServiceDeltaDiagnosticsTextFromValue(self, payload);
+
+    fn buildNodeServiceDeltaDiagnosticsTextFromValue(self: *App, payload: std.json.Value) !?[]u8 {
+        if (payload != .object) return null;
+        const payload_obj = payload.object;
+        const service_delta = payload_obj.get("service_delta") orelse return null;
+        if (service_delta != .object) return null;
+        const delta_obj = service_delta.object;
+
+        const node_id = if (payload_obj.get("node_id")) |value| switch (value) {
+            .string => value.string,
+            else => "unknown",
+        } else "unknown";
+        const changed = if (delta_obj.get("changed")) |value| switch (value) {
+            .bool => value.bool,
+            else => false,
+        } else false;
+        const timestamp_ms: ?i64 = if (delta_obj.get("timestamp_ms")) |value| switch (value) {
+            .integer => value.integer,
+            else => null,
+        } else null;
+
+        const empty_values = &[_]std.json.Value{};
+        const added_items: []const std.json.Value = if (delta_obj.get("added")) |value| switch (value) {
+            .array => value.array.items,
+            else => empty_values,
+        } else empty_values;
+        const updated_items: []const std.json.Value = if (delta_obj.get("updated")) |value| switch (value) {
+            .array => value.array.items,
+            else => empty_values,
+        } else empty_values;
+        const removed_items: []const std.json.Value = if (delta_obj.get("removed")) |value| switch (value) {
+            .array => value.array.items,
+            else => empty_values,
+        } else empty_values;
+
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.allocator);
+        if (timestamp_ms) |value| {
+            try out.writer(self.allocator).print(
+                "node={s} changed={s} timestamp_ms={d}",
+                .{ node_id, if (changed) "true" else "false", value },
+            );
+        } else {
+            try out.writer(self.allocator).print(
+                "node={s} changed={s}",
+                .{ node_id, if (changed) "true" else "false" },
+            );
+        }
+        try out.writer(self.allocator).print(
+            "\nadded={d} updated={d} removed={d}",
+            .{ added_items.len, updated_items.len, removed_items.len },
+        );
+
+        const max_entries: usize = 18;
+        var shown_entries: usize = 0;
+        try self.appendNodeServiceDeltaEntries(&out, "+", added_items, false, max_entries, &shown_entries);
+        try self.appendNodeServiceDeltaEntries(&out, "~", updated_items, true, max_entries, &shown_entries);
+        try self.appendNodeServiceDeltaEntries(&out, "-", removed_items, false, max_entries, &shown_entries);
+
+        const total_entries = added_items.len + updated_items.len + removed_items.len;
+        if (total_entries > shown_entries) {
+            try out.writer(self.allocator).print("\n... {d} more service changes", .{total_entries - shown_entries});
+        }
+        try self.appendNodeServiceRuntimeDiagnostics(
+            &out,
+            payload_obj,
+            added_items,
+            updated_items,
+        );
+        const owned = try out.toOwnedSlice(self.allocator);
+        return @as(?[]u8, owned);
     }
-    pub fn appendNodeServiceDeltaEntries(
+
+    fn appendNodeServiceDeltaEntries(
         self: *App,
         out: *std.ArrayList(u8),
         prefix: []const u8,
@@ -11252,41 +15044,179 @@ pub const App = struct {
         max_entries: usize,
         shown_entries: *usize,
     ) !void {
-        return debug_host_mod.appendNodeServiceDeltaEntries(self, out, prefix, entries, include_previous, max_entries, shown_entries);
+        for (entries) |entry| {
+            if (shown_entries.* >= max_entries) break;
+            if (entry != .object) continue;
+            const obj = entry.object;
+            const service_id = if (obj.get("service_id")) |value| switch (value) {
+                .string => value.string,
+                else => "?",
+            } else "?";
+            const version = if (obj.get("version")) |value| switch (value) {
+                .string => value.string,
+                else => "?",
+            } else "?";
+            var hash_buf: [48]u8 = undefined;
+            const hash = nodeServiceDeltaHashText(obj, "hash", "digest", &hash_buf);
+
+            if (include_previous) {
+                const previous_version = if (obj.get("previous_version")) |value| switch (value) {
+                    .string => value.string,
+                    else => "?",
+                } else "?";
+                var previous_hash_buf: [48]u8 = undefined;
+                const previous_hash = nodeServiceDeltaHashText(obj, "previous_hash", "previous_digest", &previous_hash_buf);
+                try out.writer(self.allocator).print(
+                    "\n{s} {s}@{s} hash={s} prev={s}/{s}",
+                    .{ prefix, service_id, version, hash, previous_version, previous_hash },
+                );
+            } else {
+                try out.writer(self.allocator).print(
+                    "\n{s} {s}@{s} hash={s}",
+                    .{ prefix, service_id, version, hash },
+                );
+            }
+            shown_entries.* += 1;
+        }
     }
+
     fn nodeServiceDeltaHashText(
         obj: std.json.ObjectMap,
         primary_key: []const u8,
         fallback_key: []const u8,
         fallback_buffer: *[48]u8,
     ) []const u8 {
-        return debug_host_mod.nodeServiceDeltaHashText(obj, primary_key, fallback_key, fallback_buffer);
+        if (obj.get(primary_key)) |value| {
+            return switch (value) {
+                .string => value.string,
+                .integer => std.fmt.bufPrint(fallback_buffer, "{d}", .{value.integer}) catch "n/a",
+                else => "n/a",
+            };
+        }
+        if (obj.get(fallback_key)) |value| {
+            return switch (value) {
+                .string => value.string,
+                .integer => std.fmt.bufPrint(fallback_buffer, "{d}", .{value.integer}) catch "n/a",
+                else => "n/a",
+            };
+        }
+        return "n/a";
     }
-    pub fn appendNodeServiceRuntimeDiagnostics(
+
+    fn appendNodeServiceRuntimeDiagnostics(
         self: *App,
         out: *std.ArrayList(u8),
         payload_obj: std.json.ObjectMap,
         added_items: []const std.json.Value,
         updated_items: []const std.json.Value,
     ) !void {
-        return debug_host_mod.appendNodeServiceRuntimeDiagnostics(self, out, payload_obj, added_items, updated_items);
+        const services_value = payload_obj.get("services") orelse return;
+        if (services_value != .array) return;
+
+        const max_runtime_lines: usize = 12;
+        var runtime_lines: usize = 0;
+        var appended_header = false;
+        for (services_value.array.items) |service| {
+            if (runtime_lines >= max_runtime_lines) break;
+            if (service != .object) continue;
+            const service_id = if (service.object.get("service_id")) |value| switch (value) {
+                .string => value.string,
+                else => continue,
+            } else continue;
+            if (!serviceIdPresentInDeltaItems(service_id, added_items, updated_items)) continue;
+            if (!serviceHasRuntimeStatus(service.object)) continue;
+            if (!appended_header) {
+                try out.appendSlice(self.allocator, "\nruntime_status:");
+                appended_header = true;
+            }
+            try out.writer(self.allocator).print("\n* {s}: ", .{service_id});
+            try self.appendRuntimeStatusSummary(out, service.object);
+            runtime_lines += 1;
+        }
+        if (runtime_lines == max_runtime_lines) {
+            try out.appendSlice(self.allocator, "\n* ... more runtime status entries omitted");
+        }
     }
+
     fn serviceIdPresentInDeltaItems(service_id: []const u8, items_a: []const std.json.Value, items_b: []const std.json.Value) bool {
-        return debug_host_mod.serviceIdPresentInDeltaItems(service_id, items_a, items_b);
+        if (serviceIdPresentInDeltaArray(service_id, items_a)) return true;
+        return serviceIdPresentInDeltaArray(service_id, items_b);
     }
+
     fn serviceIdPresentInDeltaArray(service_id: []const u8, items: []const std.json.Value) bool {
-        return debug_host_mod.serviceIdPresentInDeltaArray(service_id, items);
+        for (items) |entry| {
+            if (entry != .object) continue;
+            const entry_service_id = if (entry.object.get("service_id")) |value| switch (value) {
+                .string => value.string,
+                else => continue,
+            } else continue;
+            if (std.mem.eql(u8, service_id, entry_service_id)) return true;
+        }
+        return false;
     }
+
     fn serviceHasRuntimeStatus(service_obj: std.json.ObjectMap) bool {
-        return debug_host_mod.serviceHasRuntimeStatus(service_obj);
+        const runtime_value = service_obj.get("runtime") orelse return false;
+        if (runtime_value != .object) return false;
+        const supervision_value = runtime_value.object.get("supervision_status") orelse return false;
+        return supervision_value == .object;
     }
-    pub fn appendRuntimeStatusSummary(
+
+    fn appendRuntimeStatusSummary(
         self: *App,
         out: *std.ArrayList(u8),
         service_obj: std.json.ObjectMap,
     ) !void {
-        return debug_host_mod.appendRuntimeStatusSummary(self, out, service_obj);
+        const runtime_value = service_obj.get("runtime") orelse return;
+        if (runtime_value != .object) return;
+        const supervision_value = runtime_value.object.get("supervision_status") orelse return;
+        if (supervision_value != .object) return;
+        const status = supervision_value.object;
+
+        const state = if (status.get("state")) |value| switch (value) {
+            .string => value.string,
+            else => "unknown",
+        } else "unknown";
+        const enabled = if (status.get("enabled")) |value| switch (value) {
+            .bool => value.bool,
+            else => false,
+        } else false;
+        const running = if (status.get("running")) |value| switch (value) {
+            .bool => value.bool,
+            else => false,
+        } else false;
+        const failures = if (status.get("consecutive_failures")) |value| switch (value) {
+            .integer => value.integer,
+            else => 0,
+        } else 0;
+        const transition_ms = if (status.get("last_transition_ms")) |value| switch (value) {
+            .integer => value.integer,
+            else => 0,
+        } else 0;
+        const healthy_ms = if (status.get("last_healthy_ms")) |value| switch (value) {
+            .integer => value.integer,
+            else => 0,
+        } else 0;
+        const last_error = if (status.get("last_error")) |value| switch (value) {
+            .string => value.string,
+            .null => null,
+            else => null,
+        } else null;
+
+        try out.writer(self.allocator).print(
+            "state={s} enabled={s} running={s} failures={d} transition_ms={d} healthy_ms={d} last_error={s}",
+            .{
+                state,
+                if (enabled) "true" else "false",
+                if (running) "true" else "false",
+                failures,
+                transition_ms,
+                healthy_ms,
+                if (last_error) |value| value else "none",
+            },
+        );
     }
+
     fn jumpFilesystemToNode(self: *App, manager: *panel_manager.PanelManager, node_id: []const u8) !void {
         const panel_id = try self.ensureFilesystemPanel(manager);
         manager.focusPanel(panel_id);
@@ -11302,7 +15232,7 @@ pub const App = struct {
         try self.queueFilesystemPathLoad(node_path, true, false);
     }
 
-    pub fn drawChatPanel(self: *App, rect: UiRect) void {
+    fn drawChatPanel(self: *App, rect: UiRect) void {
         if (self.render_input_queue == null) {
             self.drawText(
                 rect.min[0] + 8.0,
@@ -12590,7 +16520,7 @@ pub const App = struct {
         }
     }
 
-    pub fn ensureSettingsPanel(self: *App, manager: *panel_manager.PanelManager) void {
+    fn ensureSettingsPanel(self: *App, manager: *panel_manager.PanelManager) void {
         for (manager.workspace.panels.items) |*panel| {
             if (panel.kind == .Settings or panel.kind == .Control) {
                 manager.focusPanel(panel.id);
@@ -12700,7 +16630,7 @@ pub const App = struct {
         const metadata_trimmed = std.mem.trim(u8, self.ws.launcher_profile_metadata.items, " \t\r\n");
         if (server_url.len == 0) return error.ServerUrlRequired;
 
-        const display_name = if (profile_name.len > 0) profile_name else "Spider Web";
+        const display_name = if (profile_name.len > 0) profile_name else "Spiderweb";
         const profile_id = try self.nextConnectionProfileId(display_name);
         defer self.allocator.free(profile_id);
 
@@ -12877,7 +16807,7 @@ pub const App = struct {
         };
     }
 
-    pub fn setAboutModalNotice(self: *App, message: []const u8) void {
+    fn setAboutModalNotice(self: *App, message: []const u8) void {
         if (self.about_modal_notice) |existing| self.allocator.free(existing);
         self.about_modal_notice = self.allocator.dupe(u8, message) catch null;
     }
@@ -12910,7 +16840,7 @@ pub const App = struct {
         }
     }
 
-    pub fn openAboutModal(self: *App) void {
+    fn openAboutModal(self: *App) void {
         self.about_modal_open = true;
         self.settings_panel.focused_field = .about_modal_build_label;
         self.about_modal_build_label.clearRetainingCapacity();
@@ -12918,7 +16848,7 @@ pub const App = struct {
         self.clearAboutModalNotice();
     }
 
-    pub fn closeAboutModal(self: *App) void {
+    fn closeAboutModal(self: *App) void {
         self.about_modal_open = false;
         self.clearAboutModalNotice();
         if (self.settings_panel.focused_field == .about_modal_build_label) {
@@ -13089,7 +17019,7 @@ pub const App = struct {
         _ = c.SDL_SetWindowTitle(self.window, platformWindowTitle("SpiderApp - Workspace"));
     }
 
-    pub fn returnToLauncher(self: *App, reason: stage_machine.ReturnReason) void {
+    fn returnToLauncher(self: *App, reason: stage_machine.ReturnReason) void {
         self.saveActiveWorkspaceLayout();
         self.closePackageManagerModal();
         self.closeAboutModal();
@@ -13109,7 +17039,7 @@ pub const App = struct {
         switch (reason) {
             .switched_workspace => self.setLauncherNotice("Switched back to launcher. Select another workspace."),
             .connection_lost => self.setLauncherNotice("Connection lost. Reconnect to continue."),
-            .disconnected => self.setLauncherNotice("Disconnected from Spider Web."),
+            .disconnected => self.setLauncherNotice("Disconnected from Spiderweb."),
             .none => self.clearLauncherNotice(),
         }
 
@@ -15233,7 +19163,7 @@ pub const App = struct {
         return ch == '{' or ch == '[';
     }
 
-    pub fn buildDebugPayloadLines(self: *App, payload_json: []const u8) !std.ArrayList(DebugPayloadLine) {
+    fn buildDebugPayloadLines(self: *App, payload_json: []const u8) !std.ArrayList(DebugPayloadLine) {
         var lines: std.ArrayList(DebugPayloadLine) = .empty;
         errdefer lines.deinit(self.allocator);
 
@@ -16188,7 +20118,7 @@ pub const App = struct {
         }
     }
 
-    pub fn ensureFilesystemPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    fn ensureFilesystemPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.fs.filesystem_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -16227,7 +20157,7 @@ pub const App = struct {
         return panel_id;
     }
 
-    pub fn ensureFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    fn ensureFilesystemToolsPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.fs.filesystem_tools_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -16261,7 +20191,28 @@ pub const App = struct {
         return panel_id;
     }
 
-    pub fn ensureTerminalPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
+    fn openHostToolOutputPanel(
+        self: *App,
+        manager: *panel_manager.PanelManager,
+        title: []const u8,
+        tool_name_label: []const u8,
+    ) !workspace.PanelId {
+        const tool_name = try self.allocator.dupe(u8, tool_name_label);
+        errdefer self.allocator.free(tool_name);
+        var stdout_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stdout_buf.deinit(self.allocator);
+        var stderr_buf = try text_buffer.TextBuffer.init(self.allocator, "");
+        errdefer stderr_buf.deinit(self.allocator);
+        const panel_data = workspace.PanelData{ .ToolOutput = .{
+            .tool_name = tool_name,
+            .stdout = stdout_buf,
+            .stderr = stderr_buf,
+            .exit_code = 0,
+        } };
+        return manager.openPanel(.ToolOutput, title, panel_data);
+    }
+
+    fn ensureTerminalPanel(self: *App, manager: *panel_manager.PanelManager) !workspace.PanelId {
         if (self.terminal.terminal_panel_id) |panel_id| {
             if (self.findPanelById(manager, panel_id) != null) {
                 manager.focusPanel(panel_id);
@@ -16432,6 +20383,16 @@ pub const App = struct {
         const copy = self.allocator.dupe(u8, text) catch return;
         self.allocator.free(self.status_text);
         self.status_text = copy;
+        self.syncHomeOnboardingStage();
+    }
+
+    fn syncHomeOnboardingStage(self: *App) void {
+        self.ws.onboarding_stage = if (self.connection_state != .connected)
+            .connect
+        else if (self.selectedWorkspaceId() == null)
+            .choose_workspace
+        else
+            .workspace_ready;
     }
 
     // Drawing helpers
@@ -16531,7 +20492,7 @@ pub const App = struct {
         return form_layout.defaultMetrics(zui.ui.theme.activeTheme(), line_height, self.ui_scale);
     }
 
-    pub fn dockTabMetrics(self: *App) DockTabMetrics {
+    fn dockTabMetrics(self: *App) DockTabMetrics {
         const line_height = self.textLineHeight();
         const tab_pad = @max(self.theme.spacing.sm, self.theme.spacing.xs * 1.4);
         return .{
@@ -16542,7 +20503,7 @@ pub const App = struct {
         };
     }
 
-    pub fn dockTabWidth(self: *App, title: []const u8, group_width: f32, metrics: DockTabMetrics) f32 {
+    fn dockTabWidth(self: *App, title: []const u8, group_width: f32, metrics: DockTabMetrics) f32 {
         const desired = self.measureText(title) + metrics.pad * 2.0;
         const max_width = @max(metrics.min_width, (group_width - metrics.pad * 2.0) * metrics.max_width_ratio);
         return @min(max_width, desired);
@@ -16552,6 +20513,12 @@ pub const App = struct {
         return @max(self.theme.spacing.xs, 6.0 * self.ui_scale);
     }
 
+    fn nextUtf8Boundary(text: []const u8, index: usize) usize {
+        if (index >= text.len) return text.len;
+        var i = index + 1;
+        while (i < text.len and (text[i] & 0xC0) == 0x80) : (i += 1) {}
+        return i;
+    }
 
     fn skipLeadingSpaces(text: []const u8, start: usize) usize {
         var i = start;
@@ -16645,7 +20612,7 @@ pub const App = struct {
         return current_y - y;
     }
 
-    pub fn measureTextWrappedHeight(self: *App, max_w: f32, text: []const u8) f32 {
+    fn measureTextWrappedHeight(self: *App, max_w: f32, text: []const u8) f32 {
         const line_height = self.textLineHeight();
         const wrap_w = @max(1.0, max_w);
         var total_height: f32 = 0;
@@ -16730,13 +20697,6 @@ pub const App = struct {
         self.drawText(x + width, y, ellipsis, color);
     }
 };
-
-pub fn nextUtf8Boundary(text: []const u8, index: usize) usize {
-    if (index >= text.len) return text.len;
-    var i = index + 1;
-    while (i < text.len and (text[i] & 0xC0) == 0x80) : (i += 1) {}
-    return i;
-}
 
 fn dupRequiredStringField(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]u8 {
     const value = obj.get(key) orelse return error.InvalidResponse;
