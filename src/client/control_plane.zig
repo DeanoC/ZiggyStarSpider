@@ -1539,6 +1539,7 @@ fn parseMount(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !workspace_
         .node_id = try dupRequiredString(allocator, obj, "node_id"),
         .node_name = try dupOptionalNullableString(allocator, obj, "node_name"),
         .fs_url = try dupOptionalNullableString(allocator, obj, "fs_url"),
+        .fs_auth_token = try dupOptionalNullableString(allocator, obj, "fs_auth_token"),
         .export_name = try dupRequiredString(allocator, obj, "export_name"),
     };
 }

@@ -261,10 +261,11 @@ fn terminalPanelViewOwned(self: anytype) OwnedTerminalPanelView {
             TERMINAL_BACKEND_KIND,
         },
     ) catch null;
+    const target_label = self.terminal.terminal_target_label orelse "Workspace default terminal";
     const session_line = if (self.terminal.terminal_session_id) |id|
-        std.fmt.allocPrint(self.allocator, "Session: {s}", .{id}) catch null
+        std.fmt.allocPrint(self.allocator, "Target: {s}  |  Session: {s}", .{ target_label, id }) catch null
     else
-        self.allocator.dupe(u8, "Session: (not started)") catch null;
+        std.fmt.allocPrint(self.allocator, "Target: {s}  |  Session: (not started)", .{target_label}) catch null;
     return .{
         .view = .{
             .title = "Terminal",
@@ -274,7 +275,7 @@ fn terminalPanelViewOwned(self: anytype) OwnedTerminalPanelView {
             .status_text = self.terminal.terminal_status,
             .error_text = self.terminal.terminal_error,
             .input_text = self.terminal.terminal_input.items,
-            .start_label = if (self.terminal.terminal_session_id == null) "Start" else "Restart",
+            .start_label = if (self.terminal.terminal_session_id == null) "Open Remote Terminal" else "Restart Terminal",
         },
         .backend_line = backend_line,
         .session_line = session_line,

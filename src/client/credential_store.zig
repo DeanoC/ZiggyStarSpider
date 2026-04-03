@@ -4,10 +4,22 @@ const config_mod = @import("config.zig");
 
 pub const ProviderKind = enum {
     windows_credential_manager,
+    macos_keychain,
     file_fallback,
 };
 
 const windows_not_found_error: u32 = 1168;
+const macos_keychain_service = "com.deanocalver.spiderapp";
+
+fn hexEncodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const alphabet = "0123456789abcdef";
+    const out = try allocator.alloc(u8, bytes.len * 2);
+    for (bytes, 0..) |byte, idx| {
+        out[idx * 2] = alphabet[byte >> 4];
+        out[idx * 2 + 1] = alphabet[byte & 0x0f];
+    }
+    return out;
+}
 
 pub const CredentialStore = struct {
     allocator: std.mem.Allocator,
@@ -20,10 +32,11 @@ pub const CredentialStore = struct {
         defer allocator.free(config_dir);
 
         const fallback_dir = try std.fs.path.join(allocator, &.{ config_dir, "credentials" });
-        const provider: ProviderKind = if (builtin.os.tag == .windows)
-            .windows_credential_manager
-        else
-            .file_fallback;
+        const provider: ProviderKind = switch (builtin.os.tag) {
+            .windows => .windows_credential_manager,
+            .macos => .macos_keychain,
+            else => .file_fallback,
+        };
 
         var out = CredentialStore{
             .allocator = allocator,
@@ -79,6 +92,14 @@ pub const CredentialStore = struct {
                 self.provider = .file_fallback;
                 return self.saveFallback(target, secret);
             },
+            .macos_keychain => {
+                if (builtin.os.tag == .macos) {
+                    return macos_provider.save(self.allocator, target, secret);
+                }
+                self.warnFallbackProvider();
+                self.provider = .file_fallback;
+                return self.saveFallback(target, secret);
+            },
             .file_fallback => {
                 self.warnFallbackProvider();
                 return self.saveFallback(target, secret);
@@ -98,6 +119,27 @@ pub const CredentialStore = struct {
             .windows_credential_manager => {
                 if (builtin.os.tag == .windows) {
                     return windows_provider.load(self.allocator, target);
+                }
+                self.warnFallbackProvider();
+                self.provider = .file_fallback;
+                return self.loadFallback(target);
+            },
+            .macos_keychain => {
+                if (builtin.os.tag == .macos) {
+                    if (try macos_provider.load(self.allocator, target)) |secret| {
+                        return secret;
+                    }
+                    if (try self.loadFallback(target)) |secret| {
+                        macos_provider.save(self.allocator, target, secret) catch |err| {
+                            std.log.warn("CredentialStore: failed to migrate fallback credential to Keychain: {s}", .{@errorName(err)});
+                            return secret;
+                        };
+                        self.deleteFallback(target) catch |err| {
+                            std.log.warn("CredentialStore: failed to remove fallback credential after migration: {s}", .{@errorName(err)});
+                        };
+                        return secret;
+                    }
+                    return null;
                 }
                 self.warnFallbackProvider();
                 self.provider = .file_fallback;
@@ -127,6 +169,15 @@ pub const CredentialStore = struct {
                 self.provider = .file_fallback;
                 return self.deleteFallback(target);
             },
+            .macos_keychain => {
+                if (builtin.os.tag == .macos) {
+                    try macos_provider.delete(self.allocator, target);
+                    return self.deleteFallback(target);
+                }
+                self.warnFallbackProvider();
+                self.provider = .file_fallback;
+                return self.deleteFallback(target);
+            },
             .file_fallback => {
                 self.warnFallbackProvider();
                 return self.deleteFallback(target);
@@ -138,7 +189,7 @@ pub const CredentialStore = struct {
         if (self.warned_unsupported) return;
         self.warned_unsupported = true;
         std.log.warn(
-            "CredentialStore: using plaintext fallback provider (unsupported OS for Windows Credential Manager)",
+            "CredentialStore: using plaintext fallback provider instead of the platform credential store",
             .{},
         );
     }
@@ -152,41 +203,172 @@ pub const CredentialStore = struct {
         return std.fmt.allocPrint(self.allocator, "SpiderApp/{s}/{s}", .{ profile_trimmed, key_trimmed });
     }
 
-    fn fallbackFilePath(self: *CredentialStore, target: []const u8) ![]u8 {
+    fn fallbackLegacyFilePath(self: *CredentialStore, target: []const u8) ![]u8 {
         const hash = std.hash.Wyhash.hash(0, target);
         const name = try std.fmt.allocPrint(self.allocator, "{x:0>16}.cred", .{hash});
         defer self.allocator.free(name);
         return std.fs.path.join(self.allocator, &.{ self.fallback_dir, name });
     }
 
+    fn fallbackFriendlyFilePath(self: *CredentialStore, target: []const u8) ![]u8 {
+        const encoded = try hexEncodeAlloc(self.allocator, target);
+        defer self.allocator.free(encoded);
+        const name = try std.fmt.allocPrint(self.allocator, "target-{s}.cred2", .{encoded});
+        defer self.allocator.free(name);
+        return std.fs.path.join(self.allocator, &.{ self.fallback_dir, name });
+    }
+
     fn saveFallback(self: *CredentialStore, target: []const u8, secret: []const u8) !void {
         try std.fs.cwd().makePath(self.fallback_dir);
-        const path = try self.fallbackFilePath(target);
-        defer self.allocator.free(path);
+        const friendly_path = try self.fallbackFriendlyFilePath(target);
+        defer self.allocator.free(friendly_path);
+        const legacy_path = try self.fallbackLegacyFilePath(target);
+        defer self.allocator.free(legacy_path);
 
-        var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(secret);
+        var friendly_file = try std.fs.cwd().createFile(friendly_path, .{ .truncate = true });
+        defer friendly_file.close();
+        try friendly_file.writeAll(secret);
+
+        var legacy_file = try std.fs.cwd().createFile(legacy_path, .{ .truncate = true });
+        defer legacy_file.close();
+        try legacy_file.writeAll(secret);
     }
 
     fn loadFallback(self: *CredentialStore, target: []const u8) !?[]u8 {
-        const path = try self.fallbackFilePath(target);
-        defer self.allocator.free(path);
+        const friendly_path = try self.fallbackFriendlyFilePath(target);
+        defer self.allocator.free(friendly_path);
+        const friendly = std.fs.cwd().readFileAlloc(self.allocator, friendly_path, 8192) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        if (friendly != null) return friendly;
 
-        return std.fs.cwd().readFileAlloc(self.allocator, path, 8192) catch |err| switch (err) {
+        const legacy_path = try self.fallbackLegacyFilePath(target);
+        defer self.allocator.free(legacy_path);
+        return std.fs.cwd().readFileAlloc(self.allocator, legacy_path, 8192) catch |err| switch (err) {
             error.FileNotFound => null,
             else => err,
         };
     }
 
     fn deleteFallback(self: *CredentialStore, target: []const u8) !void {
-        const path = try self.fallbackFilePath(target);
-        defer self.allocator.free(path);
+        const friendly_path = try self.fallbackFriendlyFilePath(target);
+        defer self.allocator.free(friendly_path);
+        std.fs.cwd().deleteFile(friendly_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
 
-        std.fs.cwd().deleteFile(path) catch |err| switch (err) {
+        const legacy_path = try self.fallbackLegacyFilePath(target);
+        defer self.allocator.free(legacy_path);
+        std.fs.cwd().deleteFile(legacy_path) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
+    }
+};
+
+const macos_provider = if (builtin.os.tag == .macos) struct {
+    const delete_not_found_error: u8 = 44;
+
+    pub fn save(allocator: std.mem.Allocator, target: []const u8, secret: []const u8) !void {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{
+                "security",
+                "add-generic-password",
+                "-U",
+                "-s",
+                macos_keychain_service,
+                "-a",
+                target,
+                "-l",
+                target,
+                "-w",
+                secret,
+            },
+            .max_output_bytes = 32 * 1024,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        switch (result.term) {
+            .Exited => |code| if (code == 0) return,
+            else => {},
+        }
+
+        const stderr_text = std.mem.trim(u8, result.stderr, " \t\r\n");
+        if (stderr_text.len > 0) {
+            std.log.warn("security add-generic-password failed: {s}", .{stderr_text});
+        }
+        return error.CredentialStoreFailure;
+    }
+
+    pub fn load(allocator: std.mem.Allocator, target: []const u8) !?[]u8 {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{
+                "security",
+                "find-generic-password",
+                "-s",
+                macos_keychain_service,
+                "-a",
+                target,
+                "-w",
+            },
+            .max_output_bytes = 32 * 1024,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        switch (result.term) {
+            .Exited => |code| if (code != 0) return null,
+            else => return null,
+        }
+
+        const trimmed = std.mem.trimRight(u8, result.stdout, "\r\n");
+        if (trimmed.len == 0) return null;
+        return try allocator.dupe(u8, trimmed);
+    }
+
+    pub fn delete(allocator: std.mem.Allocator, target: []const u8) !void {
+        const result = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{
+                "security",
+                "delete-generic-password",
+                "-s",
+                macos_keychain_service,
+                "-a",
+                target,
+            },
+            .max_output_bytes = 16 * 1024,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        switch (result.term) {
+            .Exited => |code| if (code == 0 or code == delete_not_found_error) return,
+            else => {},
+        }
+
+        const stderr_text = std.mem.trim(u8, result.stderr, " \t\r\n");
+        if (stderr_text.len > 0) {
+            std.log.warn("security delete-generic-password failed: {s}", .{stderr_text});
+        }
+        return error.CredentialStoreFailure;
+    }
+} else struct {
+    pub fn save(_: std.mem.Allocator, _: []const u8, _: []const u8) !void {
+        return error.UnsupportedPlatform;
+    }
+
+    pub fn load(_: std.mem.Allocator, _: []const u8) !?[]u8 {
+        return error.UnsupportedPlatform;
+    }
+
+    pub fn delete(_: std.mem.Allocator, _: []const u8) !void {
+        return error.UnsupportedPlatform;
     }
 };
 
@@ -361,6 +543,8 @@ test "provider selection defaults by platform" {
 
     if (builtin.os.tag == .windows) {
         try std.testing.expectEqual(ProviderKind.windows_credential_manager, store.providerKind());
+    } else if (builtin.os.tag == .macos) {
+        try std.testing.expectEqual(ProviderKind.macos_keychain, store.providerKind());
     } else {
         try std.testing.expectEqual(ProviderKind.file_fallback, store.providerKind());
     }

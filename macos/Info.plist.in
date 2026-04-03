@@ -20,6 +20,17 @@
     <string>__APP_VERSION__</string>
     <key>CFBundleVersion</key>
     <string>__BUILD_VERSION__</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.deanocalver.spiderapp.deep-link</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>spiderapp</string>
+            </array>
+        </dict>
+    </array>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.developer-tools</string>
     <key>NSHighResolutionCapable</key>

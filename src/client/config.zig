@@ -70,6 +70,20 @@ pub const AppLocalNodeEntry = struct {
     }
 };
 
+pub const OnboardingWorkflowEntry = struct {
+    profile_id: []const u8,
+    workspace_id: ?[]const u8 = null,
+    workflow_id: []const u8,
+    completed_at_ms: i64 = 0,
+
+    pub fn deinit(self: *OnboardingWorkflowEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.profile_id);
+        if (self.workspace_id) |value| allocator.free(value);
+        allocator.free(self.workflow_id);
+        self.* = undefined;
+    }
+};
+
 pub const Config = struct {
     pub const TokenRole = enum {
         admin,
@@ -113,6 +127,7 @@ pub const Config = struct {
     recent_workspaces: ?[]RecentWorkspaceEntry = null,
     workspace_layout_index: ?[]WorkspaceLayoutEntry = null,
     app_local_nodes: ?[]AppLocalNodeEntry = null,
+    onboarding_workflows: ?[]OnboardingWorkflowEntry = null,
 
     // Update + theme settings
     update_manifest_url: []const u8,
@@ -196,6 +211,11 @@ pub const Config = struct {
             for (entries) |*entry| entry.deinit(self.allocator);
             self.allocator.free(entries);
             self.app_local_nodes = null;
+        }
+        if (self.onboarding_workflows) |entries| {
+            for (entries) |*entry| entry.deinit(self.allocator);
+            self.allocator.free(entries);
+            self.onboarding_workflows = null;
         }
         if (self.connect_host_override) |value| {
             self.allocator.free(value);
@@ -545,6 +565,75 @@ pub const Config = struct {
             .opened_at_ms = now_ms,
         };
         self.recent_workspaces = entries;
+    }
+
+    pub fn workflowCompletedAt(
+        self: *const Config,
+        profile_id: []const u8,
+        workspace_id: ?[]const u8,
+        workflow_id: []const u8,
+    ) ?i64 {
+        const entries = self.onboarding_workflows orelse return null;
+        const normalized_workspace_id = normalizeOptionalId(workspace_id);
+        for (entries) |entry| {
+            if (!std.mem.eql(u8, entry.profile_id, profile_id)) continue;
+            if (!std.mem.eql(u8, entry.workflow_id, workflow_id)) continue;
+            if (!optionalStringEql(entry.workspace_id, normalized_workspace_id)) continue;
+            return entry.completed_at_ms;
+        }
+        return null;
+    }
+
+    pub fn isWorkflowCompleted(
+        self: *const Config,
+        profile_id: []const u8,
+        workspace_id: ?[]const u8,
+        workflow_id: []const u8,
+    ) bool {
+        return self.workflowCompletedAt(profile_id, workspace_id, workflow_id) != null;
+    }
+
+    pub fn markWorkflowCompleted(
+        self: *Config,
+        profile_id: []const u8,
+        workspace_id: ?[]const u8,
+        workflow_id: []const u8,
+    ) !void {
+        if (profile_id.len == 0 or workflow_id.len == 0) return;
+
+        const normalized_workspace_id = normalizeOptionalId(workspace_id);
+        const now_ms = std.time.milliTimestamp();
+
+        if (self.onboarding_workflows) |entries| {
+            for (entries) |*entry| {
+                if (!std.mem.eql(u8, entry.profile_id, profile_id)) continue;
+                if (!std.mem.eql(u8, entry.workflow_id, workflow_id)) continue;
+                if (!optionalStringEql(entry.workspace_id, normalized_workspace_id)) continue;
+                entry.completed_at_ms = now_ms;
+                return;
+            }
+
+            const expanded = try self.allocator.alloc(OnboardingWorkflowEntry, entries.len + 1);
+            @memcpy(expanded[0..entries.len], entries);
+            expanded[entries.len] = .{
+                .profile_id = try self.allocator.dupe(u8, profile_id),
+                .workspace_id = try duplicateOptionalString(self.allocator, normalized_workspace_id),
+                .workflow_id = try self.allocator.dupe(u8, workflow_id),
+                .completed_at_ms = now_ms,
+            };
+            self.allocator.free(entries);
+            self.onboarding_workflows = expanded;
+            return;
+        }
+
+        const entries = try self.allocator.alloc(OnboardingWorkflowEntry, 1);
+        entries[0] = .{
+            .profile_id = try self.allocator.dupe(u8, profile_id),
+            .workspace_id = try duplicateOptionalString(self.allocator, normalized_workspace_id),
+            .workflow_id = try self.allocator.dupe(u8, workflow_id),
+            .completed_at_ms = now_ms,
+        };
+        self.onboarding_workflows = entries;
     }
 
     pub fn getRoleToken(self: *const Config, role: TokenRole) []const u8 {
@@ -962,6 +1051,32 @@ pub const Config = struct {
         return out;
     }
 
+    fn duplicateOptionalOnboardingWorkflows(
+        allocator: std.mem.Allocator,
+        values: ?[]const OnboardingWorkflowJson,
+    ) !?[]OnboardingWorkflowEntry {
+        if (values == null) return null;
+        const list = values.?;
+        if (list.len == 0) return try allocator.alloc(OnboardingWorkflowEntry, 0);
+
+        const out = try allocator.alloc(OnboardingWorkflowEntry, list.len);
+        var written: usize = 0;
+        errdefer {
+            for (0..written) |i| out[i].deinit(allocator);
+            allocator.free(out);
+        }
+        for (list) |entry| {
+            out[written] = .{
+                .profile_id = try allocator.dupe(u8, entry.profile_id),
+                .workspace_id = try duplicateOptionalString(allocator, normalizeOptionalId(entry.workspace_id)),
+                .workflow_id = try allocator.dupe(u8, entry.workflow_id),
+                .completed_at_ms = entry.completed_at_ms orelse 0,
+            };
+            written += 1;
+        }
+        return out;
+    }
+
     /// Get config directory path
     pub fn getConfigDir(allocator: std.mem.Allocator) ![]const u8 {
         if (storage.isAndroid()) {
@@ -1052,6 +1167,10 @@ pub const Config = struct {
             json.workspace_layout_index,
         );
         const loaded_app_local_nodes = try duplicateOptionalAppLocalNodes(allocator, json.app_local_nodes);
+        const loaded_onboarding_workflows = try duplicateOptionalOnboardingWorkflows(
+            allocator,
+            json.onboarding_workflows,
+        );
 
         return .{
             .allocator = allocator,
@@ -1071,6 +1190,7 @@ pub const Config = struct {
             .recent_workspaces = loaded_recent_workspaces,
             .workspace_layout_index = loaded_layout_index,
             .app_local_nodes = loaded_app_local_nodes,
+            .onboarding_workflows = loaded_onboarding_workflows,
             .update_manifest_url = try duplicateOptionalString(allocator, json.update_manifest_url) orelse
                 try allocator.dupe(u8, "https://github.com/DeanoC/SpiderApp/releases/latest/download/update.json"),
             .theme_mode = parseThemeMode(json.theme_mode),
@@ -1142,6 +1262,7 @@ pub const Config = struct {
             .recent_workspaces = try makeRecentWorkspaceJsonSlice(self.allocator, mutable_self.recent_workspaces),
             .workspace_layout_index = try makeWorkspaceLayoutJsonSlice(self.allocator, mutable_self.workspace_layout_index),
             .app_local_nodes = try makeAppLocalNodeJsonSlice(self.allocator, mutable_self.app_local_nodes),
+            .onboarding_workflows = try makeOnboardingWorkflowJsonSlice(self.allocator, mutable_self.onboarding_workflows),
             .update_manifest_url = mutable_self.update_manifest_url,
             .theme_mode = themeModeName(mutable_self.theme_mode),
             .theme_pack = mutable_self.theme_pack,
@@ -1160,6 +1281,7 @@ pub const Config = struct {
             if (payload.recent_workspaces) |values| self.allocator.free(values);
             if (payload.workspace_layout_index) |values| self.allocator.free(values);
             if (payload.app_local_nodes) |values| self.allocator.free(values);
+            if (payload.onboarding_workflows) |values| self.allocator.free(values);
         }
 
         const bytes = try std.json.Stringify.valueAlloc(self.allocator, payload, .{
@@ -1190,6 +1312,7 @@ const ConfigJson = struct {
     recent_workspaces: ?[]const RecentWorkspaceJson = null,
     workspace_layout_index: ?[]const WorkspaceLayoutJson = null,
     app_local_nodes: ?[]const AppLocalNodeJson = null,
+    onboarding_workflows: ?[]const OnboardingWorkflowJson = null,
     update_manifest_url: ?[]const u8 = null,
     theme_mode: ?[]const u8 = null,
     theme_pack: ?[]const u8 = null,
@@ -1240,6 +1363,13 @@ const AppLocalNodeJson = struct {
     node_name: []const u8,
     node_id: []const u8,
     node_secret: []const u8,
+};
+
+const OnboardingWorkflowJson = struct {
+    profile_id: []const u8,
+    workspace_id: ?[]const u8 = null,
+    workflow_id: []const u8,
+    completed_at_ms: ?i64 = null,
 };
 
 fn profileIndexByIdList(profiles: []const ConnectionProfile, profile_id: []const u8) ?usize {
@@ -1323,6 +1453,24 @@ fn makeAppLocalNodeJsonSlice(
     return out;
 }
 
+fn makeOnboardingWorkflowJsonSlice(
+    allocator: std.mem.Allocator,
+    entries: ?[]const OnboardingWorkflowEntry,
+) !?[]OnboardingWorkflowJson {
+    const list = entries orelse return null;
+    if (list.len == 0) return try allocator.alloc(OnboardingWorkflowJson, 0);
+    const out = try allocator.alloc(OnboardingWorkflowJson, list.len);
+    for (list, 0..) |entry, idx| {
+        out[idx] = .{
+            .profile_id = entry.profile_id,
+            .workspace_id = entry.workspace_id,
+            .workflow_id = entry.workflow_id,
+            .completed_at_ms = entry.completed_at_ms,
+        };
+    }
+    return out;
+}
+
 fn parseTokenRole(value: ?[]const u8) Config.TokenRole {
     if (value) |raw| {
         if (std.mem.eql(u8, raw, "user")) return .user;
@@ -1385,6 +1533,20 @@ fn themeProfileName(profile: Config.ThemeProfile) []const u8 {
         .tablet => "tablet",
         .fullscreen => "fullscreen",
     };
+}
+
+fn normalizeOptionalId(value: ?[]const u8) ?[]const u8 {
+    if (value) |raw| {
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len > 0) return trimmed;
+    }
+    return null;
+}
+
+fn optionalStringEql(lhs: ?[]const u8, rhs: ?[]const u8) bool {
+    if (lhs == null and rhs == null) return true;
+    if (lhs == null or rhs == null) return false;
+    return std.mem.eql(u8, lhs.?, rhs.?);
 }
 
 fn deletePath(path: []const u8) !void {
@@ -1565,4 +1727,56 @@ test "config loads app-local node identities from json" {
     try std.testing.expectEqualStrings("spiderapp-default", stored.node_name);
     try std.testing.expectEqualStrings("node-7", stored.node_id);
     try std.testing.expectEqualStrings("secret-7", stored.node_secret);
+}
+
+test "onboarding workflows round-trip through config json" {
+    const json =
+        \\{
+        \\  "schema_version": 2,
+        \\  "server_url": "ws://127.0.0.1:18790",
+        \\  "onboarding_workflows": [
+        \\    {
+        \\      "profile_id": "default",
+        \\      "workspace_id": "workspace-a",
+        \\      "workflow_id": "start_local_workspace",
+        \\      "completed_at_ms": 1234
+        \\    },
+        \\    {
+        \\      "profile_id": "default",
+        \\      "workflow_id": "connect_to_another_spiderweb",
+        \\      "completed_at_ms": 5678
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var config = try Config.loadFromJsonSlice(std.testing.allocator, json);
+    defer config.deinit();
+
+    try std.testing.expect(config.isWorkflowCompleted("default", "workspace-a", "start_local_workspace"));
+    try std.testing.expect(config.isWorkflowCompleted("default", null, "connect_to_another_spiderweb"));
+    try std.testing.expectEqual(
+        @as(i64, 1234),
+        config.workflowCompletedAt("default", "workspace-a", "start_local_workspace").?,
+    );
+}
+
+test "markWorkflowCompleted upserts by profile workspace and workflow" {
+    var config = try Config.init(std.testing.allocator);
+    defer config.deinit();
+
+    try config.markWorkflowCompleted("default", "workspace-a", "install_package");
+    try std.testing.expectEqual(@as(usize, 1), config.onboarding_workflows.?.len);
+    const first_completed_at = config.workflowCompletedAt("default", "workspace-a", "install_package").?;
+    try std.testing.expect(first_completed_at > 0);
+
+    try config.markWorkflowCompleted("default", "workspace-a", "install_package");
+    try std.testing.expectEqual(@as(usize, 1), config.onboarding_workflows.?.len);
+    try std.testing.expect(
+        config.workflowCompletedAt("default", "workspace-a", "install_package").? >= first_completed_at,
+    );
+
+    try config.markWorkflowCompleted("default", null, "connect_to_another_spiderweb");
+    try std.testing.expectEqual(@as(usize, 2), config.onboarding_workflows.?.len);
+    try std.testing.expect(config.isWorkflowCompleted("default", null, "connect_to_another_spiderweb"));
 }

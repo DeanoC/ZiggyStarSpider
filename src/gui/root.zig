@@ -88,6 +88,14 @@ const LauncherRecipeSpec = struct {
     secondary_label: ?[]const u8 = null,
 };
 
+const LauncherConnectDetails = struct {
+    server_url: []const u8,
+    token_label: []const u8,
+    token: []const u8,
+    workspace_id: []const u8,
+    workspace_name: []const u8,
+};
+
 const LauncherRecipeProgress = enum {
     guide,
     ready,
@@ -97,6 +105,38 @@ const LauncherRecipeProgress = enum {
 const UiStage = stage_machine.Stage;
 const OnboardingStage = stage_machine.OnboardingStage;
 const HomeRoute = stage_machine.HomeRoute;
+
+const LaunchAction = enum {
+    none,
+    open_workspace,
+    open_devices,
+    open_capabilities,
+    open_explore,
+    open_remote_terminal,
+    open_settings,
+};
+
+const LaunchContext = struct {
+    profile_id: ?[]u8 = null,
+    workspace_id: ?[]u8 = null,
+    device_id: ?[]u8 = null,
+    route: ?HomeRoute = null,
+    action: LaunchAction = .none,
+
+    fn deinit(self: *LaunchContext, allocator: std.mem.Allocator) void {
+        if (self.profile_id) |value| allocator.free(value);
+        if (self.workspace_id) |value| allocator.free(value);
+        if (self.device_id) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+const workflow_start_local_workspace = "start_local_workspace";
+const workflow_add_second_device = "add_second_device";
+const workflow_install_package = "install_package";
+const workflow_run_remote_service = "run_remote_service";
+const workflow_connect_to_another_spiderweb = "connect_to_another_spiderweb";
+const workflow_spiderweb_handoff_completed = "spiderweb_handoff_completed";
 
 const IdeMenuDomain = enum {
     file,
@@ -379,6 +419,7 @@ const VenomEntry = struct {
     venom_id: []u8,
     scope: VenomScope,
     provider_node_id: ?[]u8,
+    provider_venom_path: ?[]u8,
     venom_path: []u8,
     endpoint_path: ?[]u8,
     invoke_path: ?[]u8,
@@ -386,6 +427,7 @@ const VenomEntry = struct {
     fn deinit(self: *VenomEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.venom_id);
         if (self.provider_node_id) |v| allocator.free(v);
+        if (self.provider_venom_path) |v| allocator.free(v);
         allocator.free(self.venom_path);
         if (self.endpoint_path) |v| allocator.free(v);
         if (self.invoke_path) |v| allocator.free(v);
@@ -491,7 +533,11 @@ fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 fn defaultTerminalBackendKind() terminal_render_backend.Backend.Kind {
-    return terminal_render_backend.Backend.parseKind(TERMINAL_BACKEND_KIND);
+    const build_default = terminal_render_backend.Backend.parseKind(TERMINAL_BACKEND_KIND);
+    if (builtin.os.tag == .macos and build_default == .plain_text) {
+        return .ghostty_vt;
+    }
+    return build_default;
 }
 
 fn initTerminalBackend(kind: terminal_render_backend.Backend.Kind) terminal_render_backend.Backend {
@@ -1167,6 +1213,10 @@ const TerminalState = struct {
     terminal_session_id: ?[]u8 = null,
     terminal_auto_poll: bool = true,
     terminal_next_poll_at_ms: i64 = 0,
+    terminal_target_node_id: ?[]u8 = null,
+    terminal_target_label: ?[]u8 = null,
+    terminal_service_root: ?[]u8 = null,
+    terminal_control_root: ?[]u8 = null,
 };
 
 const FilesystemState = struct {
@@ -1424,6 +1474,8 @@ pub const App = struct {
     metrics_context: ui_draw_context.DrawContext,
     ascii_glyph_width_cache: [128]f32 = [_]f32{-1.0} ** 128,
     config: config_mod.Config,
+    launch_context: ?LaunchContext = null,
+    launch_uses_env_token: bool = false,
     client_context: client_state.ClientContext,
     agent_registry: client_agents.AgentRegistry,
 
@@ -1537,6 +1589,32 @@ pub const App = struct {
         };
         errdefer config.deinit();
 
+        const launch_profile_id = duplicateTrimmedEnvVarOwned(allocator, "SPIDERAPP_LAUNCH_PROFILE_ID");
+        defer if (launch_profile_id) |value| allocator.free(value);
+        const launch_server_url = duplicateTrimmedEnvVarOwned(allocator, "SPIDERAPP_LAUNCH_SERVER_URL");
+        defer if (launch_server_url) |value| allocator.free(value);
+        const launch_token = duplicateTrimmedEnvVarOwned(allocator, "SPIDERAPP_LAUNCH_TOKEN");
+        defer if (launch_token) |value| allocator.free(value);
+        const launch_active_role_raw = duplicateTrimmedEnvVarOwned(allocator, "SPIDERAPP_LAUNCH_ACTIVE_ROLE");
+        defer if (launch_active_role_raw) |value| allocator.free(value);
+        const launch_active_role = if (launch_active_role_raw) |value| parseLaunchTokenRole(value) else null;
+
+        if (launch_profile_id) |profile_id| {
+            if (config.hasConnectionProfileId(profile_id)) {
+                config.setSelectedProfileById(profile_id) catch {};
+            }
+        }
+        if (launch_server_url) |server_url| {
+            config.setServerUrl(server_url) catch {};
+        }
+        if (launch_active_role) |role| {
+            config.setActiveRole(role) catch {};
+        }
+        if (launch_token) |token| {
+            config.setRoleToken(config.active_role, token) catch {};
+            config.syncSelectedProfileFromLegacyFields() catch {};
+        }
+
         const restored_width = config.window_width orelse DEFAULT_MAIN_WINDOW_WIDTH;
         const restored_height = config.window_height orelse DEFAULT_MAIN_WINDOW_HEIGHT;
         const initial_width: c_int = @intCast(@max(MIN_MAIN_WINDOW_WIDTH, restored_width));
@@ -1545,7 +1623,7 @@ pub const App = struct {
         try zapp.sdl_app.init(.{ .video = true, .events = true, .gamepad = false });
         zapp.clipboard.init();
 
-        const window = zapp.sdl_app.createWindow(platformWindowTitle("SpiderApp GUI"), initial_width, initial_height, c.SDL_WINDOW_RESIZABLE) catch {
+        const window = zapp.sdl_app.createWindow(platformWindowTitle("Spider Legacy Runtime"), initial_width, initial_height, c.SDL_WINDOW_RESIZABLE) catch {
             return error.SdlWindowCreateFailed;
         };
         errdefer c.SDL_DestroyWindow(window);
@@ -1593,13 +1671,15 @@ pub const App = struct {
         };
         errdefer credential_store.deinit();
         const selected_profile_id = config.selectedProfileId();
-        if (credential_store.load(selected_profile_id, "role_admin") catch null) |token| {
-            defer allocator.free(token);
-            config.setRoleToken(.admin, token) catch {};
-        }
-        if (credential_store.load(selected_profile_id, "role_user") catch null) |token| {
-            defer allocator.free(token);
-            config.setRoleToken(.user, token) catch {};
+        if (launch_token == null) {
+            if (credential_store.load(selected_profile_id, "role_admin") catch null) |token| {
+                defer allocator.free(token);
+                config.setRoleToken(.admin, token) catch {};
+            }
+            if (credential_store.load(selected_profile_id, "role_user") catch null) |token| {
+                defer allocator.free(token);
+                config.setRoleToken(.user, token) catch {};
+            }
         }
 
         // Initialize settings panel with config values
@@ -1639,9 +1719,10 @@ pub const App = struct {
         settings_panel.watch_theme_pack = config.watch_theme_pack and themePackWatchSupported();
         settings_panel.ws_verbose_logs = config.gui_verbose_ws_logs;
         settings_panel.auto_connect_on_launch = config.auto_connect_on_launch;
-        settings_panel.terminal_backend_kind = terminal_render_backend.Backend.parseKind(
-            config.selectedTerminalBackend() orelse TERMINAL_BACKEND_KIND,
-        );
+        settings_panel.terminal_backend_kind = if (config.selectedTerminalBackend()) |backend|
+            terminal_render_backend.Backend.parseKind(backend)
+        else
+            defaultTerminalBackendKind();
 
         var app = try allocator.create(App);
         errdefer allocator.destroy(app);
@@ -1697,6 +1778,7 @@ pub const App = struct {
         app.fs.next_fsrpc_tag = 1;
         app.fs.next_fsrpc_fid = 2;
         app.credential_store = credential_store;
+        app.launch_uses_env_token = launch_token != null;
         app.configurePerfAutomationFromEnv();
         app.ws.launcher_project_filter.appendSlice(allocator, "") catch {};
         app.ws.launcher_profile_name.appendSlice(allocator, "") catch {};
@@ -1704,6 +1786,9 @@ pub const App = struct {
         app.ws.launcher_connect_token.appendSlice(allocator, "") catch {};
         app.syncLauncherSelectionFromConfig();
         app.applyLauncherSelectedProfile() catch {};
+        app.launch_context = app.parseLaunchContextFromEnv();
+        errdefer if (app.launch_context) |*context| context.deinit(allocator);
+        app.applyLaunchContextSelection();
         app.debug.node_service_watch_filter.appendSlice(allocator, "") catch {};
         app.debug.node_service_watch_replay_limit.appendSlice(allocator, "25") catch {};
         app.debug.debug_search_filter.appendSlice(allocator, "") catch {};
@@ -1742,7 +1827,7 @@ pub const App = struct {
 
         const main_window = try app.createUiWindowFromExisting(
             window,
-            "SpiderApp GUI",
+            "Spider Legacy Runtime",
             &app.manager,
             true,
             false,
@@ -1751,7 +1836,7 @@ pub const App = struct {
         );
         try app.ui_windows.append(allocator, main_window);
         app.main_window_id = main_window.id;
-        _ = c.SDL_SetWindowTitle(window, platformWindowTitle("SpiderApp - Launcher"));
+        _ = c.SDL_SetWindowTitle(window, platformWindowTitle("Spider Legacy Runtime - Launcher"));
 
         errdefer allocator.free(app.status_text);
         errdefer app.settings_panel.deinit(allocator);
@@ -1827,6 +1912,7 @@ pub const App = struct {
         if (self.ws.mcp_selected_runtime) |v| self.allocator.free(v);
         self.closeWorkspaceWizard();
         self.clearTerminalState();
+        self.clearTerminalTarget();
         self.terminal.terminal_input.deinit(self.allocator);
         self.terminal.terminal_backend.deinit(self.allocator);
         self.debug.node_service_watch_filter.deinit(self.allocator);
@@ -1877,6 +1963,7 @@ pub const App = struct {
         ui_sdl_input_backend.deinit();
 
         self.allocator.free(self.status_text);
+        if (self.launch_context) |*context| context.deinit(self.allocator);
         self.config.deinit();
 
         self.swapchain.deinit();
@@ -2019,6 +2106,189 @@ pub const App = struct {
         if (std.ascii.eqlIgnoreCase(value, "yes")) return true;
         if (std.ascii.eqlIgnoreCase(value, "on")) return true;
         return false;
+    }
+
+    fn parseLaunchTokenRole(value: []const u8) ?config_mod.Config.TokenRole {
+        if (std.ascii.eqlIgnoreCase(value, "admin")) return .admin;
+        if (std.ascii.eqlIgnoreCase(value, "user")) return .user;
+        return null;
+    }
+
+    fn duplicateTrimmedEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
+        const raw = std.process.getEnvVarOwned(allocator, name) catch return null;
+        defer allocator.free(raw);
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len == 0) return null;
+        return allocator.dupe(u8, trimmed) catch null;
+    }
+
+    fn parseLaunchRoute(value: []const u8) ?HomeRoute {
+        if (std.ascii.eqlIgnoreCase(value, "workspace")) return .workspace;
+        if (std.ascii.eqlIgnoreCase(value, "devices")) return .devices;
+        if (std.ascii.eqlIgnoreCase(value, "capabilities")) return .capabilities;
+        if (std.ascii.eqlIgnoreCase(value, "explore")) return .explore;
+        if (std.ascii.eqlIgnoreCase(value, "settings")) return .settings;
+        return null;
+    }
+
+    fn parseLaunchAction(value: []const u8) LaunchAction {
+        if (std.ascii.eqlIgnoreCase(value, "open_workspace")) return .open_workspace;
+        if (std.ascii.eqlIgnoreCase(value, "open_devices")) return .open_devices;
+        if (std.ascii.eqlIgnoreCase(value, "open_capabilities")) return .open_capabilities;
+        if (std.ascii.eqlIgnoreCase(value, "open_explore")) return .open_explore;
+        if (std.ascii.eqlIgnoreCase(value, "open_remote_terminal")) return .open_remote_terminal;
+        if (std.ascii.eqlIgnoreCase(value, "open_settings")) return .open_settings;
+        return .none;
+    }
+
+    fn duplicateTrimmedEnvVar(self: *App, name: []const u8) ?[]u8 {
+        return duplicateTrimmedEnvVarOwned(self.allocator, name);
+    }
+
+    fn parseLaunchContextFromEnv(self: *App) ?LaunchContext {
+        var context = LaunchContext{};
+        var has_value = false;
+
+        if (self.duplicateTrimmedEnvVar("SPIDERAPP_LAUNCH_PROFILE_ID")) |value| {
+            context.profile_id = value;
+            has_value = true;
+        }
+        if (self.duplicateTrimmedEnvVar("SPIDERAPP_LAUNCH_WORKSPACE_ID")) |value| {
+            context.workspace_id = value;
+            has_value = true;
+        }
+        if (self.duplicateTrimmedEnvVar("SPIDERAPP_LAUNCH_DEVICE_ID")) |value| {
+            context.device_id = value;
+            has_value = true;
+        }
+        if (self.duplicateTrimmedEnvVar("SPIDERAPP_LAUNCH_ROUTE")) |value| {
+            defer self.allocator.free(value);
+            if (parseLaunchRoute(value)) |route| {
+                context.route = route;
+                has_value = true;
+            }
+        }
+        if (self.duplicateTrimmedEnvVar("SPIDERAPP_LAUNCH_ACTION")) |value| {
+            defer self.allocator.free(value);
+            const action = parseLaunchAction(value);
+            if (action != .none) {
+                context.action = action;
+                has_value = true;
+            }
+        }
+
+        if (!has_value) {
+            if (context.profile_id) |value| self.allocator.free(value);
+            if (context.workspace_id) |value| self.allocator.free(value);
+            if (context.device_id) |value| self.allocator.free(value);
+            return null;
+        }
+        return context;
+    }
+
+    fn launchContextRoute(context: LaunchContext) ?HomeRoute {
+        if (context.route) |route| return route;
+        return switch (context.action) {
+            .open_workspace => .workspace,
+            .open_devices => .devices,
+            .open_capabilities => .capabilities,
+            .open_explore => .explore,
+            .open_remote_terminal => .workspace,
+            .open_settings => .settings,
+            .none => null,
+        };
+    }
+
+    fn launchContextRequiresConnection(context: LaunchContext) bool {
+        return context.action != .none;
+    }
+
+    fn applyLaunchContextSelection(self: *App) void {
+        const context = self.launch_context orelse return;
+
+        if (context.profile_id) |profile_id| {
+            if (self.config.hasConnectionProfileId(profile_id)) {
+                self.config.setSelectedProfileById(profile_id) catch {};
+                self.syncLauncherSelectionFromConfig();
+                self.applyLauncherSelectedProfile() catch {};
+            }
+        }
+
+        if (launchContextRoute(context)) |route| {
+            self.ws.home_route = route;
+        }
+
+        if (context.workspace_id) |workspace_id| {
+            self.selectWorkspaceInSettings(workspace_id) catch {
+                self.settings_panel.project_id.clearRetainingCapacity();
+                self.settings_panel.project_id.appendSlice(self.allocator, workspace_id) catch {};
+                self.config.setSelectedWorkspace(workspace_id) catch {};
+            };
+        }
+        self.syncHomeOnboardingStage();
+    }
+
+    fn runLaunchContextAction(self: *App) void {
+        const context = self.launch_context orelse return;
+        if (context.action == .none) return;
+        if (self.connection_state != .connected) {
+            self.setLauncherNotice("Connect to Spiderweb before opening the requested workspace view.");
+            return;
+        }
+        if (context.action == .open_remote_terminal) {
+            self.openRemoteTerminalForSelectedWorkspace(context.device_id) catch |err| {
+                const msg = self.formatFilesystemOpError("Open remote terminal", err);
+                if (msg) |text| {
+                    defer self.allocator.free(text);
+                    self.setLauncherNotice(text);
+                } else {
+                    self.setLauncherNotice("Unable to open the requested remote terminal.");
+                }
+            };
+            return;
+        }
+        self.openSelectedHomeRoute() catch |err| {
+            const msg = self.formatControlOpError("Open workspace route", err);
+            if (msg) |text| {
+                defer self.allocator.free(text);
+                self.setLauncherNotice(text);
+            } else {
+                self.setLauncherNotice("Unable to open the requested workspace view.");
+            }
+        };
+    }
+
+    fn packageCount(self: *const App) usize {
+        return @max(self.package_manager_packages.items.len, self.ws.venom_entries.items.len);
+    }
+
+    fn markWorkflowCompleted(self: *App, profile_id: []const u8, workspace_id: ?[]const u8, workflow_id: []const u8) void {
+        self.config.markWorkflowCompleted(profile_id, workspace_id, workflow_id) catch return;
+        self.config.save() catch {};
+    }
+
+    fn syncCompletedOnboardingWorkflowsFromLiveState(self: *App) void {
+        if (self.connection_state != .connected) return;
+
+        const profile_id = self.config.selectedProfileId();
+        const selected_workspace_id = self.selectedWorkspaceId() orelse if (self.ws.projects.items.len == 1)
+            self.ws.projects.items[0].id
+        else
+            null;
+        const package_count = self.packageCount();
+
+        if (isProfileLikelyRemote(self.config.selectedProfile())) {
+            self.markWorkflowCompleted(profile_id, null, workflow_connect_to_another_spiderweb);
+        }
+        if (self.ui_stage == .workspace and selected_workspace_id != null) {
+            self.markWorkflowCompleted(profile_id, selected_workspace_id, workflow_start_local_workspace);
+        }
+        if (selected_workspace_id != null and self.ws.nodes.items.len > 1) {
+            self.markWorkflowCompleted(profile_id, selected_workspace_id, workflow_add_second_device);
+        }
+        if (selected_workspace_id != null and package_count > 0) {
+            self.markWorkflowCompleted(profile_id, selected_workspace_id, workflow_install_package);
+        }
     }
 
     fn configurePerfAutomationFromEnv(self: *App) void {
@@ -2286,7 +2556,7 @@ pub const App = struct {
         if (!platformSupportsMultiWindow()) return error.UnsupportedPlatform;
         const width: c_int = 960;
         const height: c_int = 720;
-        const title = try std.fmt.allocPrint(self.allocator, "SpiderApp GUI ({d})", .{self.ui_windows.items.len});
+        const title = try std.fmt.allocPrint(self.allocator, "Spider Legacy Runtime ({d})", .{self.ui_windows.items.len});
         defer self.allocator.free(title);
         const title_with_null = try self.allocator.alloc(u8, title.len + 1);
         defer self.allocator.free(title_with_null);
@@ -5120,6 +5390,25 @@ pub const App = struct {
         }
     }
 
+    fn clearTerminalTarget(self: *App) void {
+        if (self.terminal.terminal_target_node_id) |value| {
+            self.allocator.free(value);
+            self.terminal.terminal_target_node_id = null;
+        }
+        if (self.terminal.terminal_target_label) |value| {
+            self.allocator.free(value);
+            self.terminal.terminal_target_label = null;
+        }
+        if (self.terminal.terminal_service_root) |value| {
+            self.allocator.free(value);
+            self.terminal.terminal_service_root = null;
+        }
+        if (self.terminal.terminal_control_root) |value| {
+            self.allocator.free(value);
+            self.terminal.terminal_control_root = null;
+        }
+    }
+
     fn clearTerminalState(self: *App) void {
         if (self.terminal.terminal_session_id) |value| {
             self.allocator.free(value);
@@ -6092,6 +6381,7 @@ pub const App = struct {
                 self.setMissionDashboardError("Refresh missions failed");
             }
         };
+        self.syncCompletedOnboardingWorkflowsFromLiveState();
         self.syncHomeOnboardingStage();
     }
 
@@ -8260,15 +8550,15 @@ pub const App = struct {
             },
             .run_remote_service => .{
                 .eyebrow = "RECIPE",
-                .title = "Run a remote service",
-                .summary = "After the workspace and devices are stable, use packages and topology together to expose one remote service you actually need.",
+                .title = "Open a remote terminal",
+                .summary = "Use Spiderweb to open a real terminal on the selected workspace device so you can inspect files, run commands, and prove remote execution is working.",
                 .steps = .{
-                    "Confirm the device that should host the service is online.",
-                    "Enable or install the package that provides the service.",
-                    "Open the workspace and topology views to confirm where it is running and how it is attached.",
+                    "Choose or confirm the workspace you want to work in.",
+                    "Open the terminal and let SpiderApp target the best available device terminal.",
+                    "Run commands there to inspect the workspace and confirm which device is hosting the shell.",
                 },
-                .primary_label = "Open Workspace",
-                .secondary_label = "Open Capabilities",
+                .primary_label = "Open Remote Terminal",
+                .secondary_label = "Open Devices",
             },
             .connect_to_spiderweb => .{
                 .eyebrow = "REMOTE CONNECTION",
@@ -8342,8 +8632,14 @@ pub const App = struct {
                 self.openSelectedHomeRoute() catch {};
             },
             .run_remote_service => {
-                self.ws.home_route = .workspace;
-                self.openSelectedHomeRoute() catch {};
+                self.openRemoteTerminalForSelectedWorkspace(null) catch |err| {
+                    if (self.formatFilesystemOpError("Remote terminal", err)) |text| {
+                        defer self.allocator.free(text);
+                        self.setLauncherNotice(text);
+                    } else {
+                        self.setLauncherNotice("Unable to open the remote terminal.");
+                    }
+                };
             },
             .connect_to_spiderweb => {
                 if (self.connection_state == .connected) {
@@ -8373,7 +8669,7 @@ pub const App = struct {
                 self.openSelectedHomeRoute() catch {};
             },
             .run_remote_service => {
-                self.ws.home_route = .capabilities;
+                self.ws.home_route = .devices;
                 self.openSelectedHomeRoute() catch {};
             },
             .add_second_device, .contribute_this_mac, .workspace_tokens => {
@@ -8396,11 +8692,12 @@ pub const App = struct {
 
     fn launcherRecipePrimaryEnabled(self: *const App, recipe: LauncherRecipe) bool {
         const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
+        const has_connect_details = self.launcherConnectDetails() != null;
         return switch (recipe) {
             .create_workspace => self.connection_state == .connected,
-            .add_second_device => can_open,
+            .add_second_device => has_connect_details,
             .install_package => can_open,
-            .run_remote_service => can_open,
+            .run_remote_service => can_open and self.ws.nodes.items.len > 0,
             .connect_to_spiderweb => self.connection_state != .connecting,
             .workspace_tokens => can_open,
             .connect_another_machine => can_open,
@@ -8422,15 +8719,147 @@ pub const App = struct {
         };
     }
 
+    fn workflowIdForLauncherRecipe(recipe: LauncherRecipe) ?[]const u8 {
+        return switch (recipe) {
+            .create_workspace => workflow_start_local_workspace,
+            .add_second_device, .connect_another_machine => workflow_add_second_device,
+            .install_package => workflow_install_package,
+            .run_remote_service => workflow_run_remote_service,
+            .connect_to_spiderweb => workflow_connect_to_another_spiderweb,
+            .workspace_tokens, .contribute_this_mac => null,
+        };
+    }
+
+    fn selectedOrOnlyWorkspaceId(self: *const App) ?[]const u8 {
+        if (self.selectedWorkspaceId()) |workspace_id| return workspace_id;
+        if (self.ws.projects.items.len == 1) return self.ws.projects.items[0].id;
+        return null;
+    }
+
+    fn launcherRecipeUsesWorkspaceScope(recipe: LauncherRecipe) bool {
+        return switch (recipe) {
+            .create_workspace,
+            .add_second_device,
+            .connect_another_machine,
+            .install_package,
+            .run_remote_service,
+            => true,
+            .connect_to_spiderweb,
+            .workspace_tokens,
+            .contribute_this_mac,
+            => false,
+        };
+    }
+
+    fn hasCompletedWorkflowForRecipe(self: *const App, recipe: LauncherRecipe) bool {
+        const workflow_id = workflowIdForLauncherRecipe(recipe) orelse return false;
+        const profile_id = self.config.selectedProfileId();
+
+        if (launcherRecipeUsesWorkspaceScope(recipe)) {
+            if (self.selectedOrOnlyWorkspaceId()) |workspace_id| {
+                return self.config.isWorkflowCompleted(profile_id, workspace_id, workflow_id);
+            }
+            const entries = self.config.onboarding_workflows orelse return false;
+            for (entries) |entry| {
+                if (!std.mem.eql(u8, entry.profile_id, profile_id)) continue;
+                if (!std.mem.eql(u8, entry.workflow_id, workflow_id)) continue;
+                return true;
+            }
+            return false;
+        }
+
+        return self.config.isWorkflowCompleted(profile_id, null, workflow_id);
+    }
+
+    fn launcherConnectDetails(self: *const App) ?LauncherConnectDetails {
+        const workspace_id = self.selectedOrOnlyWorkspaceId() orelse return null;
+        const workspace_name = if (self.selectedWorkspaceSummary()) |selected_ws|
+            selected_ws.name
+        else if (self.ws.projects.items.len == 1)
+            self.ws.projects.items[0].name
+        else
+            workspace_id;
+
+        const server_url = blk: {
+            const from_settings = std.mem.trim(u8, self.settings_panel.server_url.items, " \t\r\n");
+            if (from_settings.len > 0) break :blk from_settings;
+            const from_config = std.mem.trim(u8, self.config.server_url, " \t\r\n");
+            if (from_config.len > 0) break :blk from_config;
+            return null;
+        };
+
+        const active_role_token = self.config.activeRoleToken();
+        if (active_role_token.len > 0) {
+            return .{
+                .server_url = server_url,
+                .token_label = switch (self.config.active_role) {
+                    .admin => "admin",
+                    .user => "user",
+                },
+                .token = active_role_token,
+                .workspace_id = workspace_id,
+                .workspace_name = workspace_name,
+            };
+        }
+        const admin_token = self.config.getRoleToken(.admin);
+        if (admin_token.len > 0) {
+            return .{
+                .server_url = server_url,
+                .token_label = "admin",
+                .token = admin_token,
+                .workspace_id = workspace_id,
+                .workspace_name = workspace_name,
+            };
+        }
+        const user_token = self.config.getRoleToken(.user);
+        if (user_token.len > 0) {
+            return .{
+                .server_url = server_url,
+                .token_label = "user",
+                .token = user_token,
+                .workspace_id = workspace_id,
+                .workspace_name = workspace_name,
+            };
+        }
+        return null;
+    }
+
+    fn copyLauncherConnectDetailsField(self: *App, value: []const u8, success_message: []const u8) void {
+        self.copyTextToClipboard(value) catch {
+            self.setLauncherNotice("Unable to copy the selected value.");
+            return;
+        };
+        self.setLauncherNotice(success_message);
+    }
+
+    fn copyLauncherConnectDetailsSummary(self: *App) void {
+        const details = self.launcherConnectDetails() orelse {
+            self.setLauncherNotice("Choose a workspace and save a profile token before sharing this Spiderweb.");
+            return;
+        };
+        const summary = std.fmt.allocPrint(
+            self.allocator,
+            "Spiderweb URL: {s}\nAccess token ({s}): {s}\nWorkspace: {s} ({s})",
+            .{ details.server_url, details.token_label, details.token, details.workspace_name, details.workspace_id },
+        ) catch {
+            self.setLauncherNotice("Unable to build the second-device setup summary.");
+            return;
+        };
+        defer self.allocator.free(summary);
+        self.copyLauncherConnectDetailsField(summary, "Copied the second-device setup summary.");
+    }
+
     fn launcherRecipeProgress(self: *App, recipe: LauncherRecipe) LauncherRecipeProgress {
         const can_open = self.connection_state == .connected and (self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1);
-        const package_count = @max(self.package_manager_packages.items.len, self.ws.venom_entries.items.len);
+        const package_count = self.packageCount();
         const selected_workspace_done = self.selectedWorkspaceId() != null or self.ws.projects.items.len == 1;
+        const has_connect_details = self.launcherConnectDetails() != null;
+        if (self.hasCompletedWorkflowForRecipe(recipe)) return .done;
         return switch (recipe) {
             .create_workspace => if (self.ws.projects.items.len > 0) .done else if (self.connection_state == .connected) .ready else .guide,
-            .add_second_device => if (self.ws.nodes.items.len > 1) .done else if (can_open) .ready else .guide,
+            .add_second_device => if (self.ws.nodes.items.len > 1) .done else if (has_connect_details) .ready else .guide,
             .install_package => if (package_count > 0) .done else if (can_open) .ready else .guide,
-            .run_remote_service => if (self.ws.nodes.items.len > 1 and package_count > 0) .done else if (can_open and package_count > 0) .ready else .guide,
+            .run_remote_service => if (can_open and self.ws.nodes.items.len > 0) .ready else .guide,
             .connect_to_spiderweb => if (self.connection_state == .connected) .done else if (self.settings_panel.server_url.items.len > 0 and self.ws.launcher_connect_token.items.len > 0) .ready else .guide,
             .workspace_tokens => blk: {
                 const workspace_id = self.selectedWorkspaceId() orelse if (self.ws.projects.items.len == 1) self.ws.projects.items[0].id else null;
@@ -8442,7 +8871,7 @@ pub const App = struct {
                 }
                 break :blk .guide;
             },
-            .connect_another_machine => if (self.ws.nodes.items.len > 1) .done else if (self.connection_state == .connected) .ready else .guide,
+            .connect_another_machine => if (self.ws.nodes.items.len > 1) .done else if (has_connect_details) .ready else .guide,
             .contribute_this_mac => if (selected_workspace_done and self.ws.nodes.items.len > 1) .done else if (self.connection_state == .connected) .ready else .guide,
         };
     }
@@ -9494,6 +9923,10 @@ pub const App = struct {
         const recipe = self.ws.launcher_recipe_modal orelse return;
         const spec = launcherRecipeSpec(recipe);
         const progress = self.launcherRecipeProgress(recipe);
+        const connect_details = if (recipe == .add_second_device or recipe == .connect_another_machine)
+            self.launcherConnectDetails()
+        else
+            null;
         const layout = self.panelLayoutMetrics();
         const pad = @max(layout.inset, 12.0 * self.ui_scale);
         const row_h = @max(layout.button_height, 34.0 * self.ui_scale);
@@ -9561,6 +9994,73 @@ pub const App = struct {
                 self.theme.colors.text_secondary,
             );
             y += layout.line_height * 1.4 + layout.row_gap * 0.1;
+        }
+
+        if (connect_details) |details| {
+            y += layout.row_gap * 0.35;
+            self.drawLabel(modal_rect.min[0] + pad, y, "Share From This Spiderweb", self.theme.colors.text_primary);
+            y += layout.line_height + layout.row_gap * 0.3;
+
+            const info_h = layout.line_height * 4.3;
+            const info_rect = Rect.fromXYWH(
+                modal_rect.min[0] + pad,
+                y,
+                content_w,
+                info_h,
+            );
+            self.drawSurfacePanel(info_rect);
+            self.drawRect(info_rect, self.theme.colors.border);
+
+            var info_y = info_rect.min[1] + layout.inner_inset * 0.7;
+            const server_line = std.fmt.allocPrint(self.allocator, "Spiderweb URL: {s}", .{details.server_url}) catch null;
+            const token_line = std.fmt.allocPrint(self.allocator, "Access token ({s}): {s}", .{ details.token_label, details.token }) catch null;
+            const workspace_line = std.fmt.allocPrint(self.allocator, "Workspace: {s} ({s})", .{ details.workspace_name, details.workspace_id }) catch null;
+            defer if (server_line) |value| self.allocator.free(value);
+            defer if (token_line) |value| self.allocator.free(value);
+            defer if (workspace_line) |value| self.allocator.free(value);
+
+            self.drawTextTrimmed(info_rect.min[0] + layout.inner_inset, info_y, info_rect.width() - layout.inner_inset * 2.0, server_line orelse details.server_url, self.theme.colors.text_secondary);
+            info_y += layout.line_height + layout.row_gap * 0.2;
+            self.drawTextTrimmed(info_rect.min[0] + layout.inner_inset, info_y, info_rect.width() - layout.inner_inset * 2.0, token_line orelse details.token, self.theme.colors.text_secondary);
+            info_y += layout.line_height + layout.row_gap * 0.2;
+            self.drawTextTrimmed(info_rect.min[0] + layout.inner_inset, info_y, info_rect.width() - layout.inner_inset * 2.0, workspace_line orelse details.workspace_name, self.theme.colors.text_secondary);
+            y = info_rect.max[1] + layout.row_gap * 0.45;
+
+            const copy_gap = pad * 0.4;
+            const copy_w = (content_w - copy_gap * 2.0) / 3.0;
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(modal_rect.min[0] + pad, y, copy_w, row_h),
+                "Copy URL",
+                .{ .variant = .secondary },
+            )) {
+                self.copyLauncherConnectDetailsField(details.server_url, "Copied the Spiderweb URL for the second device.");
+            }
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(modal_rect.min[0] + pad + copy_w + copy_gap, y, copy_w, row_h),
+                "Copy Token",
+                .{ .variant = .secondary },
+            )) {
+                const success = std.fmt.allocPrint(self.allocator, "Copied the {s} access token for the second device.", .{details.token_label}) catch null;
+                defer if (success) |value| self.allocator.free(value);
+                self.copyLauncherConnectDetailsField(details.token, success orelse "Copied the access token for the second device.");
+            }
+            if (self.drawButtonWidget(
+                Rect.fromXYWH(modal_rect.min[0] + pad + (copy_w + copy_gap) * 2.0, y, copy_w, row_h),
+                "Copy Setup",
+                .{ .variant = .primary },
+            )) {
+                self.copyLauncherConnectDetailsSummary();
+            }
+            y += row_h + layout.row_gap * 0.45;
+        } else if (recipe == .add_second_device or recipe == .connect_another_machine) {
+            self.drawTextTrimmed(
+                modal_rect.min[0] + pad,
+                y,
+                content_w,
+                "Choose a workspace and save an admin or user token in Settings before sharing this Spiderweb with another machine.",
+                self.theme.colors.text_secondary,
+            );
+            y += layout.line_height * 2.0 + layout.row_gap * 0.35;
         }
 
         const button_y = modal_rect.max[1] - pad - row_h;
@@ -11264,6 +11764,10 @@ pub const App = struct {
                 .string => v.string,
                 else => null,
             } else null;
+            const provider_venom_raw = if (obj.get("provider_venom_path")) |v| switch (v) {
+                .string => v.string,
+                else => null,
+            } else null;
             const endpoint_raw = if (obj.get("endpoint_path")) |v| switch (v) {
                 .string => v.string,
                 else => null,
@@ -11279,6 +11783,8 @@ pub const App = struct {
             errdefer self.allocator.free(venom_path);
             const provider_node_id = if (provider_node_raw) |v| try self.allocator.dupe(u8, v) else null;
             errdefer if (provider_node_id) |v| self.allocator.free(v);
+            const provider_venom_path = if (provider_venom_raw) |v| try self.allocator.dupe(u8, v) else null;
+            errdefer if (provider_venom_path) |v| self.allocator.free(v);
             const endpoint_path = if (endpoint_raw) |v| try self.allocator.dupe(u8, v) else null;
             errdefer if (endpoint_path) |v| self.allocator.free(v);
             const invoke_path = if (invoke_raw) |v| try self.allocator.dupe(u8, v) else null;
@@ -11288,6 +11794,7 @@ pub const App = struct {
                 .venom_id = venom_id,
                 .scope = scope,
                 .provider_node_id = provider_node_id,
+                .provider_venom_path = provider_venom_path,
                 .venom_path = venom_path,
                 .endpoint_path = endpoint_path,
                 .invoke_path = invoke_path,
@@ -11304,7 +11811,6 @@ pub const App = struct {
         self.clearVenomError();
 
         const client = if (self.ws_client) |*value| value else return;
-        self.fsrpcBootstrapGui(client) catch return;
 
         // Global scope
         self.loadVenomsFromPath(client, "/global/venoms/VENOMS.json", .global) catch |err| {
@@ -11356,7 +11862,6 @@ pub const App = struct {
 
     pub fn refreshMcpConfig(self: *App) void {
         const client = if (self.ws_client) |*value| value else return;
-        self.fsrpcBootstrapGui(client) catch return;
         self.clearMcpEntries();
         if (self.ws.mcp_last_error) |v| {
             self.allocator.free(v);
@@ -12434,11 +12939,8 @@ pub const App = struct {
 
     fn writeTerminalControl(self: *App, control_name: []const u8, payload: []const u8) !void {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
-        const control_path = try std.fmt.allocPrint(
-            self.allocator,
-            "/agents/self/terminal/control/{s}",
-            .{control_name},
-        );
+        const control_root = self.terminal.terminal_control_root orelse "/agents/self/terminal/control";
+        const control_path = try self.joinFilesystemPath(control_root, control_name);
         defer self.allocator.free(control_path);
         try self.writeFsPathTextGui(client, control_path, payload);
     }
@@ -12446,6 +12948,170 @@ pub const App = struct {
     fn readTerminalPath(self: *App, path: []const u8) ![]u8 {
         const client = if (self.ws_client) |*value| value else return error.NotConnected;
         return self.readFsPathTextGui(client, path);
+    }
+
+    fn terminalServiceRoot(self: *const App) []const u8 {
+        return self.terminal.terminal_service_root orelse "/agents/self/terminal";
+    }
+
+    fn terminalTargetLabel(self: *const App) []const u8 {
+        return self.terminal.terminal_target_label orelse "Workspace default terminal";
+    }
+
+    fn buildTerminalServicePath(self: *App, child: []const u8) ![]u8 {
+        return self.joinFilesystemPath(self.terminalServiceRoot(), child);
+    }
+
+    fn filesystemPathNodeId(path: []const u8) ?[]const u8 {
+        if (!std.mem.startsWith(u8, path, "/nodes/")) return null;
+        const rest = path["/nodes/".len..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+        if (slash == 0) return null;
+        return rest[0..slash];
+    }
+
+    fn terminalEntryMatchesPreferredNode(entry: VenomEntry, node_id: []const u8) bool {
+        if (entry.provider_node_id) |provider| {
+            if (std.mem.eql(u8, provider, node_id)) return true;
+        }
+        if (entry.provider_venom_path) |provider_path| {
+            if (filesystemPathNodeId(provider_path)) |path_node_id| {
+                if (std.mem.eql(u8, path_node_id, node_id)) return true;
+            }
+        }
+        if (filesystemPathNodeId(entry.venom_path)) |path_node_id| {
+            return std.mem.eql(u8, path_node_id, node_id);
+        }
+        return false;
+    }
+
+    fn isTerminalVenomEntry(entry: VenomEntry) bool {
+        return std.mem.eql(u8, entry.venom_id, "terminal") or std.mem.startsWith(u8, entry.venom_id, "terminal-");
+    }
+
+    fn preferredTerminalNodeId(self: *const App, requested_node_id: ?[]const u8) ?[]const u8 {
+        if (requested_node_id) |node_id| {
+            if (node_id.len > 0) return node_id;
+        }
+        if (self.ws.node_topology_selected_index) |selected_index| {
+            if (selected_index < self.ws.nodes.items.len) return self.ws.nodes.items[selected_index].node_id;
+        }
+        if (self.ws.workspace_state) |state| {
+            if (state.actual_mounts.items.len > 0) return state.actual_mounts.items[0].node_id;
+            if (state.mounts.items.len > 0) return state.mounts.items[0].node_id;
+        }
+        if (self.ws.selected_workspace_detail) |detail| {
+            if (detail.mounts.items.len > 0) return detail.mounts.items[0].node_id;
+        }
+        for (self.ws.nodes.items) |node| {
+            if (std.mem.eql(u8, node.node_id, "local")) return node.node_id;
+        }
+        if (self.ws.nodes.items.len > 0) return self.ws.nodes.items[0].node_id;
+        return null;
+    }
+
+    const ResolvedTerminalTarget = struct {
+        node_id: ?[]const u8,
+        label: []const u8,
+        service_root: []const u8,
+        service_root_owned: bool = false,
+    };
+
+    fn terminalServiceRootForEntry(entry: VenomEntry) []const u8 {
+        return entry.provider_venom_path orelse entry.venom_path;
+    }
+
+    fn liveNodeLabel(self: *const App, node_id: []const u8) []const u8 {
+        for (self.ws.nodes.items) |node| {
+            if (std.mem.eql(u8, node.node_id, node_id)) return node.node_name;
+        }
+        return node_id;
+    }
+
+    fn hasLiveNode(self: *const App, node_id: []const u8) bool {
+        for (self.ws.nodes.items) |node| {
+            if (std.mem.eql(u8, node.node_id, node_id)) return true;
+        }
+        return false;
+    }
+
+    fn resolveRemoteTerminalTarget(self: *const App, requested_node_id: ?[]const u8) ?ResolvedTerminalTarget {
+        const preferred_node_id = self.preferredTerminalNodeId(requested_node_id);
+
+        if (preferred_node_id) |node_id| {
+            for (self.ws.venom_entries.items) |entry| {
+                if (!isTerminalVenomEntry(entry)) continue;
+                if (!terminalEntryMatchesPreferredNode(entry, node_id)) continue;
+                return .{
+                    .node_id = node_id,
+                    .label = self.liveNodeLabel(node_id),
+                    .service_root = terminalServiceRootForEntry(entry),
+                    .service_root_owned = false,
+                };
+            }
+        }
+
+        for (self.ws.venom_entries.items) |entry| {
+            if (!isTerminalVenomEntry(entry)) continue;
+            if (entry.provider_node_id == null and builtin.os.tag != .linux) continue;
+            const resolved_node_id = entry.provider_node_id orelse
+                if (entry.provider_venom_path) |provider_path| filesystemPathNodeId(provider_path) else null orelse
+                filesystemPathNodeId(entry.venom_path);
+            if (resolved_node_id) |node_id| {
+                if (!self.hasLiveNode(node_id)) continue;
+            }
+            const node_label = if (resolved_node_id) |node_id| self.liveNodeLabel(node_id) else "workspace";
+            return .{
+                .node_id = resolved_node_id,
+                .label = node_label,
+                .service_root = terminalServiceRootForEntry(entry),
+                .service_root_owned = false,
+            };
+        }
+
+        if (preferred_node_id) |node_id| {
+            if (!std.mem.eql(u8, node_id, "local")) {
+                return .{
+                    .node_id = node_id,
+                    .label = self.liveNodeLabel(node_id),
+                    .service_root = std.fmt.allocPrint(self.allocator, "/nodes/{s}/venoms/terminal", .{node_id}) catch return null,
+                    .service_root_owned = true,
+                };
+            }
+        }
+
+        return null;
+    }
+
+    fn configureRemoteTerminalTarget(self: *App, requested_node_id: ?[]const u8) !void {
+        const target = self.resolveRemoteTerminalTarget(requested_node_id) orelse return error.NotFound;
+        defer if (target.service_root_owned) self.allocator.free(target.service_root);
+        self.clearTerminalTarget();
+
+        if (target.node_id) |node_id| {
+            self.terminal.terminal_target_node_id = try self.allocator.dupe(u8, node_id);
+        }
+        self.terminal.terminal_target_label = try self.allocator.dupe(u8, target.label);
+        self.terminal.terminal_service_root = try self.allocator.dupe(u8, target.service_root);
+        self.terminal.terminal_control_root = try self.joinFilesystemPath(target.service_root, "control");
+    }
+
+    fn openRemoteTerminalForSelectedWorkspace(self: *App, requested_node_id: ?[]const u8) !void {
+        try self.openSelectedWorkspaceFromLauncher();
+        self.refreshVenomManager();
+        try self.configureRemoteTerminalTarget(requested_node_id);
+        _ = self.ensureWorkspacePanel(&self.manager) catch {};
+        _ = self.ensureTerminalPanel(&self.manager) catch {};
+        if (self.terminal.terminal_session_id != null) {
+            self.closeTerminalSession() catch {};
+        }
+        try self.ensureTerminalSession();
+        const profile_id = self.config.selectedProfileId();
+        const workspace_id = self.selectedWorkspaceId() orelse self.ws.active_workspace_id orelse return;
+        self.markWorkflowCompleted(profile_id, workspace_id, workflow_run_remote_service);
+        const notice = try std.fmt.allocPrint(self.allocator, "Remote Terminal ready on {s}.", .{self.terminalTargetLabel()});
+        defer self.allocator.free(notice);
+        self.setLauncherNotice(notice);
     }
 
     pub fn ensureTerminalSession(self: *App) !void {
@@ -12466,7 +13132,9 @@ pub const App = struct {
 
         self.clearTerminalState();
         self.terminal.terminal_session_id = try self.allocator.dupe(u8, session_id);
-        self.setTerminalStatus("Terminal session ready");
+        const status = try std.fmt.allocPrint(self.allocator, "Terminal session ready on {s}", .{self.terminalTargetLabel()});
+        defer self.allocator.free(status);
+        self.setTerminalStatus(status);
         self.terminal.terminal_next_poll_at_ms = std.time.milliTimestamp() + TERMINAL_READ_POLL_INTERVAL_MS;
     }
 
@@ -12572,7 +13240,9 @@ pub const App = struct {
         defer self.allocator.free(payload);
         try self.writeTerminalControl("read.json", payload);
 
-        const result_payload = try self.readTerminalPath("/agents/self/terminal/result.json");
+        const result_path = try self.buildTerminalServicePath("result.json");
+        defer self.allocator.free(result_path);
+        const result_payload = try self.readTerminalPath(result_path);
         defer self.allocator.free(result_payload);
         try self.applyTerminalReadResult(result_payload);
         self.terminal.terminal_next_poll_at_ms = std.time.milliTimestamp() + TERMINAL_READ_POLL_INTERVAL_MS;
@@ -16664,14 +17334,18 @@ pub const App = struct {
         try self.config.setRoleToken(.admin, "");
         try self.config.setRoleToken(.user, "");
         self.settings_panel.project_operator_token.clearRetainingCapacity();
-        if (self.credential_store.load(profile.id, "role_admin") catch null) |token| {
-            defer self.allocator.free(token);
-            try self.config.setRoleToken(.admin, token);
-            try self.settings_panel.project_operator_token.appendSlice(self.allocator, token);
-        }
-        if (self.credential_store.load(profile.id, "role_user") catch null) |token| {
-            defer self.allocator.free(token);
-            try self.config.setRoleToken(.user, token);
+        if (!self.launch_uses_env_token) {
+            if (self.credential_store.load(profile.id, "role_admin") catch null) |token| {
+                defer self.allocator.free(token);
+                try self.config.setRoleToken(.admin, token);
+                try self.settings_panel.project_operator_token.appendSlice(self.allocator, token);
+            }
+            if (self.credential_store.load(profile.id, "role_user") catch null) |token| {
+                defer self.allocator.free(token);
+                try self.config.setRoleToken(.user, token);
+            }
+        } else if (self.config.getRoleToken(.admin).len > 0) {
+            try self.settings_panel.project_operator_token.appendSlice(self.allocator, self.config.getRoleToken(.admin));
         }
         try self.syncLauncherConnectTokenFromConfig();
     }
@@ -17015,8 +17689,9 @@ pub const App = struct {
         self.setLauncherNotice("Workspace opened.");
         self.restoreWorkspaceLayout(profile_id, project_id) catch {};
         self.config.recordRecentWorkspace(profile_id, project_id, null) catch {};
+        self.config.markWorkflowCompleted(profile_id, project_id, workflow_start_local_workspace) catch {};
         self.config.save() catch {};
-        _ = c.SDL_SetWindowTitle(self.window, platformWindowTitle("SpiderApp - Workspace"));
+        _ = c.SDL_SetWindowTitle(self.window, platformWindowTitle("Spider Legacy Runtime - Workspace"));
     }
 
     fn returnToLauncher(self: *App, reason: stage_machine.ReturnReason) void {
@@ -17035,12 +17710,26 @@ pub const App = struct {
             self.ws.active_workspace_id = null;
         }
         self.closeAllSecondaryWindows();
-        _ = c.SDL_SetWindowTitle(self.window, platformWindowTitle("SpiderApp - Launcher"));
+        _ = c.SDL_SetWindowTitle(self.window, platformWindowTitle("Spider Legacy Runtime - Launcher"));
         switch (reason) {
             .switched_workspace => self.setLauncherNotice("Switched back to launcher. Select another workspace."),
             .connection_lost => self.setLauncherNotice("Connection lost. Reconnect to continue."),
             .disconnected => self.setLauncherNotice("Disconnected from Spiderweb."),
             .none => self.clearLauncherNotice(),
+        }
+
+        if (reason == .connection_lost or reason == .disconnected) {
+            self.clearWorkspaceData();
+            self.clearFilesystemData();
+            self.clearFilesystemDirCache();
+            self.clearTerminalState();
+            self.clearTerminalTarget();
+            self.clearNodeServiceReloadDiagnostics();
+        }
+
+        if (reason == .switched_workspace) {
+            self.clearTerminalState();
+            self.clearTerminalTarget();
         }
 
         if (reason == .switched_workspace and self.connection_state == .connected and self.ws_client != null) {
@@ -17109,6 +17798,7 @@ pub const App = struct {
         self.clearFilesystemData();
         self.clearFilesystemDirCache();
         self.clearTerminalState();
+        self.clearTerminalTarget();
         self.clearNodeServiceReloadDiagnostics();
     }
 
@@ -18274,6 +18964,7 @@ pub const App = struct {
             }
         }
         self.clearPackageManagerModalError();
+        self.syncCompletedOnboardingWorkflowsFromLiveState();
     }
 
     fn runPackageManagerOperation(
@@ -20870,6 +21561,17 @@ fn deinitWorkboardItemOwnedSlice(allocator: std.mem.Allocator, items: []zui.prot
     allocator.free(items);
 }
 
+fn isLocalSpiderwebServerUrl(server_url: []const u8) bool {
+    const trimmed = std.mem.trim(u8, server_url, " \t\r\n");
+    return std.mem.eql(u8, trimmed, config_mod.Config.default_server_url) or
+        std.mem.eql(u8, trimmed, "ws://localhost:18790") or
+        std.mem.eql(u8, trimmed, "ws://127.0.0.1:18790");
+}
+
+fn isProfileLikelyRemote(profile: *const config_mod.ConnectionProfile) bool {
+    return !isLocalSpiderwebServerUrl(profile.server_url);
+}
+
 
 
 
@@ -20937,9 +21639,12 @@ pub fn main() !void {
             std.heap.c_allocator.destroy(app);
         }
 
-        if (app.config.auto_connect_on_launch) {
+        const should_connect = app.config.auto_connect_on_launch or
+            (if (app.launch_context) |context| App.launchContextRequiresConnection(context) else false);
+        if (should_connect) {
             app.tryConnect(&app.manager) catch {};
         }
+        app.runLaunchContextAction();
 
         try app.run();
         return;
@@ -20954,9 +21659,12 @@ pub fn main() !void {
         gpa.allocator().destroy(app);
     }
 
-    if (app.config.auto_connect_on_launch) {
+    const should_connect = app.config.auto_connect_on_launch or
+        (if (app.launch_context) |context| App.launchContextRequiresConnection(context) else false);
+    if (should_connect) {
         app.tryConnect(&app.manager) catch {};
     }
+    app.runLaunchContextAction();
 
     try app.run();
 }

@@ -14,7 +14,9 @@ GUI_BINARY_NAME="spider-gui"
 APP_BUNDLE_ID="com.deanocalver.spiderapp"
 PKG_ID="com.deanocalver.spiderapp.pkg"
 ICON_SOURCE_DEFAULT="$REPO_ROOT/android/res/drawable/app_icon.png"
+SHELL_SOURCES=("$MACOS_DIR/SpiderAppShellSupport.swift" "$MACOS_DIR/SpiderAppShellApp.swift")
 VERSION_DEFAULT="$(sed -n 's/.*\.version = \"\(.*\)\".*/\1/p' "$REPO_ROOT/build.zig.zon" | head -n 1)"
+CLANG_RT_PATH_DEFAULT="$(find /Library/Developer/CommandLineTools /Applications/Xcode.app -name 'libclang_rt.osx.a' 2>/dev/null | head -n 1)"
 
 usage() {
   cat <<'EOF'
@@ -160,15 +162,28 @@ build_app_bundle() {
   local macos_dir="$contents_dir/MacOS"
   local resources_dir="$contents_dir/Resources"
   local info_plist="$contents_dir/Info.plist"
+  local core_lib_path="$REPO_ROOT/zig-out/lib/libspider_core.a"
+  local clang_rt_path="${CLANG_RT_PATH:-$CLANG_RT_PATH_DEFAULT}"
 
   rm -rf "$bundle_dir"
   mkdir -p "$macos_dir" "$resources_dir"
 
-  cp "$REPO_ROOT/zig-out/bin/$GUI_BINARY_NAME" "$macos_dir/$EXECUTABLE_NAME"
-  chmod 755 "$macos_dir/$EXECUTABLE_NAME"
-
   cp "$REPO_ROOT/zig-out/bin/$CLI_BINARY_NAME" "$resources_dir/$CLI_BINARY_NAME"
   chmod 755 "$resources_dir/$CLI_BINARY_NAME"
+  [[ -f "$core_lib_path" ]] || fail "missing Spider core library at $core_lib_path"
+  [[ -f "$clang_rt_path" ]] || fail "missing libclang_rt.osx.a"
+
+  swiftc \
+    -O \
+    -framework AppKit \
+    -framework Foundation \
+    -framework Security \
+    -framework SwiftUI \
+    "$core_lib_path" \
+    "$clang_rt_path" \
+    "${SHELL_SOURCES[@]}" \
+    -o "$macos_dir/$EXECUTABLE_NAME"
+  chmod 755 "$macos_dir/$EXECUTABLE_NAME"
 
   render_info_plist "$info_plist" "$app_version" "$build_version"
   build_icon "$resources_dir" "$info_plist" "$icon_source" "$app_tmp_dir"
@@ -182,7 +197,7 @@ build_app_bundle() {
     "$bundle_dir"
 }
 
-version="${VERSION_DEFAULT:-0.1.0}"
+version="${VERSION_DEFAULT:-0.2.0}"
 out_dir="$OUT_DIR_DEFAULT"
 skip_notarize=0
 skip_build=0
@@ -225,6 +240,7 @@ require_command sips
 require_command iconutil
 require_command python3
 require_command xattr
+require_command swiftc
 
 app_identity="$(resolve_signing_identity \
   SPIDERAPP_MACOS_DEVELOPER_ID_APPLICATION \
@@ -246,7 +262,6 @@ if [[ $skip_build -eq 0 ]]; then
 fi
 
 [[ -x "$REPO_ROOT/zig-out/bin/$CLI_BINARY_NAME" ]] || fail "missing CLI binary at zig-out/bin/$CLI_BINARY_NAME"
-[[ -x "$REPO_ROOT/zig-out/bin/$GUI_BINARY_NAME" ]] || fail "missing GUI binary at zig-out/bin/$GUI_BINARY_NAME"
 
 mkdir -p "$out_dir"
 work_root="$(mktemp -d /tmp/spiderapp-macos-release.XXXXXX)"
