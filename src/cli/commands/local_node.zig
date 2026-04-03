@@ -6,6 +6,26 @@ const linux = @import("../linux_support.zig");
 const service_name = "spider-node.service";
 const default_port: u16 = 18891;
 
+const NodeConfigFile = struct {
+    bind: []const u8,
+    port: u16,
+    control_url: []const u8,
+    control_auth_token: ?[]const u8 = null,
+    pair_mode: []const u8,
+    invite_token: ?[]const u8 = null,
+    node_name: []const u8,
+    state_file: []const u8,
+    enable_fs_venom: bool,
+    terminal_ids: []const []const u8,
+    exports: []const NodeConfigExport,
+};
+
+const NodeConfigExport = struct {
+    name: []const u8,
+    path: []const u8,
+    readonly: bool,
+};
+
 const ExportEntry = struct {
     name: []u8,
     path: []u8,
@@ -231,35 +251,37 @@ fn writeNodeConfig(
     node_name: []const u8,
     exports: []const []const u8,
 ) !void {
-    var payload = std.ArrayListUnmanaged(u8){};
-    defer payload.deinit(allocator);
-    try payload.writer(allocator).writeAll("{\n");
-    try payload.writer(allocator).print("  \"bind\": \"127.0.0.1\",\n", .{});
-    try payload.writer(allocator).print("  \"port\": {d},\n", .{default_port});
-    try payload.writer(allocator).print("  \"control_url\": \"{s}\",\n", .{control_url});
-    if (control_auth_token) |token| {
-        try payload.writer(allocator).print("  \"control_auth_token\": \"{s}\",\n", .{token});
-    }
-    try payload.writer(allocator).print("  \"pair_mode\": \"{s}\",\n", .{pair_mode});
-    if (invite_token) |token| {
-        try payload.writer(allocator).print("  \"invite_token\": \"{s}\",\n", .{token});
-    }
-    try payload.writer(allocator).print("  \"node_name\": \"{s}\",\n", .{node_name});
-    try payload.writer(allocator).print("  \"state_file\": \"{s}\",\n", .{state_path});
-    try payload.writer(allocator).writeAll("  \"enable_fs_venom\": false,\n");
-    try payload.writer(allocator).writeAll("  \"terminal_ids\": [\"main\"],\n");
-    try payload.writer(allocator).writeAll("  \"exports\": [");
+    const terminal_ids = [_][]const u8{ "main" };
+    var export_entries = try allocator.alloc(NodeConfigExport, exports.len);
+    defer allocator.free(export_entries);
     for (exports, 0..) |path, idx| {
-        if (idx > 0) try payload.writer(allocator).writeAll(",");
         const base_name = std.fs.path.basename(path);
-        try payload.writer(allocator).print(
-            "\n    {{\"name\":\"{s}\",\"path\":\"{s}\",\"readonly\":false}}",
-            .{ if (base_name.len > 0) base_name else "export", path },
-        );
+        export_entries[idx] = .{
+            .name = if (base_name.len > 0) base_name else "export",
+            .path = path,
+            .readonly = false,
+        };
     }
-    if (exports.len > 0) try payload.writer(allocator).writeAll("\n");
-    try payload.writer(allocator).writeAll("  ]\n}\n");
-    try linux.writeFileAny(config_path, payload.items);
+
+    const payload = try std.json.Stringify.valueAlloc(
+        allocator,
+        NodeConfigFile{
+            .bind = "127.0.0.1",
+            .port = default_port,
+            .control_url = control_url,
+            .control_auth_token = control_auth_token,
+            .pair_mode = pair_mode,
+            .invite_token = invite_token,
+            .node_name = node_name,
+            .state_file = state_path,
+            .enable_fs_venom = false,
+            .terminal_ids = &terminal_ids,
+            .exports = export_entries,
+        },
+        .{ .whitespace = .indent_2 },
+    );
+    defer allocator.free(payload);
+    try linux.writeFileAny(config_path, payload);
 }
 
 fn ensureInstallScaffold(allocator: std.mem.Allocator) !struct { user: linux.ServiceUser, config_path: []u8, state_path: []u8 } {
@@ -592,4 +614,33 @@ pub fn runConnectWizard(allocator: std.mem.Allocator) !void {
         try cmd_args.append(allocator, "--request-approval");
     }
     try executeLocalNodeConnect(allocator, .{}, .{ .noun = .local_node, .verb = .connect, .args = cmd_args.items });
+}
+
+test "writeNodeConfig escapes user-provided JSON strings" {
+    const allocator = std.testing.allocator;
+    const temp_dir = std.testing.tmpDir(.{});
+    defer temp_dir.cleanup();
+
+    const config_path = try std.fs.path.join(allocator, &.{ temp_dir.dir_path, "linux-node.json" });
+    defer allocator.free(config_path);
+
+    const exports = [_][]const u8{ "/tmp/export\"quote" };
+    try writeNodeConfig(
+        allocator,
+        config_path,
+        "/tmp/state\"file.json",
+        "ws://host/\"quoted\"",
+        "token-with-quote-\"-and-backslash-\\",
+        "invite",
+        "invite-\"token\"",
+        "node-\"name\"",
+        &exports,
+    );
+
+    const payload = try linux.readFileAllocAny(allocator, config_path, 64 * 1024);
+    defer allocator.free(payload);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
 }

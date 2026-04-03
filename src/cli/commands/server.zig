@@ -165,6 +165,7 @@ fn writeSystemServiceUnit(
     const unit_path = try linux.resolveSystemdUnitPath(allocator, user, service_name);
     defer allocator.free(unit_path);
     try linux.makePathAny(working_dir);
+    try linux.ensureOwnedByServiceUser(allocator, user, working_dir);
     const payload = try std.fmt.allocPrint(
         allocator,
         \\[Unit]
@@ -379,6 +380,7 @@ pub fn executeServerRemove(allocator: std.mem.Allocator, _: args.Options, cmd: a
     if (user.scope == .system) {
         var disable = try linux.systemctlAction(allocator, user, &.{ "disable", "--now", service_name });
         defer disable.deinit(allocator);
+        if (!disable.ok()) return error.CommandFailed;
         const unit_path = try linux.resolveSystemdUnitPath(allocator, user, service_name);
         defer allocator.free(unit_path);
         if (linux.pathExists(unit_path)) {
@@ -386,6 +388,7 @@ pub fn executeServerRemove(allocator: std.mem.Allocator, _: args.Options, cmd: a
         }
         var reload = try linux.systemctlAction(allocator, user, &.{ "daemon-reload" });
         defer reload.deinit(allocator);
+        if (!reload.ok()) return error.CommandFailed;
     } else {
         var uninstall = std.ArrayListUnmanaged([]const u8){};
         defer uninstall.deinit(allocator);
