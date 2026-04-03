@@ -309,7 +309,7 @@ pub fn build(b: *std.Build) void {
         "GUI terminal renderer backend: plain | ghostty-vt (dynamic/fallback)",
     ) orelse "plain";
     const build_options = b.addOptions();
-    build_options.addOption([]const u8, "app_version", "0.1.0");
+    build_options.addOption([]const u8, "app_version", "0.2.0");
     build_options.addOption([]const u8, "git_revision", git_revision);
     build_options.addOption([]const u8, "terminal_backend", terminal_backend_option);
     const build_options_module = build_options.createModule();
@@ -358,6 +358,60 @@ pub fn build(b: *std.Build) void {
     cli_module.addImport("build_options", build_options_module);
     cli_module.addImport("platform_storage", platform_storage_module);
     cli_module.addImport("control_plane", control_plane_module);
+
+    const cli_bridge_module = b.createModule(.{
+        .root_source_file = b.path("src/cli_bridge.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_bridge_module.addImport("websocket", websocket.module("websocket"));
+    cli_bridge_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    cli_bridge_module.addImport("spider-protocol", spider_protocol_module);
+    cli_bridge_module.addImport("control_plane", control_plane_module);
+    cli_bridge_module.addImport("build_options", build_options_module);
+    cli_bridge_module.addImport("platform_storage", platform_storage_module);
+    if (os_tag != .windows) {
+        cli_bridge_module.addImport("spiderweb_node", spider_node.module("spiderweb_node"));
+        cli_bridge_module.addImport("spiderweb_fs", spider_node.module("spiderweb_fs"));
+    }
+
+    const client_websocket_module = b.createModule(.{
+        .root_source_file = b.path("src/client/websocket.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    client_websocket_module.addImport("websocket", websocket.module("websocket"));
+    client_websocket_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+
+    const spider_core_module = b.createModule(.{
+        .root_source_file = b.path("src/lib/spider_core.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    spider_core_module.addImport("websocket", websocket.module("websocket"));
+    spider_core_module.addImport("ziggy-core", ziggy_core.module("ziggy-core"));
+    spider_core_module.addImport("spider-protocol", spider_protocol_module);
+    spider_core_module.addImport("control_plane", control_plane_module);
+    spider_core_module.addImport("client_websocket", client_websocket_module);
+    spider_core_module.addImport("cli_bridge", cli_bridge_module);
+    spider_core_module.addImport("build_options", build_options_module);
+    spider_core_module.addImport("platform_storage", platform_storage_module);
+    if (os_tag != .windows) {
+        spider_core_module.addImport("spiderweb_node", spider_node.module("spiderweb_node"));
+        spider_core_module.addImport("spiderweb_fs", spider_node.module("spiderweb_fs"));
+    }
+
+    const spider_core_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "spider_core",
+        .root_module = spider_core_module,
+    });
+    spider_core_lib.linkLibC();
+    b.installArtifact(spider_core_lib);
+
+    const spider_core_install = b.addInstallArtifact(spider_core_lib, .{});
+    const spider_core_step = b.step("spider-core", "Build the shared Spider core library");
+    spider_core_step.dependOn(&spider_core_install.step);
 
     const cli_exe = b.addExecutable(.{
         .name = "spider",

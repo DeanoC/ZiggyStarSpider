@@ -5,6 +5,7 @@ pub const MountView = struct {
     node_id: []u8,
     node_name: ?[]u8 = null,
     fs_url: ?[]u8 = null,
+    fs_auth_token: ?[]u8 = null,
     export_name: []u8,
 
     pub fn deinit(self: *MountView, allocator: std.mem.Allocator) void {
@@ -12,6 +13,7 @@ pub const MountView = struct {
         allocator.free(self.node_id);
         if (self.node_name) |value| allocator.free(value);
         if (self.fs_url) |value| allocator.free(value);
+        if (self.fs_auth_token) |value| allocator.free(value);
         allocator.free(self.export_name);
         self.* = undefined;
     }

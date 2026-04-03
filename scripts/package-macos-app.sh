@@ -11,18 +11,22 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 
 cd "$ROOT_DIR"
 
-if [ "$SKIP_BUILD" != "1" ]; then
+build_release_mode() {
     case "$OPTIMIZE" in
         Debug)
+            zig build install
             zig build gui
             ;;
         ReleaseSafe)
+            zig build install --release=safe
             zig build gui --release=safe
             ;;
         ReleaseFast)
+            zig build install --release=fast
             zig build gui --release=fast
             ;;
         ReleaseSmall)
+            zig build install --release=small
             zig build gui --release=small
             ;;
         *)
@@ -30,9 +34,18 @@ if [ "$SKIP_BUILD" != "1" ]; then
             exit 1
             ;;
     esac
+}
+
+if [ "$SKIP_BUILD" != "1" ]; then
+    build_release_mode
 fi
 
-BIN_PATH="$ROOT_DIR/zig-out/bin/spider-gui"
+CLI_BIN_PATH="$ROOT_DIR/zig-out/bin/spider"
+CORE_LIB_PATH="$ROOT_DIR/zig-out/lib/libspider_core.a"
+SHELL_SOURCES=(
+    "$ROOT_DIR/macos/SpiderAppShellSupport.swift"
+    "$ROOT_DIR/macos/SpiderAppShellApp.swift"
+)
 BUNDLE_DIR="$ROOT_DIR/zig-out/$APP_NAME.app"
 CONTENTS_DIR="$BUNDLE_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -42,15 +55,16 @@ ICONSET_DIR="$TMP_DIR/AppIcon.iconset"
 INFO_TEMPLATE="$ROOT_DIR/macos/Info.plist.in"
 INFO_PLIST="$CONTENTS_DIR/Info.plist"
 ZIP_PATH="$ROOT_DIR/zig-out/${APP_NAME}-macos-$(uname -m).zip"
+CLANG_RT_PATH="${CLANG_RT_PATH:-$(find /Library/Developer/CommandLineTools /Applications/Xcode.app -name 'libclang_rt.osx.a' 2>/dev/null | head -n 1)}"
 
-if [ ! -f "$BIN_PATH" ]; then
-    echo "Missing GUI binary at $BIN_PATH" >&2
-    exit 1
-fi
+[ -f "$CLI_BIN_PATH" ] || { echo "Missing CLI binary at $CLI_BIN_PATH" >&2; exit 1; }
+[ -f "$CORE_LIB_PATH" ] || { echo "Missing Spider core library at $CORE_LIB_PATH" >&2; exit 1; }
+[ -f "$CLANG_RT_PATH" ] || { echo "Missing libclang_rt.osx.a" >&2; exit 1; }
+command -v swiftc >/dev/null 2>&1 || { echo "Missing swiftc" >&2; exit 1; }
 
 APP_VERSION="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' "$ROOT_DIR/build.zig.zon" | head -n 1)"
 if [ -z "$APP_VERSION" ]; then
-    APP_VERSION="0.1.0"
+    APP_VERSION="0.2.0"
 fi
 
 BUILD_VERSION="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
@@ -58,7 +72,19 @@ BUILD_VERSION="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 rm -rf "$BUNDLE_DIR" "$TMP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$ICONSET_DIR"
 
-cp "$BIN_PATH" "$MACOS_DIR/$EXECUTABLE_NAME"
+cp "$CLI_BIN_PATH" "$RESOURCES_DIR/spider"
+chmod +x "$RESOURCES_DIR/spider"
+
+swiftc \
+    -O \
+    -framework AppKit \
+    -framework Foundation \
+    -framework Security \
+    -framework SwiftUI \
+    "$CORE_LIB_PATH" \
+    "$CLANG_RT_PATH" \
+    "${SHELL_SOURCES[@]}" \
+    -o "$MACOS_DIR/$EXECUTABLE_NAME"
 chmod +x "$MACOS_DIR/$EXECUTABLE_NAME"
 
 sed \
